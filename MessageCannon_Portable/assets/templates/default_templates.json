@@ -1,0 +1,37 @@
+[
+  {
+    "name": "Fee Reminder",
+    "category": "Education & Services",
+    "message": "Dear {name}, your fee of {amount} is due on {due_date}. Please complete your payment at your earliest convenience.",
+    "description": "Perfect for schools, coaching centers, and online tutors",
+    "is_default": true
+  },
+  {
+    "name": "Appointment Reminder",
+    "category": "Healthcare",
+    "message": "Dear {name}, this is a reminder about your appointment scheduled for {date} at {time}. Please reach 5 minutes early.",
+    "description": "Ideal for clinics, hospitals, and medical practitioners",
+    "is_default": true
+  },
+  {
+    "name": "Promotional Offer",
+    "category": "Marketing",
+    "message": "Special offer for {name}! Get 20% off on all products this week. Visit our store or call {phone} to claim.",
+    "description": "Use for promotional campaigns and special offers",
+    "is_default": true
+  },
+  {
+    "name": "Order Delivery Confirmation",
+    "category": "E-commerce",
+    "message": "Dear {name}, your order has been dispatched. Expected delivery: {date}. Track your order at [link]",
+    "description": "For online stores and delivery services",
+    "is_default": true
+  },
+  {
+    "name": "Event Notification",
+    "category": "Events",
+    "message": "Hi {name}, don't forget about our event on {date}! We look forward to seeing you. Reserve: {phone}",
+    "description": "Great for wedding halls, banquet halls, and event organizers",
+    "is_default": true
+  }
+]

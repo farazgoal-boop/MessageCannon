@@ -1,0 +1,12 @@
+customtkinter>=5.2.0
+pandas>=2.0.0
+openpyxl>=3.1.0
+pywhatkit>=5.4
+selenium>=4.15.0
+pillow>=10.0.0
+qrcode>=7.4
+reportlab>=4.0.0
+schedule>=1.2.0
+python-dotenv>=1.0.0
+requests>=2.31.0
+apscheduler>=3.10.0
