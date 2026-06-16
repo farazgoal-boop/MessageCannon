@@ -109,7 +109,12 @@ def get_yt_id(url: str) -> str:
     return m.group(1) if m else ""
 
 
-def generate_html(sections: list, meta: dict) -> str:
+def get_yt_thumbnail(vid_id: str) -> str:
+    """YouTube HQ thumbnail URL for in-app preview."""
+    return f"https://img.youtube.com/vi/{vid_id}/hqdefault.jpg"
+
+
+def generate_html(sections: list, meta: dict, for_preview: bool = False) -> str:
     """Generate complete standalone HTML card from sections + meta."""
     accent   = meta.get("accent", "#6c63ff")
     app_name = meta.get("app_name", "My App")
@@ -126,6 +131,7 @@ def generate_html(sections: list, meta: dict) -> str:
     header_bg = style.get("header_bg", "#0a1628")
     if not meta.get("accent"):
         accent = style.get("accent", accent)
+    buy_url = meta.get("buy_link", "").strip() or "#"
 
     body_parts = []
 
@@ -162,11 +168,32 @@ def generate_html(sections: list, meta: dict) -> str:
         elif stype == "youtube" and data.get("url"):
             vid = get_yt_id(data["url"])
             if vid:
-                body_parts.append(f"""
-    <div style="width:100%;aspect-ratio:16/9;background:#000">
-      <iframe width="100%" height="100%"
-        src="https://www.youtube.com/embed/{vid}?rel=0&modestbranding=1&autoplay=0"
-        frameborder="0" allowfullscreen style="display:block"></iframe>
+                if for_preview:
+                    thumb = get_yt_thumbnail(vid)
+                    body_parts.append(f"""
+    <div style="width:100%;aspect-ratio:16/9;background:#000;
+      margin-bottom:16px;position:relative;cursor:pointer"
+      onclick="window.open('https://youtube.com/watch?v={vid}','_blank')">
+      <img src="{thumb}" style="width:100%;height:100%;object-fit:cover;display:block">
+      <div style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);
+        width:60px;height:60px;background:rgba(255,0,0,0.85);border-radius:50%;
+        display:flex;align-items:center;justify-content:center">
+        <div style="width:0;height:0;border-top:12px solid transparent;
+          border-bottom:12px solid transparent;border-left:20px solid white;
+          margin-left:4px"></div>
+      </div>
+    </div>""")
+                else:
+                    body_parts.append(f"""
+    <div style="width:100%;aspect-ratio:16/9;background:#000;margin-bottom:16px">
+      <iframe
+        width="100%" height="100%"
+        src="https://www.youtube.com/embed/{vid}?rel=0&modestbranding=1"
+        frameborder="0"
+        allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
+        allowfullscreen
+        style="display:block;border:none">
+      </iframe>
     </div>""")
 
         elif stype == "text":
@@ -198,6 +225,12 @@ def generate_html(sections: list, meta: dict) -> str:
             if price:
                 old_html = f'<span style="font-size:12px;text-decoration:line-through;color:rgba(255,255,255,0.35);margin-left:8px">{old_price}</span>' if old_price else ""
                 note_html = f'<div style="font-size:11px;color:rgba(255,255,255,0.45);margin-top:3px">{note}</div>' if note else ""
+                buy_btn = (
+                    f'<a href="{buy_url}" target="_blank" '
+                    f'style="background:{accent};color:#fff;font-size:12px;font-weight:500;'
+                    f'padding:9px 20px;border-radius:20px;cursor:pointer;text-decoration:none;'
+                    f'display:inline-block">BUY NOW →</a>'
+                )
                 body_parts.append(f"""
     <div style="margin:8px 24px;background:rgba(255,255,255,0.06);
       border:0.5px solid rgba(255,255,255,0.1);border-radius:12px;
@@ -209,8 +242,7 @@ def generate_html(sections: list, meta: dict) -> str:
         </div>
         {note_html}
       </div>
-      <div style="background:{accent};color:#fff;font-size:12px;font-weight:500;
-        padding:9px 20px;border-radius:20px;cursor:pointer">BUY NOW</div>
+      {buy_btn}
     </div>""")
 
         elif stype == "links":
@@ -297,6 +329,7 @@ class CardCreatorV2(ctk.CTkFrame):
         self._contacts = []
         self._preview_job = None
         self._style_name = "Dark Premium"
+        self._buy_var = ctk.StringVar(value="")
         self._meta     = {
             "app_name": "MessageCannon Pro",
             "icon":     "📨",
@@ -721,21 +754,24 @@ class CardCreatorV2(ctk.CTkFrame):
 
         elif stype == "links":
             link_kinds = [
-                ("buy","🛒 Buy/Gumroad","https://gumroad.com/..."),
-                ("youtube","▶️ YouTube","https://youtube.com/@faraz"),
-                ("linkedin","💼 LinkedIn","https://linkedin.com/in/..."),
-                ("github","🐙 GitHub","https://github.com/farazgoal-boop"),
-                ("website","🌐 Website","https://muhammad-faraz-dev.netlify.app"),
+                ("buy", "🛒 Buy / Gumroad Link", "https://gumroad.com/l/your-product"),
+                ("youtube", "▶️ YouTube", "https://youtube.com/@faraz"),
+                ("linkedin", "💼 LinkedIn", "https://linkedin.com/in/..."),
+                ("github", "🐙 GitHub", "https://github.com/farazgoal-boop"),
+                ("website", "🌐 Website", "https://muhammad-faraz-dev.netlify.app"),
             ]
             link_vars = []
             for kind, lbl_txt, ph in link_kinds:
-                ctk.CTkLabel(body,text=lbl_txt,text_color="#8ea5af",
+                ctk.CTkLabel(body, text=lbl_txt, text_color="#8ea5af",
                              font=ctk.CTkFont(size=10)).pack(anchor="w")
                 v2 = ctk.StringVar()
-                ctk.CTkEntry(body,textvariable=v2,placeholder_text=ph,
-                             fg_color="#0c131b",border_color="#173041").pack(
-                    fill="x",pady=(2,4))
-                link_vars.append((kind, lbl_txt.split(" ",1)[1], v2))
+                ctk.CTkEntry(body, textvariable=v2, placeholder_text=ph,
+                             fg_color="#0c131b", border_color="#173041").pack(
+                    fill="x", pady=(2, 4))
+                v2.trace_add("write", lambda *_: self._schedule_preview())
+                if kind == "buy":
+                    self._buy_var = v2
+                link_vars.append((kind, lbl_txt.split(" ", 1)[-1] if " " in lbl_txt else lbl_txt, v2))
             data["_link_vars"] = link_vars
 
         elif stype == "contact":
@@ -831,18 +867,42 @@ class CardCreatorV2(ctk.CTkFrame):
         self._accent = style.get("accent", self._accent)
         self._schedule_preview()
 
+    def _collect_buy_link(self) -> str:
+        """Resolve Gumroad/buy URL from links section."""
+        if hasattr(self, "_buy_var"):
+            url = self._buy_var.get().strip()
+            if url:
+                return url
+        for sec in self._sections:
+            if sec.get("type") != "links":
+                continue
+            for kind, _label, var in sec["data"].get("_link_vars", []):
+                if kind == "buy":
+                    url = var.get().strip()
+                    if url:
+                        return url
+        return ""
+
     def _collect_meta(self) -> dict:
         return {
             "app_name": self._mname.get().strip(),
             "icon":     self._micon.get().strip() or "⭐",
             "tagline":  self._mtag.get().strip(),
             "accent":   self._accent,
-            "org":      self._meta.get("org","Faraz Automation"),
-            "wa":       self._meta.get("wa","+92 316 2400657"),
-            "email":    self._meta.get("email","farazgoal@gmail.com"),
-            "addr":     self._meta.get("addr","Karachi, Pakistan"),
+            "org":      self._meta.get("org", "Faraz Automation"),
+            "wa":       self._meta.get("wa", "+92 316 2400657"),
+            "email":    self._meta.get("email", "farazgoal@gmail.com"),
+            "addr":     self._meta.get("addr", "Karachi, Pakistan"),
             "style":    CARD_STYLE_TEMPLATES.get(self._style_name, CARD_STYLE_TEMPLATES["Dark Premium"]),
+            "buy_link": self._collect_buy_link(),
         }
+
+    def _get_export_html(self) -> str:
+        """Full HTML for browser export, save, and bulk send (real iframes)."""
+        secs = self._collect_sections()
+        meta = self._collect_meta()
+        meta["accent"] = self._accent
+        return generate_html(secs, meta, for_preview=False)
 
     # ─── Generate ─────────────────────────────────────────────────────────────
 
@@ -875,22 +935,22 @@ class CardCreatorV2(ctk.CTkFrame):
             secs = self._collect_sections()
             meta = self._collect_meta()
             meta["accent"] = self._accent
-            html = generate_html(secs, meta)
-            self._html = html
+            preview_html = generate_html(secs, meta, for_preview=True)
+            self._html = self._get_export_html()
             if self._ensure_html_frame():
-                self._html_frame.load_html(html)
+                self._html_frame.load_html(preview_html)
                 self._preview_fallback.pack_forget()
-            self._status.set(f"✅ Live preview · {len(secs)} sections · {len(html)} chars")
+            self._status.set(f"✅ Live preview · {len(secs)} sections · {len(self._html)} chars")
         except Exception as exc:
             logger.exception("Preview update failed")
             self._status.set(f"Preview error: {exc}")
 
     def _generate(self):
+        self._html = self._get_export_html()
         self._update_live_preview()
 
     def _open_browser(self):
-        if not self._html:
-            self._generate()
+        self._html = self._get_export_html()
         tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".html",
                                           mode="w", encoding="utf-8")
         tmp.write(self._html)
@@ -898,8 +958,7 @@ class CardCreatorV2(ctk.CTkFrame):
         webbrowser.open(f"file://{tmp.name}")
 
     def _save_html(self):
-        if not self._html:
-            self._generate()
+        self._html = self._get_export_html()
         name = self._mname.get().strip().replace(" ","_") or "card"
         path = filedialog.asksaveasfilename(
             defaultextension=".html",
