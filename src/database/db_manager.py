@@ -773,6 +773,62 @@ class DatabaseManager:
                 "delivery_rate": 0.0,
                 "total_count": 0,
             }
+
+    def get_message_stats_for_period(self, period: str = "today") -> Dict[str, Any]:
+        """Return sent/read/failed counts filtered by period (today, week, month, all)."""
+        clauses = {
+            "today": "date(created_at) = date('now', 'localtime')",
+            "week": "created_at >= datetime('now', '-7 days', 'localtime')",
+            "month": "created_at >= datetime('now', '-30 days', 'localtime')",
+            "all": "1=1",
+        }
+        where = clauses.get(period, clauses["today"])
+        try:
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    f"""
+                    SELECT
+                        SUM(CASE WHEN status IN ('sent', 'delivered', 'read') THEN 1 ELSE 0 END) AS sent_count,
+                        SUM(CASE WHEN status = 'read' THEN 1 ELSE 0 END) AS read_count,
+                        SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) AS failed_count,
+                        COUNT(*) AS total_count
+                    FROM messages
+                    WHERE {where}
+                    """
+                )
+                row = cursor.fetchone()
+                total = int(row["total_count"] or 0)
+                sent = int(row["sent_count"] or 0)
+                return {
+                    "sent_count": sent,
+                    "read_count": int(row["read_count"] or 0),
+                    "failed_count": int(row["failed_count"] or 0),
+                    "total_count": total,
+                    "success_rate": round((sent / total) * 100, 1) if total else 0.0,
+                }
+        except Exception as exc:
+            Logger.error(f"Period stats error: {exc}")
+            return {"sent_count": 0, "read_count": 0, "failed_count": 0, "total_count": 0, "success_rate": 0.0}
+
+    def get_recent_campaigns_summary(self, limit: int = 5) -> List[Dict[str, Any]]:
+        """Return recent campaigns with name, date, sent count."""
+        try:
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    """
+                    SELECT id, name, sent_count, failed_count, created_at
+                    FROM campaigns
+                    ORDER BY created_at DESC
+                    LIMIT ?
+                    """,
+                    (limit,),
+                )
+                return [dict(row) for row in cursor.fetchall()]
+        except Exception as exc:
+            Logger.error(f"Campaign summary error: {exc}")
+            return []
     
     # Template Operations
     def add_template(self, template: Template) -> Optional[int]:

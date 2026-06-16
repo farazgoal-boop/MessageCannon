@@ -23,100 +23,69 @@ class ContactManager:
     
     def import_from_file(self, file_path: str) -> Tuple[int, List[str]]:
         """
-        Import contacts from Excel or CSV file.
-        
+        Import contacts from CSV, Excel, HTML, JSON, or VCF files.
+
         Args:
-            file_path: Path to Excel or CSV file
-            
+            file_path: Path to import file
+
         Returns:
             Tuple of (count_imported, list_of_errors)
         """
         try:
-            file_path = Path(file_path)
-            
-            if not file_path.exists():
-                return 0, [f"File not found: {file_path}"]
-            
-            # Read file based on extension
-            if file_path.suffix.lower() in ['.xlsx', '.xls']:
-                df = pd.read_excel(file_path)
-            elif file_path.suffix.lower() == '.csv':
-                df = pd.read_csv(file_path)
-            else:
-                return 0, [f"Unsupported file format: {file_path.suffix}"]
-            
-            # Validate headers (must contain at least phone or email)
-            headers_lower = [str(h).lower().strip() for h in df.columns]
-            if 'phone' not in headers_lower and 'email' not in headers_lower:
-                return 0, ["The import file must contain either a 'phone' or 'email' column."]
-            
-            # Process rows
-            contacts = []
-            errors = []
-            
-            for idx, row in df.iterrows():
-                phone_raw = str(row.get('phone', '')).strip() if 'phone' in df.columns else ""
-                email_raw = str(row.get('email', '')).strip() if 'email' in df.columns else ""
-                name = str(row.get('name', '')).strip() if 'name' in df.columns else ""
-                
-                # Clean nan or empty values from pandas
-                if pd.isna(row.get('phone')) or phone_raw.lower() in ['nan', 'none', 'null', '']:
-                    phone_raw = ""
-                if pd.isna(row.get('email')) or email_raw.lower() in ['nan', 'none', 'null', '']:
-                    email_raw = ""
-                if pd.isna(row.get('name')) or name.lower() in ['nan', 'none', 'null', '']:
-                    name = ""
+            from ..modules.data_importer import UniversalDataImporter
 
-                if not phone_raw and not email_raw:
-                    errors.append(f"Row {idx + 2}: Both phone and email are empty")
-                    continue
+            result = UniversalDataImporter().import_file(file_path)
+            if result.errors and not result.contacts:
+                return 0, result.errors
+
+            contacts: List[Contact] = []
+            errors = list(result.errors)
+
+            for row in result.contacts:
+                phone_raw = row.get("phone", "")
+                email_raw = row.get("email", "")
+                name = row.get("name", "")
 
                 normalized_phone = ""
                 if phone_raw:
-                    n_phone, phone_error = self.phone_validator.normalize_phone(phone_raw)
-                    if n_phone is None:
-                        # If there is no email to fall back on, fail the row
-                        if not email_raw:
-                            errors.append(f"Row {idx + 2}: {phone_error}")
-                            continue
-                        else:
-                            Logger.warning(f"Row {idx + 2}: Invalid phone '{phone_raw}', importing with email only")
-                    else:
-                        normalized_phone = n_phone
+                    normalized_phone, phone_error = self.phone_validator.normalize_phone(phone_raw)
+                    if normalized_phone is None and not email_raw:
+                        errors.append(f"{name or phone_raw}: {phone_error}")
+                        continue
+                    normalized_phone = normalized_phone or ""
 
-                normalized_email = ""
-                if email_raw:
-                    if not DataValidator.is_valid_email(email_raw):
-                        if not normalized_phone:
-                            errors.append(f"Row {idx + 2}: Invalid email format '{email_raw}'")
-                            continue
-                        else:
-                            Logger.warning(f"Row {idx + 2}: Invalid email '{email_raw}', importing with phone only")
-                    else:
-                        normalized_email = email_raw
+                if email_raw and not DataValidator.is_valid_email(email_raw):
+                    if not normalized_phone:
+                        errors.append(f"{name or email_raw}: Invalid email")
+                        continue
+                    email_raw = ""
 
-                # Create contact
-                contact = Contact(
-                    phone=normalized_phone,
-                    email=normalized_email,
-                    name=name or f"Contact {idx + 1}",
-                    custom_fields={str(k): v for k, v in row.to_dict().items() 
-                                   if str(k).lower() not in ['phone', 'email', 'name'] and not pd.isna(v)}
+                custom_fields = {
+                    key[7:]: value
+                    for key, value in row.items()
+                    if key.startswith("custom_") and value
+                }
+
+                contacts.append(
+                    Contact(
+                        phone=normalized_phone or None,
+                        email=email_raw or None,
+                        name=name or None,
+                        custom_fields=custom_fields or None,
+                    )
                 )
-                
-                contacts.append(contact)
-            
-            # Batch add to database
-            count = self.db.add_contacts_batch(contacts)
-            
-            Logger.info(f"Imported {count} contacts from {file_path}")
-            
-            return count, errors
-        
-        except Exception as e:
-            Logger.error(f"Error importing contacts: {e}")
-            return 0, [str(e)]
-    
+
+            if not contacts:
+                return 0, errors or ["No valid contacts found in file."]
+
+            saved = self.db.add_contacts_batch(contacts)
+            Logger.info(f"Imported {saved} contacts from {file_path}")
+            return saved, errors
+
+        except Exception as exc:
+            Logger.error(f"Import failed: {exc}")
+            return 0, [str(exc)]
+
     def get_all_contacts(self) -> List[Contact]:
         """
         Get all contacts.

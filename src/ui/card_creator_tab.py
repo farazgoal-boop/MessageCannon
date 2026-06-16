@@ -1,25 +1,32 @@
 """
 MessageCannon Pro — Card Creator V2
-Complete in-app card builder with:
-- Live HTML preview inside app (using tkinter HTMLLabel / webview fallback)
-- Drag-drop sections: Banner, Video, Text, Links, Features, Price
-- Bulk send via WhatsApp + Email directly
-- Read/Unread tracking per contact
-- Daily summary view
+Complete in-app card builder with live HTML preview, section management,
+bulk send via WhatsApp + Email, and read/unread tracking.
 """
 
+import logging
 import tkinter as tk
 from tkinter import filedialog, messagebox, colorchooser
 import customtkinter as ctk
 import threading
 import webbrowser
 import re
-import os
 import json
 import tempfile
 import time
 from pathlib import Path
 from datetime import datetime, date
+
+from ..modules.data_importer import UniversalDataImporter
+
+logger = logging.getLogger(__name__)
+
+try:
+    from tkinterweb import HtmlFrame
+    HAS_HTML_PREVIEW = True
+except ImportError:
+    HAS_HTML_PREVIEW = False
+    logger.warning("tkinterweb not installed — card preview falls back to browser only")
 
 
 # ── Section types available in card builder ───────────────────────────────────
@@ -69,6 +76,33 @@ ACCENT_COLORS = [
     "#f39c12","#e74c3c","#27ae60","#8e44ad","#2c3e50",
 ]
 
+CARD_STYLE_TEMPLATES = {
+    "Dark Premium": {
+        "bg": "#1a1a2e", "body_bg": "#111827", "text": "rgba(255,255,255,0.85)",
+        "accent": "#6c63ff", "header_bg": "#0a1628",
+    },
+    "Light Minimal": {
+        "bg": "#ffffff", "body_bg": "#f5f7fa", "text": "#333333",
+        "accent": "#2563eb", "header_bg": "#ffffff",
+    },
+    "Gradient Bold": {
+        "bg": "#1a1a2e", "body_bg": "linear-gradient(135deg,#667eea,#764ba2)",
+        "text": "#ffffff", "accent": "#f39c12", "header_bg": "#667eea",
+    },
+    "Corporate Blue": {
+        "bg": "#ffffff", "body_bg": "#eef2f7", "text": "#1e3a5f",
+        "accent": "#1e3a5f", "header_bg": "#1e3a5f",
+    },
+    "Green Tech": {
+        "bg": "#0d1f17", "body_bg": "#122820", "text": "#d1fae5",
+        "accent": "#10b981", "header_bg": "#064e3b",
+    },
+    "Red Urgent": {
+        "bg": "#1a0a0a", "body_bg": "#2d1212", "text": "#fecaca",
+        "accent": "#ef4444", "header_bg": "#7f1d1d",
+    },
+}
+
 
 def get_yt_id(url: str) -> str:
     m = re.search(r"(?:v=|youtu\.be/|embed/)([a-zA-Z0-9_-]{11})", url)
@@ -85,12 +119,19 @@ def generate_html(sections: list, meta: dict) -> str:
     wa       = meta.get("wa", "+92 316 2400657")
     email    = meta.get("email", "farazgoal@gmail.com")
     addr     = meta.get("addr", "Karachi, Pakistan")
+    style    = meta.get("style", CARD_STYLE_TEMPLATES["Dark Premium"])
+    card_bg  = style.get("bg", "#1a1a2e")
+    body_bg  = style.get("body_bg", "#111827")
+    text_col = style.get("text", "rgba(255,255,255,0.85)")
+    header_bg = style.get("header_bg", "#0a1628")
+    if not meta.get("accent"):
+        accent = style.get("accent", accent)
 
     body_parts = []
 
     # Always start with branded header
     body_parts.append(f"""
-    <div style="background:#0a1628;padding:20px 24px 0">
+    <div style="background:{header_bg};padding:20px 24px 0">
       <div style="height:3px;background:linear-gradient(90deg,{accent},{accent}88,{accent});
         margin:-20px -24px 20px;border-radius:20px 20px 0 0"></div>
       <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px">
@@ -136,7 +177,7 @@ def generate_html(sections: list, meta: dict) -> str:
             fw = "500" if size == "heading" else "400"
             body_parts.append(f"""
     <div style="padding:16px 24px">
-      <div style="font-size:{fs};font-weight:{fw};color:rgba(255,255,255,0.85);
+      <div style="font-size:{fs};font-weight:{fw};color:{text_col};
         line-height:1.65;text-align:{align}">{content}</div>
     </div>""")
 
@@ -219,10 +260,10 @@ def generate_html(sections: list, meta: dict) -> str:
 <title>{app_name} — {org}</title>
 <style>
   *{{box-sizing:border-box;margin:0;padding:0}}
-  body{{background:#111827;font-family:Arial,Helvetica,sans-serif;
+  body{{background:{body_bg};font-family:Arial,Helvetica,sans-serif;
     min-height:100vh;display:flex;align-items:flex-start;
     justify-content:center;padding:20px}}
-  .card{{width:100%;max-width:520px;background:#1a1a2e;
+  .card{{width:100%;max-width:520px;background:{card_bg};
     border-radius:20px;overflow:hidden;
     border:0.5px solid rgba(255,255,255,0.08);
     box-shadow:0 20px 60px rgba(0,0,0,0.5)}}
@@ -254,6 +295,8 @@ class CardCreatorV2(ctk.CTkFrame):
         self._sections = []   # list of {"type":str, "data":dict, "frame":widget}
         self._html     = ""
         self._contacts = []
+        self._preview_job = None
+        self._style_name = "Dark Premium"
         self._meta     = {
             "app_name": "MessageCannon Pro",
             "icon":     "📨",
@@ -267,6 +310,7 @@ class CardCreatorV2(ctk.CTkFrame):
         self._build_ui()
         # Load default sections
         self._load_preset("MessageCannon Pro")
+        self.after(800, self._schedule_preview)
 
     # ─── Main layout ──────────────────────────────────────────────────────────
 
@@ -335,6 +379,7 @@ class CardCreatorV2(ctk.CTkFrame):
                          fg_color="#0c131b", border_color="#173041",
                          font=ctk.CTkFont(size=11)).grid(
                 row=1,column=i,sticky="ew",padx=2)
+            var.trace_add("write", lambda *_: self._schedule_preview())
 
         # Accent colors
         cf = ctk.CTkFrame(top, fg_color="transparent")
@@ -349,6 +394,18 @@ class CardCreatorV2(ctk.CTkFrame):
                       fg_color="#1d3545", hover_color="#203243",
                       font=ctk.CTkFont(size=10),
                       command=self._custom_color).grid(row=0,column=len(ACCENT_COLORS)+1,padx=(6,0))
+
+        tf = ctk.CTkFrame(top, fg_color="transparent")
+        tf.grid(row=4, column=0, padx=16, pady=(0, 12), sticky="ew")
+        ctk.CTkLabel(tf, text="Card Template:", text_color="#8ea5af",
+                     font=ctk.CTkFont(size=10)).grid(row=0, column=0, padx=(0, 8))
+        self._template_var = ctk.StringVar(value="Dark Premium")
+        ctk.CTkOptionMenu(
+            tf, values=list(CARD_STYLE_TEMPLATES.keys()),
+            variable=self._template_var, command=self._apply_card_template,
+            fg_color="#173245", button_color="#1d3545",
+            width=180, font=ctk.CTkFont(size=11),
+        ).grid(row=0, column=1, sticky="w")
 
         # ── Middle: sections list ─────────────────────────────────────────────
         mid = ctk.CTkFrame(left, fg_color="transparent")
@@ -424,17 +481,41 @@ class CardCreatorV2(ctk.CTkFrame):
                              border_width=1, border_color="#173041")
         prev.grid(row=0, column=0, sticky="nsew", pady=(0,8))
         prev.grid_columnconfigure(0, weight=1)
-        prev.grid_rowconfigure(1, weight=1)
+        prev.grid_columnconfigure(1, weight=0)
 
-        ctk.CTkLabel(prev, text="👁  Card Preview (HTML)",
+        ctk.CTkLabel(prev, text="👁  Live Card Preview",
                      font=ctk.CTkFont(size=12, weight="bold")).grid(
-            row=0, column=0, padx=14, pady=(12,6), sticky="w")
+            row=0, column=0, padx=14, pady=(12, 6), sticky="w")
 
-        self._preview_box = ctk.CTkTextbox(
-            prev, fg_color="#0c131b",
-            font=ctk.CTkFont(family="Courier New", size=9),
-            wrap="none", state="disabled")
-        self._preview_box.grid(row=1, column=0, padx=12, pady=(0,12), sticky="nsew")
+        toolbar = ctk.CTkFrame(prev, fg_color="transparent")
+        toolbar.grid(row=0, column=1, padx=14, pady=(12, 6), sticky="e")
+        ctk.CTkButton(
+            toolbar, text="⛶ Full Screen", width=110, height=28,
+            fg_color="#1d3545", hover_color="#203243",
+            font=ctk.CTkFont(size=10),
+            command=self._open_browser,
+        ).pack(side="left", padx=(0, 6))
+        ctk.CTkButton(
+            toolbar, text="↻ Refresh", width=80, height=28,
+            fg_color="#1d3545", hover_color="#203243",
+            font=ctk.CTkFont(size=10),
+            command=self._update_live_preview,
+        ).pack(side="left")
+
+        preview_host = tk.Frame(prev, bg="#0c131b", highlightthickness=0)
+        preview_host.grid(row=1, column=0, columnspan=2, padx=12, pady=(0, 12), sticky="nsew")
+
+        self._preview_host = preview_host
+        self._html_frame = None
+        self._preview_fallback = ctk.CTkLabel(
+            preview_host,
+            text="Card preview loads when you edit sections.\nClick Full Screen to open in browser.",
+            text_color="#8ea5af",
+            font=ctk.CTkFont(size=11),
+        )
+        self._preview_fallback.pack(fill="both", expand=True, padx=20, pady=40)
+
+        prev.grid_rowconfigure(1, weight=1)
 
         # Stats / Read-Unread panel
         stats = ctk.CTkFrame(right, fg_color="#101a24", corner_radius=16,
@@ -494,32 +575,68 @@ class CardCreatorV2(ctk.CTkFrame):
 
     def _add_section(self, stype: str):
         idx = len(self._sections)
-        data = {}
+        data: dict = {}
+        visible_var = ctk.BooleanVar(value=True)
 
         card = ctk.CTkFrame(self._sections_scroll, fg_color="#101a24",
                              corner_radius=12, border_width=1, border_color="#173041")
-        card.grid(row=self._sec_row, column=0, sticky="ew", pady=(0,6), padx=2)
+        card.grid(row=self._sec_row, column=0, sticky="ew", pady=(0, 6), padx=2)
         card.grid_columnconfigure(0, weight=1)
         self._sec_row += 1
 
-        # Section header
+        label = next((lbl for lbl, t in SECTION_TYPES if t == stype), stype)
+        section_num = idx + 1
+
         hdr = ctk.CTkFrame(card, fg_color="transparent")
-        hdr.grid(row=0, column=0, sticky="ew", padx=12, pady=(10,4))
-        hdr.grid_columnconfigure(0, weight=1)
+        hdr.grid(row=0, column=0, sticky="ew", padx=12, pady=(10, 4))
+        hdr.grid_columnconfigure(1, weight=1)
 
-        label = next((l for l,t in SECTION_TYPES if t==stype), stype)
-        ctk.CTkLabel(hdr, text=label,
-                     font=ctk.CTkFont(size=12, weight="bold")).grid(
-            row=0, column=0, sticky="w")
-        ctk.CTkButton(hdr, text="✕ Remove", width=80,
-                      fg_color="#5f2d33", hover_color="#7d3037",
-                      font=ctk.CTkFont(size=10),
-                      command=lambda c=card, i=idx: self._remove_section(c, i)).grid(
-            row=0, column=1)
+        ctk.CTkLabel(hdr, text="↕", text_color="#6faed2",
+                     font=ctk.CTkFont(size=14)).grid(row=0, column=0, padx=(0, 8))
+        title_lbl = ctk.CTkLabel(
+            hdr,
+            text=f"Section {section_num}: {label}",
+            font=ctk.CTkFont(size=12, weight="bold"),
+        )
+        title_lbl.grid(row=0, column=1, sticky="w")
 
-        # Section-specific fields
+        ctrl = ctk.CTkFrame(hdr, fg_color="transparent")
+        ctrl.grid(row=0, column=2, sticky="e")
+
+        def toggle_visible():
+            if visible_var.get():
+                body.grid()
+            else:
+                body.grid_remove()
+            self._schedule_preview()
+
+        ctk.CTkCheckBox(
+            ctrl, text="Show", variable=visible_var, width=70,
+            command=toggle_visible,
+            font=ctk.CTkFont(size=10),
+        ).pack(side="left", padx=(0, 4))
+
+        ctk.CTkButton(
+            ctrl, text="↑", width=28, height=24,
+            fg_color="#1d3545", hover_color="#6c63ff",
+            font=ctk.CTkFont(size=11),
+            command=lambda c=card: self._move_section(c, -1),
+        ).pack(side="left", padx=2)
+        ctk.CTkButton(
+            ctrl, text="↓", width=28, height=24,
+            fg_color="#1d3545", hover_color="#6c63ff",
+            font=ctk.CTkFont(size=11),
+            command=lambda c=card: self._move_section(c, 1),
+        ).pack(side="left", padx=2)
+        ctk.CTkButton(
+            ctrl, text="✕", width=28, height=24,
+            fg_color="#5f2d33", hover_color="#7d3037",
+            font=ctk.CTkFont(size=10),
+            command=lambda c=card: self._remove_section(c),
+        ).pack(side="left", padx=(4, 0))
+
         body = ctk.CTkFrame(card, fg_color="transparent")
-        body.grid(row=1, column=0, sticky="ew", padx=12, pady=(0,10))
+        body.grid(row=1, column=0, sticky="ew", padx=12, pady=(0, 10))
         body.grid_columnconfigure(0, weight=1)
 
         def lbl(text): 
@@ -536,12 +653,16 @@ class CardCreatorV2(ctk.CTkFrame):
             t.pack(fill="x", pady=(2,6))
             return t
 
-        sec_entry = {"type": stype, "data": data, "frame": card}
+        sec_entry = {
+            "type": stype, "data": data, "frame": card,
+            "body": body, "visible_var": visible_var, "title_label": title_lbl,
+        }
 
         if stype == "banner":
             v = ctk.StringVar()
             lbl("Image URL (paste any image link)")
             entry(v, "https://example.com/banner.jpg")
+            v.trace_add("write", lambda *_: self._schedule_preview())
             data["_url_var"] = v
 
         elif stype == "youtube":
@@ -624,10 +745,44 @@ class CardCreatorV2(ctk.CTkFrame):
                          font=ctk.CTkFont(size=10)).pack(anchor="w",pady=4)
 
         self._sections.append(sec_entry)
+        self._renumber_sections()
+        self._schedule_preview()
 
-    def _remove_section(self, card_widget, idx):
+    def _renumber_sections(self) -> None:
+        """Refresh section number labels after reorder."""
+        for index, sec in enumerate(self._sections):
+            if not sec["frame"].winfo_exists():
+                continue
+            label = next((lbl for lbl, t in SECTION_TYPES if t == sec["type"]), sec["type"])
+            title = sec.get("title_label")
+            if title and title.winfo_exists():
+                title.configure(text=f"Section {index + 1}: {label}")
+
+    def _move_section(self, card_widget, direction: int) -> None:
+        """Move a section up (-1) or down (+1) in the list."""
+        indices = [i for i, s in enumerate(self._sections) if s["frame"] == card_widget]
+        if not indices:
+            return
+        index = indices[0]
+        new_index = index + direction
+        if new_index < 0 or new_index >= len(self._sections):
+            return
+        self._sections[index], self._sections[new_index] = (
+            self._sections[new_index], self._sections[index],
+        )
+        for row, sec in enumerate(self._sections):
+            if sec["frame"].winfo_exists():
+                sec["frame"].grid(row=row, column=0, sticky="ew", pady=(0, 6), padx=2)
+        self._sec_row = len(self._sections)
+        self._renumber_sections()
+        self._schedule_preview()
+
+    def _remove_section(self, card_widget) -> None:
         card_widget.destroy()
         self._sections = [s for s in self._sections if s["frame"] != card_widget]
+        self._sec_row = len(self._sections)
+        self._renumber_sections()
+        self._schedule_preview()
 
     # ─── Collect data from sections ───────────────────────────────────────────
 
@@ -635,6 +790,8 @@ class CardCreatorV2(ctk.CTkFrame):
         result = []
         for sec in self._sections:
             if not sec["frame"].winfo_exists():
+                continue
+            if not sec.get("visible_var", ctk.BooleanVar(value=True)).get():
                 continue
             stype = sec["type"]
             data  = sec["data"]
@@ -667,6 +824,13 @@ class CardCreatorV2(ctk.CTkFrame):
             result.append({"type": stype, "data": d})
         return result
 
+    def _apply_card_template(self, name: str) -> None:
+        """Apply a built-in visual card template."""
+        self._style_name = name
+        style = CARD_STYLE_TEMPLATES.get(name, CARD_STYLE_TEMPLATES["Dark Premium"])
+        self._accent = style.get("accent", self._accent)
+        self._schedule_preview()
+
     def _collect_meta(self) -> dict:
         return {
             "app_name": self._mname.get().strip(),
@@ -677,22 +841,52 @@ class CardCreatorV2(ctk.CTkFrame):
             "wa":       self._meta.get("wa","+92 316 2400657"),
             "email":    self._meta.get("email","farazgoal@gmail.com"),
             "addr":     self._meta.get("addr","Karachi, Pakistan"),
+            "style":    CARD_STYLE_TEMPLATES.get(self._style_name, CARD_STYLE_TEMPLATES["Dark Premium"]),
         }
 
     # ─── Generate ─────────────────────────────────────────────────────────────
 
+    def _ensure_html_frame(self) -> bool:
+        """Lazily create HtmlFrame on first preview (avoids startup crashes)."""
+        if self._html_frame is not None:
+            return True
+        if not HAS_HTML_PREVIEW:
+            return False
+        try:
+            self._preview_fallback.pack_forget()
+            self._html_frame = HtmlFrame(self._preview_host, messages_enabled=False)
+            self._html_frame.pack(fill="both", expand=True)
+            return True
+        except Exception as exc:
+            logger.warning("HtmlFrame init failed: %s", exc)
+            self._html_frame = None
+            return False
+
+    def _schedule_preview(self) -> None:
+        """Debounced live preview update (500 ms)."""
+        if self._preview_job is not None:
+            self.after_cancel(self._preview_job)
+        self._preview_job = self.after(500, self._update_live_preview)
+
+    def _update_live_preview(self) -> None:
+        """Render card HTML into embedded browser widget."""
+        self._preview_job = None
+        try:
+            secs = self._collect_sections()
+            meta = self._collect_meta()
+            meta["accent"] = self._accent
+            html = generate_html(secs, meta)
+            self._html = html
+            if self._ensure_html_frame():
+                self._html_frame.load_html(html)
+                self._preview_fallback.pack_forget()
+            self._status.set(f"✅ Live preview · {len(secs)} sections · {len(html)} chars")
+        except Exception as exc:
+            logger.exception("Preview update failed")
+            self._status.set(f"Preview error: {exc}")
+
     def _generate(self):
-        secs = self._collect_sections()
-        meta = self._collect_meta()
-        meta["accent"] = self._accent
-        html = generate_html(secs, meta)
-        self._html = html
-        # Show in preview
-        self._preview_box.configure(state="normal")
-        self._preview_box.delete("1.0","end")
-        self._preview_box.insert("1.0", html[:4000]+("\n...(truncated)" if len(html)>4000 else ""))
-        self._preview_box.configure(state="disabled")
-        self._status.set(f"✅ Card generated! {len(secs)} sections · {len(html)} chars")
+        self._update_live_preview()
 
     def _open_browser(self):
         if not self._html:
@@ -751,11 +945,9 @@ class CardCreatorV2(ctk.CTkFrame):
                 title="Import Contacts",
                 filetypes=[("All","*.csv *.xls *.xlsx *.html *.htm"),
                            ("CSV","*.csv"),("Excel","*.xls *.xlsx")])
-            if not path: return
+            if not path:
+                return
             try:
-                import sys as _sys
-                _sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-                from modules.data_importer import UniversalDataImporter
                 result = UniversalDataImporter().import_file(path)
                 self._contacts = result.contacts
                 count_var.set(f"✅ {result.total} contacts loaded")
@@ -958,7 +1150,8 @@ class CardCreatorV2(ctk.CTkFrame):
                 sec["data"].get("_price",ctk.StringVar()).set(preset.get("price",""))
                 sec["data"].get("_old",  ctk.StringVar()).set(preset.get("old_price",""))
                 sec["data"].get("_note", ctk.StringVar()).set(preset.get("price_note",""))
-        self._status.set(f"Loaded: {name} — click Generate to preview!")
+        self._status.set(f"Loaded: {name} — preview updating…")
+        self._schedule_preview()
 
 
 # ── Integration helper ────────────────────────────────────────────────────────

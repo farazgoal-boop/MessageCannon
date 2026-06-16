@@ -1,7 +1,8 @@
 # MessageCannon Pro - Requirements
 # Run: pip install -r requirements.txt
 
-# ── Core (existing) ───────────────────────────────────────────────────────────
+# Core
+customtkinter>=5.2.0
 selenium>=4.15.0
 webdriver-manager>=4.0.0
 pandas>=2.1.0
@@ -9,7 +10,9 @@ Pillow>=10.0.0
 reportlab>=4.0.0
 schedule>=1.2.0
 cryptography>=41.0.0
+matplotlib>=3.7.0
 
-# ── New additions for Pro features ───────────────────────────────────────────
-openpyxl>=3.1.2          # Excel read/write (.xlsx)
-xlrd>=2.0.1              # Legacy Excel read (.xls)
+# Pro features
+openpyxl>=3.1.2
+xlrd>=2.0.1
+tkinterweb>=3.0

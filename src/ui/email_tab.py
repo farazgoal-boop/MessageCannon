@@ -11,11 +11,11 @@ import os
 from pathlib import Path
 
 # ── Import our new modules ────────────────────────────────────────────────────
-from modules.email_sender import (
+from src.modules.email_sender import (
     BulkEmailSender, SMTPConfig, EmailCampaign,
     SMTP_PRESETS, get_template_names, get_template
 )
-from modules.data_importer import UniversalDataImporter
+from src.modules.data_importer import UniversalDataImporter
 
 
 class EmailTab(ttk.Frame):

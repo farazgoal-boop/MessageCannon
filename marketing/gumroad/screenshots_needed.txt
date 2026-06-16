@@ -1,0 +1,21 @@
+MessageCannon Pro — Gumroad Screenshot Checklist
+================================================
+
+1. Dashboard — KPI cards (Sent Today, Delivery Rate, Session, License)
+2. Contacts — Import dialog + contact directory with search
+3. Compose — Message editor with template + preview panel
+4. WhatsApp send progress — Progress bar mid-campaign
+5. Email tab — SMTP settings + HTML body editor
+6. Card Creator — Live preview with Dark Premium template
+7. Card Creator — Template selector showing all 6 themes
+8. Reports — Stats strip + delivery rate progress bar
+9. Reports — Read vs Unread pie chart
+10. Settings — Theme toggle + delay slider + license activation
+11. Import preview — CSV/Excel import stats dialog
+12. Campaign Manager — Past campaigns list
+13. Splash screen — Branded loading screen with pigeon icon
+14. License gate — Activation dialog on first run
+15. Hero banner — Full app window showing sidebar + main view
+
+Recommended size: 1920×1080 or 1280×800 PNG
+Use dark theme for consistency with product branding.

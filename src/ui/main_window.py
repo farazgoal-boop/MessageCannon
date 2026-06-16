@@ -19,6 +19,7 @@ from email.mime.text import MIMEText
 import customtkinter as ctk
 from PIL import Image
 from ..ui.card_creator_tab import build_card_creator_view
+from ..ui.campaigns_tab import build_campaigns_view
 
 
 def _ensure_tcl_tk_paths() -> None:
@@ -275,7 +276,10 @@ class MainWindow(ctk.CTk):
         self.header_context_var = StringVar(value="Persistent WhatsApp sessions, delivery analytics, and safer campaigns.")
         self.header_badge_var = StringVar(value="Enterprise Messaging Suite")
         self.activity_summary_var = StringVar(value="Awaiting campaign activity")
+        self.report_period_var = StringVar(value="today")
         self.report_export_status_var = StringVar(value="CSV export ready")
+        self.dashboard_week_var = StringVar(value="0")
+        self.dashboard_month_var = StringVar(value="0")
 
         self.title(f"{APP_NAME} v{APP_VERSION}")
         self.geometry(f"{WINDOW_WIDTH}x{WINDOW_HEIGHT}")
@@ -431,6 +435,7 @@ class MainWindow(ctk.CTk):
             ("Dashboard", "DB   Dashboard"),
             ("Contacts", "CT   Contacts"),
             ("Compose", "CP   Compose"),
+            ("Campaigns", "CM   Campaigns"),
             ("Reports", "RP   Reports"),
             ("Email",    "EM   Email"),
             ("Cards",     "CC   Card Creator"),
@@ -562,6 +567,11 @@ class MainWindow(ctk.CTk):
         self._build_settings_view()
         self._build_email_view()
         build_card_creator_view(self)
+        build_campaigns_view(self)
+
+        self.bind("<Control-n>", lambda _event: self._show_view("Compose"))
+        self.bind("<Control-i>", lambda _event: self._import_contacts())
+        self.bind("<Control-g>", lambda _event: self._show_view("Cards"))
 
     def _enforce_license(self) -> None:
         """Allow the free trial, then require a paid passkey after expiry."""
@@ -955,13 +965,16 @@ class MainWindow(ctk.CTk):
             ).grid(row=0, column=index, padx=6)
 
         toolbar = ctk.CTkFrame(frame, fg_color="#101a24", corner_radius=20, border_width=1, border_color="#183144")
-        toolbar.grid_columnconfigure(2, weight=1)
+        toolbar.grid_columnconfigure(3, weight=1)
         toolbar.grid(row=1, column=0, sticky="ew", pady=(0, 12))
 
-        ctk.CTkButton(toolbar, text="Import Excel/CSV", command=self._import_contacts).grid(row=0, column=0, padx=14, pady=14)
-        ctk.CTkButton(toolbar, text="Refresh", fg_color="#203243", command=self._reload_contacts).grid(row=0, column=1, padx=(0, 14), pady=14)
+        ctk.CTkButton(toolbar, text="Import Contacts", command=self._import_contacts).grid(row=0, column=0, padx=14, pady=14)
+        ctk.CTkButton(toolbar, text="Export CSV", fg_color="#1c6b4d", command=self._export_contacts_csv).grid(
+            row=0, column=1, padx=(0, 14), pady=14
+        )
+        ctk.CTkButton(toolbar, text="Refresh", fg_color="#203243", command=self._reload_contacts).grid(row=0, column=2, padx=(0, 14), pady=14)
         search_entry = ctk.CTkEntry(toolbar, textvariable=self.search_var, placeholder_text="Search by name or phone")
-        search_entry.grid(row=0, column=2, padx=(0, 14), pady=14, sticky="ew")
+        search_entry.grid(row=0, column=3, padx=(0, 14), pady=14, sticky="ew")
         search_entry.bind("<KeyRelease>", lambda _event: self._render_contacts_directory())
 
         self.contacts_summary_label = ctk.CTkLabel(frame, text="0 contacts loaded", text_color="#8ea5af")
@@ -1200,13 +1213,27 @@ class MainWindow(ctk.CTk):
 
         body = ctk.CTkFrame(frame, fg_color="#101a24", corner_radius=20, border_width=1, border_color="#183144")
         body.grid(row=3, column=0, sticky="nsew")
-        body.grid_rowconfigure(3, weight=1)
+        body.grid_rowconfigure(4, weight=1)
         body.grid_columnconfigure(0, weight=1)
 
         actions = ctk.CTkFrame(body, fg_color="transparent")
         actions.grid(row=0, column=0, sticky="ew", padx=14, pady=(14, 8))
-        actions.grid_columnconfigure(4, weight=1)
-        ctk.CTkLabel(actions, text="Export Format").grid(row=0, column=0, padx=(0, 8), pady=8)
+        actions.grid_columnconfigure(5, weight=1)
+        ctk.CTkLabel(actions, text="Period").grid(row=0, column=0, padx=(0, 8), pady=8)
+        ctk.CTkOptionMenu(
+            actions,
+            values=["today", "week", "month", "all"],
+            variable=self.report_period_var,
+            command=lambda _value: self._refresh_stats(),
+            fg_color="#173245",
+            button_color="#1d3545",
+            button_hover_color="#203243",
+            text_color="#d8ebf6",
+            dropdown_fg_color="#101a24",
+            dropdown_hover_color="#203243",
+            dropdown_text_color="#dbe8f0",
+        ).grid(row=0, column=1, padx=(0, 12), pady=8)
+        ctk.CTkLabel(actions, text="Export Format").grid(row=0, column=2, padx=(0, 8), pady=8)
         ctk.CTkOptionMenu(
             actions,
             values=["csv", "pdf"],
@@ -1219,14 +1246,8 @@ class MainWindow(ctk.CTk):
             dropdown_fg_color="#101a24",
             dropdown_hover_color="#203243",
             dropdown_text_color="#dbe8f0",
-        ).grid(row=0, column=1, padx=(0, 12), pady=8)
-        ctk.CTkButton(actions, text="Export Report", command=self._export_report).grid(row=0, column=2, pady=8)
-        ctk.CTkLabel(
-            actions,
-            text="Executive Report Deck",
-            text_color="#7fa9bf",
-            font=ctk.CTkFont(size=12, weight="bold"),
-        ).grid(row=0, column=3, padx=(14, 0), pady=8, sticky="e")
+        ).grid(row=0, column=3, padx=(0, 12), pady=8)
+        ctk.CTkButton(actions, text="Export Report", command=self._export_report).grid(row=0, column=4, pady=8)
         ctk.CTkLabel(
             actions,
             textvariable=self.report_export_status_var,
@@ -1235,23 +1256,19 @@ class MainWindow(ctk.CTk):
             padx=12,
             pady=6,
             text_color="#d8ebf6",
-        ).grid(row=0, column=4, padx=(14, 0), pady=8, sticky="e")
+        ).grid(row=0, column=5, padx=(14, 0), pady=8, sticky="e")
 
-        insights = ctk.CTkFrame(body, fg_color="#0c131b", corner_radius=18, border_width=1, border_color="#163144")
-        insights.grid(row=1, column=0, padx=18, pady=(0, 12), sticky="ew")
-        insights.grid_columnconfigure((0, 1, 2), weight=1)
-        for index, (title, value, color) in enumerate([
-            ("Pipeline", "Tracked", "#173245"),
-            ("Export", "CSV / PDF", "#244329"),
-            ("State", "Live Feed", "#4a3318"),
-        ]):
-            tile = ctk.CTkFrame(insights, fg_color=color, corner_radius=16)
-            tile.grid(row=0, column=index, padx=8, pady=10, sticky="ew")
-            ctk.CTkLabel(tile, text=title, text_color="#d3e2ea").pack(anchor="w", padx=12, pady=(10, 2))
-            ctk.CTkLabel(tile, text=value, font=ctk.CTkFont(size=16, weight="bold")).pack(anchor="w", padx=12, pady=(0, 10))
+        chart_frame = ctk.CTkFrame(body, fg_color="#0c131b", corner_radius=18, border_width=1, border_color="#163144")
+        chart_frame.grid(row=2, column=0, padx=18, pady=(0, 12), sticky="ew")
+        ctk.CTkLabel(chart_frame, text="Read vs Unread", font=ctk.CTkFont(size=14, weight="bold")).pack(
+            anchor="w", padx=14, pady=(10, 4)
+        )
+        self._reports_chart_host = tk.Frame(chart_frame, bg="#0c131b", height=180)
+        self._reports_chart_host.pack(fill="x", padx=8, pady=(0, 10))
+        self._reports_chart_canvas = None
 
         ctk.CTkLabel(body, text="Recent Delivery Activity", font=ctk.CTkFont(size=18, weight="bold")).grid(
-            row=2, column=0, padx=18, pady=(4, 8), sticky="w"
+            row=3, column=0, padx=18, pady=(4, 8), sticky="w"
         )
         self.reports_text = ctk.CTkTextbox(
             body,
@@ -1260,7 +1277,7 @@ class MainWindow(ctk.CTk):
             border_color="#163144",
             font=ctk.CTkFont(family="Courier New", size=12),
         )
-        self.reports_text.grid(row=3, column=0, padx=18, pady=(0, 18), sticky="nsew")
+        self.reports_text.grid(row=4, column=0, padx=18, pady=(0, 18), sticky="nsew")
         self._replace_text(self.reports_text, "No tracked messages yet.")
 
     def _build_settings_view(self) -> None:
@@ -1832,7 +1849,14 @@ class MainWindow(ctk.CTk):
     def _import_contacts(self) -> None:
         file_path = filedialog.askopenfilename(
             title="Import Contacts",
-            filetypes=[("Excel and CSV", "*.xlsx *.xls *.csv"), ("All files", "*.*")],
+            filetypes=[
+                ("All supported", "*.csv *.xls *.xlsx *.xlsm *.html *.htm *.json *.vcf"),
+                ("CSV", "*.csv"),
+                ("Excel", "*.xls *.xlsx *.xlsm"),
+                ("HTML", "*.html *.htm"),
+                ("JSON", "*.json"),
+                ("vCard", "*.vcf"),
+            ],
         )
         if not file_path:
             return
@@ -1843,6 +1867,36 @@ class MainWindow(ctk.CTk):
         else:
             messagebox.showinfo("Contacts Imported", f"Imported {imported_count} contacts successfully.")
         self._log_activity(f"Imported {imported_count} contacts from {Path(file_path).name}")
+
+    def _export_contacts_csv(self) -> None:
+        """Export all contacts to CSV."""
+        import csv
+
+        path = filedialog.asksaveasfilename(
+            title="Export Contacts",
+            defaultextension=".csv",
+            filetypes=[("CSV files", "*.csv")],
+            initialfile="messagecannon_contacts.csv",
+        )
+        if not path:
+            return
+        try:
+            contacts = self.contact_manager.get_all_contacts()
+            with open(path, "w", newline="", encoding="utf-8-sig") as handle:
+                writer = csv.DictWriter(handle, fieldnames=["name", "email", "phone", "tags"])
+                writer.writeheader()
+                for contact in contacts:
+                    writer.writerow({
+                        "name": contact.name or "",
+                        "email": contact.email or "",
+                        "phone": contact.phone or "",
+                        "tags": contact.tags or "",
+                    })
+            messagebox.showinfo("Export Complete", f"Exported {len(contacts)} contacts to:\n{path}")
+            self._log_activity(f"Exported {len(contacts)} contacts to CSV")
+        except Exception as exc:
+            Logger.error(f"Export failed: {exc}")
+            messagebox.showerror("Export Failed", str(exc))
 
     def _start_session_bootstrap(self) -> None:
         if self.license_locked:
@@ -1990,10 +2044,16 @@ class MainWindow(ctk.CTk):
         self._update_report_summary()
 
         session_state = self.whatsapp_sender.get_session_state()
-        self.dashboard_cards["Sent Today"].configure(text=str(sent_count))
+        today_stats = self.db.get_message_stats_for_period("today")
+        week_stats = self.db.get_message_stats_for_period("week")
+        month_stats = self.db.get_message_stats_for_period("month")
+
+        self.dashboard_cards["Sent Today"].configure(text=str(today_stats.get("sent_count", 0)))
         self.dashboard_cards["Delivery Rate"].configure(text=f"{delivery_rate:.1f}%")
         self.dashboard_cards["Active Session"].configure(text="Active" if session_state.is_active else "Scan QR")
-        self.dashboard_card_meta["Sent Today"].configure(text=f"{len(self._get_selected_contacts())} contacts armed")
+        self.dashboard_card_meta["Sent Today"].configure(
+            text=f"This week: {week_stats.get('sent_count', 0)} · Month: {month_stats.get('sent_count', 0)}"
+        )
         self.dashboard_card_meta["Delivery Rate"].configure(text=f"Delivered {delivered_count} | Read {read_count}")
         self.dashboard_card_meta["Active Session"].configure(text=session_state.status_text)
         self._update_license_ui()
@@ -2007,6 +2067,40 @@ class MainWindow(ctk.CTk):
         ]
         self._replace_text(self.reports_text, "\n".join(rows) if rows else "No tracked messages yet.")
         self._replace_text(self.activity_text, "\n".join(self.activity_items[:20]) if self.activity_items else "No activity yet.")
+        self._update_reports_chart(read_count, sent_count - read_count if sent_count >= read_count else 0)
+
+    def _update_reports_chart(self, read_count: int, unread_count: int) -> None:
+        """Render read vs unread pie chart in Reports tab."""
+        if not hasattr(self, "_reports_chart_host"):
+            return
+        try:
+            from matplotlib.figure import Figure
+            from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+
+            if self._reports_chart_canvas is not None:
+                self._reports_chart_canvas.get_tk_widget().destroy()
+                self._reports_chart_canvas = None
+
+            figure = Figure(figsize=(4.5, 1.8), dpi=100, facecolor="#0c131b")
+            axis = figure.add_subplot(111)
+            if read_count + unread_count == 0:
+                axis.text(0.5, 0.5, "No data yet", ha="center", va="center", color="#8ea5af")
+                axis.set_facecolor("#0c131b")
+                axis.axis("off")
+            else:
+                axis.pie(
+                    [read_count, unread_count],
+                    labels=["Read", "Unread"],
+                    colors=["#39b37a", "#7d3037"],
+                    autopct="%1.0f%%",
+                    textprops={"color": "#d8ebf6", "fontsize": 9},
+                )
+                axis.set_facecolor("#0c131b")
+            self._reports_chart_canvas = FigureCanvasTkAgg(figure, master=self._reports_chart_host)
+            self._reports_chart_canvas.draw()
+            self._reports_chart_canvas.get_tk_widget().pack(fill="both", expand=True)
+        except Exception as exc:
+            Logger.warning(f"Chart render skipped: {exc}")
 
     def _export_report(self) -> None:
         try:
@@ -2179,17 +2273,17 @@ class MainWindow(ctk.CTk):
             path = filedialog.askopenfilename(
                 title="Import Contacts",
                 filetypes=[
-                    ("All supported", "*.csv *.xls *.xlsx *.html *.htm"),
+                    ("All supported", "*.csv *.xls *.xlsx *.xlsm *.html *.htm *.json *.vcf"),
                     ("CSV files", "*.csv"),
-                    ("Excel files", "*.xls *.xlsx"),
+                    ("Excel files", "*.xls *.xlsx *.xlsm"),
                     ("HTML files", "*.html *.htm"),
+                    ("JSON files", "*.json"),
+                    ("vCard files", "*.vcf"),
                 ])
             if not path:
                 return
             try:
-                import sys as _sys
-                _sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-                from modules.data_importer import UniversalDataImporter
+                from ..modules.data_importer import UniversalDataImporter
                 result = UniversalDataImporter().import_file(path)
                 self._em_contacts_list = result.contacts
                 self._em_count_var.set(
