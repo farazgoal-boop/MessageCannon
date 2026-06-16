@@ -26,18 +26,27 @@ def _ensure_tcl_tk_paths() -> None:
 
 _ensure_tcl_tk_paths()
 
-try:
-    from src.ui.main_window import MainWindow
-    from src.utils.constants import APP_NAME, APP_VERSION
-    from src.utils.logger import Logger
-except ModuleNotFoundError:
+
+def _bootstrap_import_path() -> None:
+    """Ensure `src` imports work in dev and in PyInstaller frozen EXE."""
+    if getattr(sys, "frozen", False):
+        meipass = Path(getattr(sys, "_MEIPASS", ""))
+        if meipass.exists():
+            root = str(meipass)
+            if root not in sys.path:
+                sys.path.insert(0, root)
+        return
+
     project_root = Path(__file__).resolve().parents[1]
     if str(project_root) not in sys.path:
         sys.path.insert(0, str(project_root))
 
-    from src.ui.main_window import MainWindow
-    from src.utils.constants import APP_NAME, APP_VERSION
-    from src.utils.logger import Logger
+
+_bootstrap_import_path()
+
+from src.ui.main_window import MainWindow
+from src.utils.constants import APP_NAME, APP_VERSION
+from src.utils.logger import Logger
 
 
 def _runtime_asset_path(*parts: str) -> Path:
