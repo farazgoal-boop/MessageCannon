@@ -49,7 +49,8 @@ TEMPLATE_VARIABLES = [
 ]
 
 # Trial settings
-TRIAL_DAYS = 14
+TRIAL_DAYS = 3
+PAID_PASSKEY = "3march2013"
 
 # Database
 DB_FILENAME = "messagecannon.db"

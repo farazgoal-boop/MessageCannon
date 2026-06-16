@@ -45,33 +45,63 @@ class ContactManager:
             else:
                 return 0, [f"Unsupported file format: {file_path.suffix}"]
             
-            # Validate headers
-            required_fields = ['phone']
-            valid, error = DataValidator.is_valid_csv_headers(df.columns.tolist(), required_fields)
-            if not valid:
-                return 0, [error]
+            # Validate headers (must contain at least phone or email)
+            headers_lower = [str(h).lower().strip() for h in df.columns]
+            if 'phone' not in headers_lower and 'email' not in headers_lower:
+                return 0, ["The import file must contain either a 'phone' or 'email' column."]
             
             # Process rows
             contacts = []
             errors = []
             
             for idx, row in df.iterrows():
-                phone = str(row.get('phone', '')).strip()
-                name = str(row.get('name', '')).strip()
+                phone_raw = str(row.get('phone', '')).strip() if 'phone' in df.columns else ""
+                email_raw = str(row.get('email', '')).strip() if 'email' in df.columns else ""
+                name = str(row.get('name', '')).strip() if 'name' in df.columns else ""
                 
-                # Normalize phone
-                normalized_phone, phone_error = self.phone_validator.normalize_phone(phone)
-                
-                if normalized_phone is None:
-                    errors.append(f"Row {idx + 2}: {phone_error}")
+                # Clean nan or empty values from pandas
+                if pd.isna(row.get('phone')) or phone_raw.lower() in ['nan', 'none', 'null', '']:
+                    phone_raw = ""
+                if pd.isna(row.get('email')) or email_raw.lower() in ['nan', 'none', 'null', '']:
+                    email_raw = ""
+                if pd.isna(row.get('name')) or name.lower() in ['nan', 'none', 'null', '']:
+                    name = ""
+
+                if not phone_raw and not email_raw:
+                    errors.append(f"Row {idx + 2}: Both phone and email are empty")
                     continue
-                
+
+                normalized_phone = ""
+                if phone_raw:
+                    n_phone, phone_error = self.phone_validator.normalize_phone(phone_raw)
+                    if n_phone is None:
+                        # If there is no email to fall back on, fail the row
+                        if not email_raw:
+                            errors.append(f"Row {idx + 2}: {phone_error}")
+                            continue
+                        else:
+                            Logger.warning(f"Row {idx + 2}: Invalid phone '{phone_raw}', importing with email only")
+                    else:
+                        normalized_phone = n_phone
+
+                normalized_email = ""
+                if email_raw:
+                    if not DataValidator.is_valid_email(email_raw):
+                        if not normalized_phone:
+                            errors.append(f"Row {idx + 2}: Invalid email format '{email_raw}'")
+                            continue
+                        else:
+                            Logger.warning(f"Row {idx + 2}: Invalid email '{email_raw}', importing with phone only")
+                    else:
+                        normalized_email = email_raw
+
                 # Create contact
                 contact = Contact(
                     phone=normalized_phone,
+                    email=normalized_email,
                     name=name or f"Contact {idx + 1}",
-                    custom_fields={k: v for k, v in row.to_dict().items() 
-                                   if k.lower() not in ['phone', 'name']}
+                    custom_fields={str(k): v for k, v in row.to_dict().items() 
+                                   if str(k).lower() not in ['phone', 'email', 'name'] and not pd.isna(v)}
                 )
                 
                 contacts.append(contact)
@@ -160,6 +190,7 @@ class ContactManager:
             preview.append({
                 'id': i + 1,
                 'phone': contact.phone,
+                'email': contact.email,
                 'name': contact.name,
                 'tags': ', '.join(contact.tags) if contact.tags else ''
             })
@@ -185,6 +216,7 @@ class ContactManager:
             for contact in contacts:
                 data.append({
                     'phone': contact.phone,
+                    'email': contact.email,
                     'name': contact.name,
                     'tags': ', '.join(contact.tags),
                     **contact.custom_fields

@@ -1,0 +1,23 @@
+MessageCannon Premium Activation Notice
+
+Thank you for installing MessageCannon Premium.
+
+License policy:
+- Every new installation includes a 3-day free trial.
+- After the trial ends, paid activation is required to continue using the app.
+- Activation is completed inside the application from the startup activation screen or the Settings page.
+
+Included in the licensed version:
+- Persistent WhatsApp Web sessions
+- Delivery reports with live sent, delivered, and read analytics
+- Premium dashboard, contacts, compose, reports, and settings workspace
+- Session reset, export tools, and campaign safety controls
+
+First launch experience:
+- The app opens with a branded startup screen before loading the main workspace.
+- If the trial is still active, you can continue directly into the app.
+- If the trial has expired, activate the device with your paid passkey to unlock the premium workspace.
+
+Important:
+- Keep your paid activation passkey private.
+- Uninstalling or deactivating the app does not restart the free trial.

@@ -1,0 +1,13 @@
+Primary Personal Brand Set:
+- faraz-automation-youtube-banner.png
+- faraz-automation-youtube-logo.png
+
+Additional Variants:
+- faraz-automation-youtube-banner-simple.png
+- faraz-automation-youtube-logo-simple.png
+- faraz-automation-youtube-banner-luxury.png
+- faraz-automation-youtube-logo-luxury.png
+
+Suggested Channel Name: Faraz Automation
+Suggested Handle: @farazautomation
+Fallback Handle: @farazautomationhq

@@ -1,0 +1,20 @@
+MessageCannon Premium Setup Brief
+
+This installer prepares the premium desktop workspace for MessageCannon.
+
+What will be installed:
+- The MessageCannon desktop application
+- Bundled assets, icons, and documentation
+- Premium campaign workspace UI
+- Delivery reporting and analytics tools
+- Activation-ready licensing flow with a 3-day free trial
+
+Before you continue:
+- Close any running MessageCannon sessions
+- Keep your paid activation passkey available if your trial has already expired
+- Use the built-in Reset Session option if you need a fresh WhatsApp login after install
+
+After installation:
+- Launch MessageCannon from the desktop or Start Menu shortcut
+- The app opens with a branded premium startup screen
+- Activation can be completed from the startup gate or the Settings page

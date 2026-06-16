@@ -4,13 +4,19 @@ Unit tests for MessageCannon application.
 
 import unittest
 import sys
+import json
+import tempfile
 from pathlib import Path
+from datetime import datetime
+from unittest.mock import patch
 
 # Add src to path
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from utils.validators import PhoneValidator, DataValidator
 from models import Contact, Campaign, Template
+from utils.license_manager import LicenseManager
+from utils.constants import PAID_PASSKEY, TRIAL_DAYS
 
 
 class TestPhoneValidator(unittest.TestCase):
@@ -179,6 +185,37 @@ class TestTemplateModel(unittest.TestCase):
         self.assertEqual(template.name, "Fee Reminder")
         self.assertEqual(template.category, "Education")
         self.assertTrue("{name}" in template.message_text)
+
+
+class TestLicenseManager(unittest.TestCase):
+    """Test trial and paid license behavior."""
+
+    def test_paid_passkey_validation(self):
+        """Only the configured passkey should activate the paid license."""
+        self.assertTrue(LicenseManager._verify_license_key(PAID_PASSKEY))
+        self.assertFalse(LicenseManager._verify_license_key("wrong-key"))
+
+    def test_trial_duration_enforced_to_three_days(self):
+        """Stored trial files should respect the current 3-day product policy."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            license_path = Path(temp_dir) / "license.lic"
+            old_trial = {
+                "type": "trial",
+                "trial_start": "2026-05-01T10:00:00",
+                "trial_end": "2026-05-15T10:00:00",
+                "license_key": None,
+            }
+            license_path.write_text(json.dumps(old_trial), encoding="utf-8")
+
+            with patch.object(LicenseManager, "get_license_path", return_value=license_path), \
+                 patch("utils.license_manager.datetime") as mocked_datetime:
+                mocked_datetime.now.return_value = datetime.fromisoformat("2026-05-03T09:00:00")
+                mocked_datetime.fromisoformat.side_effect = lambda value: datetime.fromisoformat(value)
+                status = LicenseManager.check_license()
+
+            self.assertEqual(status["status"], "trial")
+            self.assertTrue(status["is_valid"])
+            self.assertLessEqual(status["days_remaining"], TRIAL_DAYS)
 
 
 if __name__ == "__main__":

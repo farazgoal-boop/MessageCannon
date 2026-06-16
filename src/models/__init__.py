@@ -13,6 +13,8 @@ class MessageStatus(Enum):
     PENDING = "pending"
     SENDING = "sending"
     SENT = "sent"
+    DELIVERED = "delivered"
+    READ = "read"
     FAILED = "failed"
     FAILED_RETRY = "failed_retry"
 
@@ -23,6 +25,7 @@ class Contact:
     
     id: Optional[int] = None
     phone: str = ""
+    email: str = ""
     name: str = ""
     tags: List[str] = field(default_factory=list)
     custom_fields: Dict[str, Any] = field(default_factory=dict)
@@ -41,6 +44,7 @@ class Contact:
         contact = cls()
         contact.id = data.get('id')
         contact.phone = data.get('phone', '')
+        contact.email = data.get('email', '')
         contact.name = data.get('name', '')
         contact.tags = data.get('tags', '').split(',') if data.get('tags') else []
         contact.custom_fields = data.get('custom_fields', {})
@@ -58,7 +62,9 @@ class MessageLog:
     id: Optional[int] = None
     campaign_id: Optional[int] = None
     contact_phone: str = ""
+    contact_email: str = ""
     contact_name: str = ""
+    subject: str = ""
     message_text: str = ""
     status: MessageStatus = MessageStatus.PENDING
     sent_at: Optional[datetime] = None
@@ -71,7 +77,9 @@ class MessageLog:
             'id': self.id,
             'campaign_id': self.campaign_id,
             'contact_phone': self.contact_phone,
+            'contact_email': self.contact_email,
             'contact_name': self.contact_name,
+            'subject': self.subject,
             'message_text': self.message_text,
             'status': self.status.value,
             'sent_at': self.sent_at.isoformat() if self.sent_at else None,

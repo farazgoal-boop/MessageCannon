@@ -1,4 +1,8 @@
 # -*- mode: python ; coding: utf-8 -*-
+from PyInstaller.utils.hooks import collect_submodules
+
+hiddenimports = ['customtkinter', 'pandas', 'openpyxl', 'pywhatkit', 'selenium', 'qrcode', 'PIL', 'reportlab', 'schedule']
+hiddenimports += collect_submodules('selenium')
 
 
 a = Analysis(
@@ -6,7 +10,7 @@ a = Analysis(
     pathex=[],
     binaries=[],
     datas=[('src\\assets', 'assets'), ('src\\database\\schema.sql', 'src\\database'), ('docs', 'docs'), ('README.md', '.')],
-    hiddenimports=['customtkinter', 'pandas', 'openpyxl', 'pywhatkit', 'selenium', 'qrcode', 'PIL', 'reportlab', 'schedule'],
+    hiddenimports=hiddenimports,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

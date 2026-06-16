@@ -2,7 +2,9 @@
 ; Inno Setup 6.0+
 
 [Setup]
+AppId={{9C5BC6E1-4A94-4C72-BE29-1D9BC9B0C6A8}
 AppName=MessageCannon
+AppVerName=MessageCannon Premium 1.0.0
 AppVersion=1.0.0
 AppPublisher=Muhammad Faraz
 AppPublisherURL=https://github.com/farazgoal/MessageCannon
@@ -18,10 +20,13 @@ SolidCompression=yes
 SetupIconFile=..\src\assets\icons\app.ico
 UninstallDisplayIcon={app}\MessageCannon.exe
 LicenseFile=..\LICENSE
+InfoBeforeFile=..\installer\PREMIUM_INSTALL_BRIEF.txt
+InfoAfterFile=..\installer\ACTIVATION_NOTICE.txt
 ShowLanguageDialog=auto
 AllowUNCPath=no
 ArchitecturesInstallIn64BitMode=x64os
 ArchitecturesAllowed=x64compatible
+WizardStyle=modern
 
 [Files]
 ; Main executable
@@ -54,3 +59,9 @@ end;
 [Registry]
 Root: HKCU; Subkey: "Software\MessageCannon"; ValueType: string; ValueName: "InstallPath"; ValueData: "{app}"
 Root: HKCU; Subkey: "Software\MessageCannon"; ValueType: string; ValueName: "Version"; ValueData: "1.0.0"
+
+[Messages]
+WelcomeLabel1=Welcome to the MessageCannon Premium Setup Wizard
+WelcomeLabel2=This installer prepares the premium messaging workspace with persistent sessions, delivery analytics, and activation-ready campaign controls.
+FinishedHeadingLabel=MessageCannon Premium Is Ready
+FinishedLabelNoIcons=Setup has finished installing MessageCannon Premium on your computer.%n%nLaunch the app to see the branded startup workspace and complete activation if your 3-day trial has ended.

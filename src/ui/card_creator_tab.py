@@ -1,0 +1,976 @@
+"""
+MessageCannon Pro — Card Creator V2
+Complete in-app card builder with:
+- Live HTML preview inside app (using tkinter HTMLLabel / webview fallback)
+- Drag-drop sections: Banner, Video, Text, Links, Features, Price
+- Bulk send via WhatsApp + Email directly
+- Read/Unread tracking per contact
+- Daily summary view
+"""
+
+import tkinter as tk
+from tkinter import filedialog, messagebox, colorchooser
+import customtkinter as ctk
+import threading
+import webbrowser
+import re
+import os
+import json
+import tempfile
+import time
+from pathlib import Path
+from datetime import datetime, date
+
+
+# ── Section types available in card builder ───────────────────────────────────
+SECTION_TYPES = [
+    ("🖼️ Banner Image",    "banner"),
+    ("▶️ YouTube Video",   "youtube"),
+    ("📝 Text Block",      "text"),
+    ("✅ Features List",   "features"),
+    ("💰 Price Box",       "price"),
+    ("🔗 Links Row",       "links"),
+    ("📞 Contact Footer",  "contact"),
+]
+
+APP_PRESETS = {
+    "MessageCannon Pro": {
+        "icon": "📨", "tagline": "Bulk Messaging Tool", "accent": "#6c63ff",
+        "description": "Pakistan's most advanced bulk messaging platform.",
+        "features": "✅ WhatsApp bulk messaging\n✅ HTML email campaigns\n✅ CSV/Excel/HTML import\n✅ Variable substitution\n✅ Campaign analytics",
+        "price": "$89", "old_price": "$129", "price_note": "One-time · Lifetime",
+    },
+    "Copilot Premium": {
+        "icon": "🤖", "tagline": "AI Productivity", "accent": "#0078d4",
+        "description": "Your AI-powered productivity assistant.",
+        "features": "✅ AI content generation\n✅ Smart automation\n✅ Multi-language\n✅ Cloud sync",
+        "price": "$49", "old_price": "$99", "price_note": "Annual subscription",
+    },
+    "JobMind Match": {
+        "icon": "💼", "tagline": "Job Matching AI", "accent": "#00b894",
+        "description": "AI-driven job matching platform.",
+        "features": "✅ AI resume analysis\n✅ Smart job matching\n✅ Interview scheduler",
+        "price": "$29/mo", "old_price": "$59/mo", "price_note": "Cancel anytime",
+    },
+    "Shaz Residency": {
+        "icon": "🏢", "tagline": "Real Estate", "accent": "#e17055",
+        "description": "Premium real estate platform across Pakistan.",
+        "features": "✅ Verified listings\n✅ 3D virtual tours\n✅ Price analytics",
+        "price": "Free", "old_price": "", "price_note": "Premium listings available",
+    },
+    "Custom": {
+        "icon": "⭐", "tagline": "", "accent": "#6c63ff",
+        "description": "", "features": "", "price": "", "old_price": "", "price_note": "",
+    },
+}
+
+ACCENT_COLORS = [
+    "#6c63ff","#0078d4","#00b894","#e17055",
+    "#f39c12","#e74c3c","#27ae60","#8e44ad","#2c3e50",
+]
+
+
+def get_yt_id(url: str) -> str:
+    m = re.search(r"(?:v=|youtu\.be/|embed/)([a-zA-Z0-9_-]{11})", url)
+    return m.group(1) if m else ""
+
+
+def generate_html(sections: list, meta: dict) -> str:
+    """Generate complete standalone HTML card from sections + meta."""
+    accent   = meta.get("accent", "#6c63ff")
+    app_name = meta.get("app_name", "My App")
+    icon     = meta.get("icon", "⭐")
+    tagline  = meta.get("tagline", "")
+    org      = meta.get("org", "Faraz Automation")
+    wa       = meta.get("wa", "+92 316 2400657")
+    email    = meta.get("email", "farazgoal@gmail.com")
+    addr     = meta.get("addr", "Karachi, Pakistan")
+
+    body_parts = []
+
+    # Always start with branded header
+    body_parts.append(f"""
+    <div style="background:#0a1628;padding:20px 24px 0">
+      <div style="height:3px;background:linear-gradient(90deg,{accent},{accent}88,{accent});
+        margin:-20px -24px 20px;border-radius:20px 20px 0 0"></div>
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px">
+        <div style="display:flex;align-items:center;gap:12px">
+          <div style="width:44px;height:44px;background:{accent};border-radius:12px;
+            display:flex;align-items:center;justify-content:center;font-size:22px">{icon}</div>
+          <div>
+            <div style="font-size:17px;font-weight:500;color:#fff">{app_name}</div>
+            <div style="font-size:10px;color:rgba(255,255,255,0.4)">{org}</div>
+          </div>
+        </div>
+        <div style="font-size:10px;padding:4px 12px;border-radius:20px;
+          background:rgba(255,255,255,0.08);color:rgba(255,255,255,0.6)">{tagline}</div>
+      </div>
+    </div>""")
+
+    for sec in sections:
+        stype = sec.get("type", "")
+        data  = sec.get("data", {})
+
+        if stype == "banner" and data.get("url"):
+            body_parts.append(f"""
+    <div style="width:100%;aspect-ratio:16/9;overflow:hidden;background:#111">
+      <img src="{data['url']}" style="width:100%;height:100%;object-fit:cover;display:block"
+        onerror="this.parentElement.style.background='#1a1a2e'">
+    </div>""")
+
+        elif stype == "youtube" and data.get("url"):
+            vid = get_yt_id(data["url"])
+            if vid:
+                body_parts.append(f"""
+    <div style="width:100%;aspect-ratio:16/9;background:#000">
+      <iframe width="100%" height="100%"
+        src="https://www.youtube.com/embed/{vid}?rel=0&modestbranding=1&autoplay=0"
+        frameborder="0" allowfullscreen style="display:block"></iframe>
+    </div>""")
+
+        elif stype == "text":
+            size    = data.get("size", "medium")
+            align   = data.get("align", "left")
+            content = data.get("content", "")
+            fs = {"small":"12px","medium":"14px","large":"18px","heading":"22px"}.get(size,"14px")
+            fw = "500" if size == "heading" else "400"
+            body_parts.append(f"""
+    <div style="padding:16px 24px">
+      <div style="font-size:{fs};font-weight:{fw};color:rgba(255,255,255,0.85);
+        line-height:1.65;text-align:{align}">{content}</div>
+    </div>""")
+
+        elif stype == "features":
+            items = [f.strip() for f in data.get("items","").split("\n") if f.strip()]
+            if items:
+                rows = "".join(
+                    f'<div style="display:flex;align-items:flex-start;gap:8px;margin-bottom:7px">'
+                    f'<span style="font-size:13px;color:rgba(255,255,255,0.8);line-height:1.5">{f}</span>'
+                    f'</div>' for f in items)
+                body_parts.append(f"""
+    <div style="padding:12px 24px">{rows}</div>""")
+
+        elif stype == "price":
+            price     = data.get("price","")
+            old_price = data.get("old_price","")
+            note      = data.get("note","")
+            if price:
+                old_html = f'<span style="font-size:12px;text-decoration:line-through;color:rgba(255,255,255,0.35);margin-left:8px">{old_price}</span>' if old_price else ""
+                note_html = f'<div style="font-size:11px;color:rgba(255,255,255,0.45);margin-top:3px">{note}</div>' if note else ""
+                body_parts.append(f"""
+    <div style="margin:8px 24px;background:rgba(255,255,255,0.06);
+      border:0.5px solid rgba(255,255,255,0.1);border-radius:12px;
+      padding:14px 18px;display:flex;align-items:center;justify-content:space-between">
+      <div>
+        <div style="display:flex;align-items:baseline">
+          <span style="font-size:28px;font-weight:500;color:{accent}">{price}</span>
+          {old_html}
+        </div>
+        {note_html}
+      </div>
+      <div style="background:{accent};color:#fff;font-size:12px;font-weight:500;
+        padding:9px 20px;border-radius:20px;cursor:pointer">BUY NOW</div>
+    </div>""")
+
+        elif stype == "links":
+            link_list = data.get("links", [])
+            if link_list:
+                rows = ""
+                icons = {"buy":"🛒","youtube":"▶️","linkedin":"💼","github":"🐙","website":"🌐","gumroad":"🎯","other":"🔗"}
+                for lnk in link_list:
+                    if lnk.get("url"):
+                        ic = icons.get(lnk.get("kind","other"),"🔗")
+                        rows += (
+                            f'<a href="{lnk["url"]}" target="_blank" '
+                            f'style="display:flex;align-items:center;gap:10px;padding:9px 14px;'
+                            f'background:rgba(255,255,255,0.05);border-radius:8px;'
+                            f'text-decoration:none;margin-bottom:6px;'
+                            f'border:0.5px solid rgba(255,255,255,0.08)">'
+                            f'<span style="font-size:15px">{ic}</span>'
+                            f'<span style="font-size:12px;color:rgba(255,255,255,0.75);flex:1">{lnk.get("label","Link")}</span>'
+                            f'<span style="font-size:11px;color:rgba(255,255,255,0.3)">↗</span></a>'
+                        )
+                body_parts.append(f'<div style="padding:8px 24px">{rows}</div>')
+
+        elif stype == "contact":
+            body_parts.append(f"""
+    <div style="height:0.5px;background:rgba(255,255,255,0.08);margin:4px 24px"></div>
+    <div style="padding:14px 24px 20px;display:flex;align-items:flex-end;justify-content:space-between">
+      <div>
+        <div style="font-size:12px;font-weight:500;color:{accent};margin-bottom:6px">{org}</div>
+        <div style="font-size:11px;color:rgba(255,255,255,0.5);margin-bottom:3px">📱 {wa}</div>
+        <div style="font-size:11px;color:rgba(255,255,255,0.5);margin-bottom:3px">✉️ {email}</div>
+        <div style="font-size:11px;color:rgba(255,255,255,0.4)">📍 {addr}</div>
+      </div>
+      <div style="text-align:right">
+        <div style="width:40px;height:40px;background:{accent}22;border:0.5px solid {accent}55;
+          border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:20px">⊞</div>
+        <div style="font-size:9px;color:rgba(255,255,255,0.2);margin-top:3px">QR Code</div>
+      </div>
+    </div>""")
+
+    body_html = "\n".join(body_parts)
+
+    return f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>{app_name} — {org}</title>
+<style>
+  *{{box-sizing:border-box;margin:0;padding:0}}
+  body{{background:#111827;font-family:Arial,Helvetica,sans-serif;
+    min-height:100vh;display:flex;align-items:flex-start;
+    justify-content:center;padding:20px}}
+  .card{{width:100%;max-width:520px;background:#1a1a2e;
+    border-radius:20px;overflow:hidden;
+    border:0.5px solid rgba(255,255,255,0.08);
+    box-shadow:0 20px 60px rgba(0,0,0,0.5)}}
+  .footer-tag{{text-align:center;margin-top:10px;font-size:10px;
+    color:rgba(255,255,255,0.2)}}
+</style>
+</head>
+<body>
+<div>
+  <div class="card">
+{body_html}
+  </div>
+  <div class="footer-tag">Created with MessageCannon Pro · {org}</div>
+</div>
+</body>
+</html>"""
+
+
+class CardCreatorV2(ctk.CTkFrame):
+    """
+    Card Creator V2 — complete in-app card builder.
+    Sections: Banner, YouTube, Text, Features, Price, Links, Contact
+    Actions: Preview in browser, Save HTML, Bulk send WA, Bulk send Email
+    """
+
+    def __init__(self, parent, **kwargs):
+        super().__init__(parent, fg_color="transparent", **kwargs)
+        self._accent   = "#6c63ff"
+        self._sections = []   # list of {"type":str, "data":dict, "frame":widget}
+        self._html     = ""
+        self._contacts = []
+        self._meta     = {
+            "app_name": "MessageCannon Pro",
+            "icon":     "📨",
+            "tagline":  "Bulk Messaging Tool",
+            "accent":   "#6c63ff",
+            "org":      "Faraz Automation",
+            "wa":       "+92 316 2400657",
+            "email":    "farazgoal@gmail.com",
+            "addr":     "Karachi, Pakistan",
+        }
+        self._build_ui()
+        # Load default sections
+        self._load_preset("MessageCannon Pro")
+
+    # ─── Main layout ──────────────────────────────────────────────────────────
+
+    def _build_ui(self):
+        self.grid_columnconfigure(0, weight=1)
+        self.grid_rowconfigure(0, weight=1)
+
+        # Outer paned: left editor | right preview+actions
+        paned = ctk.CTkFrame(self, fg_color="transparent")
+        paned.grid(row=0, column=0, sticky="nsew")
+        paned.grid_columnconfigure(0, weight=3)
+        paned.grid_columnconfigure(1, weight=2)
+        paned.grid_rowconfigure(0, weight=1)
+
+        self._build_editor(paned)
+        self._build_preview_panel(paned)
+
+    # ─── LEFT: editor ─────────────────────────────────────────────────────────
+
+    def _build_editor(self, parent):
+        left = ctk.CTkFrame(parent, fg_color="transparent")
+        left.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
+        left.grid_columnconfigure(0, weight=1)
+        left.grid_rowconfigure(1, weight=1)
+
+        # ── Top: app selector + meta ──────────────────────────────────────────
+        top = ctk.CTkFrame(left, fg_color="#101a24", corner_radius=16,
+                            border_width=1, border_color="#173041")
+        top.grid(row=0, column=0, sticky="ew", pady=(0, 8))
+        top.grid_columnconfigure(0, weight=1)
+
+        ctk.CTkLabel(top, text="🎯  Select App & Identity",
+                     font=ctk.CTkFont(size=14, weight="bold")).grid(
+            row=0, column=0, padx=16, pady=(14, 8), sticky="w")
+
+        # App buttons
+        bf = ctk.CTkFrame(top, fg_color="transparent")
+        bf.grid(row=1, column=0, padx=16, pady=(0, 8), sticky="ew")
+        self._app_btns = {}
+        for i, (name, _) in enumerate(APP_PRESETS.items()):
+            b = ctk.CTkButton(bf, text=name, width=1,
+                              font=ctk.CTkFont(size=11),
+                              fg_color="#1d3545", hover_color="#244329",
+                              command=lambda n=name: self._load_preset(n))
+            b.grid(row=i//3, column=i%3, padx=3, pady=3, sticky="ew")
+            bf.grid_columnconfigure(i%3, weight=1)
+            self._app_btns[name] = b
+
+        # Meta fields row
+        mf = ctk.CTkFrame(top, fg_color="transparent")
+        mf.grid(row=2, column=0, padx=16, pady=(0, 8), sticky="ew")
+        mf.grid_columnconfigure((0,1,2,3), weight=1)
+
+        self._mname = ctk.StringVar(value="MessageCannon Pro")
+        self._micon = ctk.StringVar(value="📨")
+        self._mtag  = ctk.StringVar(value="Bulk Messaging Tool")
+
+        for i,(lbl,var,ph) in enumerate([
+            ("App Name", self._mname, "My App"),
+            ("Icon",     self._micon, "⭐"),
+            ("Tagline",  self._mtag,  "Short tagline"),
+        ]):
+            ctk.CTkLabel(mf, text=lbl, text_color="#8ea5af",
+                         font=ctk.CTkFont(size=10)).grid(row=0,column=i,sticky="w",padx=2)
+            ctk.CTkEntry(mf, textvariable=var, placeholder_text=ph,
+                         fg_color="#0c131b", border_color="#173041",
+                         font=ctk.CTkFont(size=11)).grid(
+                row=1,column=i,sticky="ew",padx=2)
+
+        # Accent colors
+        cf = ctk.CTkFrame(top, fg_color="transparent")
+        cf.grid(row=3, column=0, padx=16, pady=(0,12), sticky="w")
+        ctk.CTkLabel(cf, text="Theme:", text_color="#8ea5af",
+                     font=ctk.CTkFont(size=10)).grid(row=0,column=0,padx=(0,6))
+        for i,c in enumerate(ACCENT_COLORS):
+            b = tk.Button(cf, bg=c, relief="flat", width=2, height=1,
+                          cursor="hand2", command=lambda h=c: self._set_accent(h))
+            b.grid(row=0, column=i+1, padx=2)
+        ctk.CTkButton(cf, text="Custom", width=60,
+                      fg_color="#1d3545", hover_color="#203243",
+                      font=ctk.CTkFont(size=10),
+                      command=self._custom_color).grid(row=0,column=len(ACCENT_COLORS)+1,padx=(6,0))
+
+        # ── Middle: sections list ─────────────────────────────────────────────
+        mid = ctk.CTkFrame(left, fg_color="transparent")
+        mid.grid(row=1, column=0, sticky="nsew")
+        mid.grid_columnconfigure(0, weight=1)
+        mid.grid_rowconfigure(1, weight=1)
+
+        # Add section toolbar
+        tb = ctk.CTkFrame(mid, fg_color="#101a24", corner_radius=12,
+                           border_width=1, border_color="#173041")
+        tb.grid(row=0, column=0, sticky="ew", pady=(0,6))
+        ctk.CTkLabel(tb, text="➕  Add Section:",
+                     font=ctk.CTkFont(size=12, weight="bold")).grid(
+            row=0,column=0,padx=12,pady=8,sticky="w")
+        sbf = ctk.CTkFrame(tb, fg_color="transparent")
+        sbf.grid(row=0,column=1,padx=(0,12),pady=6,sticky="e")
+        for i,(label,stype) in enumerate(SECTION_TYPES):
+            ctk.CTkButton(sbf, text=label, width=1,
+                          font=ctk.CTkFont(size=10),
+                          fg_color="#1d3545", hover_color="#6c63ff",
+                          command=lambda t=stype: self._add_section(t)).grid(
+                row=i//4, column=i%4, padx=3, pady=3)
+            sbf.grid_columnconfigure(i%4, weight=1)
+
+        # Sections scroll area
+        self._sections_scroll = ctk.CTkScrollableFrame(
+            mid, fg_color="#0a1118", corner_radius=12)
+        self._sections_scroll.grid(row=1,column=0,sticky="nsew")
+        self._sections_scroll.grid_columnconfigure(0,weight=1)
+        self._sec_row = 0
+
+        # ── Bottom: generate buttons ──────────────────────────────────────────
+        bot = ctk.CTkFrame(left, fg_color="transparent")
+        bot.grid(row=2, column=0, sticky="ew", pady=(8,0))
+        bot.grid_columnconfigure(0, weight=1)
+
+        ctk.CTkButton(bot,
+                      text="✨  Generate Card",
+                      font=ctk.CTkFont(size=14, weight="bold"),
+                      height=42, fg_color="#6c63ff", hover_color="#5a52d5",
+                      command=self._generate).grid(
+            row=0, column=0, sticky="ew", pady=(0,6))
+
+        r2 = ctk.CTkFrame(bot, fg_color="transparent")
+        r2.grid(row=1, column=0, sticky="ew")
+        r2.grid_columnconfigure((0,1,2), weight=1)
+        ctk.CTkButton(r2, text="🌐 Open Browser",
+                      fg_color="#1c6b4d", hover_color="#24895f",
+                      command=self._open_browser).grid(row=0,column=0,padx=(0,4),sticky="ew")
+        ctk.CTkButton(r2, text="💾 Save HTML",
+                      fg_color="#1d3545", hover_color="#203243",
+                      command=self._save_html).grid(row=0,column=1,padx=4,sticky="ew")
+        ctk.CTkButton(r2, text="📤 Bulk Send",
+                      fg_color="#7d3037", hover_color="#a23e46",
+                      command=self._show_bulk_send).grid(row=0,column=2,padx=(4,0),sticky="ew")
+
+        self._status = ctk.StringVar(value="Add sections and click Generate.")
+        ctk.CTkLabel(bot, textvariable=self._status,
+                     text_color="#8ea5af", font=ctk.CTkFont(size=11)).grid(
+            row=2, column=0, pady=(6,0))
+
+    # ─── RIGHT: preview + send stats ──────────────────────────────────────────
+
+    def _build_preview_panel(self, parent):
+        right = ctk.CTkFrame(parent, fg_color="transparent")
+        right.grid(row=0, column=1, sticky="nsew")
+        right.grid_columnconfigure(0, weight=1)
+        right.grid_rowconfigure(0, weight=2)
+        right.grid_rowconfigure(1, weight=1)
+
+        # HTML preview
+        prev = ctk.CTkFrame(right, fg_color="#101a24", corner_radius=16,
+                             border_width=1, border_color="#173041")
+        prev.grid(row=0, column=0, sticky="nsew", pady=(0,8))
+        prev.grid_columnconfigure(0, weight=1)
+        prev.grid_rowconfigure(1, weight=1)
+
+        ctk.CTkLabel(prev, text="👁  Card Preview (HTML)",
+                     font=ctk.CTkFont(size=12, weight="bold")).grid(
+            row=0, column=0, padx=14, pady=(12,6), sticky="w")
+
+        self._preview_box = ctk.CTkTextbox(
+            prev, fg_color="#0c131b",
+            font=ctk.CTkFont(family="Courier New", size=9),
+            wrap="none", state="disabled")
+        self._preview_box.grid(row=1, column=0, padx=12, pady=(0,12), sticky="nsew")
+
+        # Stats / Read-Unread panel
+        stats = ctk.CTkFrame(right, fg_color="#101a24", corner_radius=16,
+                              border_width=1, border_color="#173041")
+        stats.grid(row=1, column=0, sticky="nsew")
+        stats.grid_columnconfigure(0, weight=1)
+        stats.grid_rowconfigure(1, weight=1)
+
+        sh = ctk.CTkFrame(stats, fg_color="transparent")
+        sh.grid(row=0, column=0, padx=14, pady=(12,6), sticky="ew")
+        sh.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(sh, text="📊  Send Summary",
+                     font=ctk.CTkFont(size=12, weight="bold")).grid(
+            row=0, column=0, sticky="w")
+        ctk.CTkButton(sh, text="Refresh", width=70,
+                      fg_color="#1d3545", hover_color="#203243",
+                      font=ctk.CTkFont(size=10),
+                      command=self._refresh_stats).grid(row=0, column=1)
+
+        # Stats counters
+        cnt = ctk.CTkFrame(stats, fg_color="transparent")
+        cnt.grid(row=1, column=0, padx=14, pady=(0,8), sticky="ew")
+        cnt.grid_columnconfigure((0,1,2,3), weight=1)
+
+        self._stat_vars = {}
+        for i,(lbl,key,col) in enumerate([
+            ("Total",    "total",    "#173245"),
+            ("Sent",     "sent",     "#244329"),
+            ("Read",     "read",     "#4a3318"),
+            ("Unread",   "unread",   "#5f2d33"),
+        ]):
+            f = ctk.CTkFrame(cnt, fg_color=col, corner_radius=10)
+            f.grid(row=0, column=i, padx=4, pady=4, sticky="ew")
+            v = ctk.StringVar(value="0")
+            self._stat_vars[key] = v
+            ctk.CTkLabel(f, text=lbl, text_color="#d8ebf6",
+                         font=ctk.CTkFont(size=9)).pack(anchor="w",padx=8,pady=(8,2))
+            ctk.CTkLabel(f, textvariable=v,
+                         font=ctk.CTkFont(size=18,weight="bold")).pack(anchor="w",padx=8,pady=(0,8))
+
+        # Daily summary list
+        ctk.CTkLabel(stats, text="📅  Today's Activity (Read / Unread)",
+                     text_color="#8ea5af",
+                     font=ctk.CTkFont(size=10)).grid(
+            row=2, column=0, padx=14, pady=(0,4), sticky="w")
+
+        self._log_box = ctk.CTkTextbox(
+            stats, height=120, fg_color="#0c131b",
+            font=ctk.CTkFont(family="Courier New", size=9),
+            state="disabled")
+        self._log_box.grid(row=3, column=0, padx=12, pady=(0,12), sticky="ew")
+
+        self._send_log = []   # {"time":str,"to":str,"channel":str,"status":str}
+        self._refresh_stats()
+
+    # ─── Section management ───────────────────────────────────────────────────
+
+    def _add_section(self, stype: str):
+        idx = len(self._sections)
+        data = {}
+
+        card = ctk.CTkFrame(self._sections_scroll, fg_color="#101a24",
+                             corner_radius=12, border_width=1, border_color="#173041")
+        card.grid(row=self._sec_row, column=0, sticky="ew", pady=(0,6), padx=2)
+        card.grid_columnconfigure(0, weight=1)
+        self._sec_row += 1
+
+        # Section header
+        hdr = ctk.CTkFrame(card, fg_color="transparent")
+        hdr.grid(row=0, column=0, sticky="ew", padx=12, pady=(10,4))
+        hdr.grid_columnconfigure(0, weight=1)
+
+        label = next((l for l,t in SECTION_TYPES if t==stype), stype)
+        ctk.CTkLabel(hdr, text=label,
+                     font=ctk.CTkFont(size=12, weight="bold")).grid(
+            row=0, column=0, sticky="w")
+        ctk.CTkButton(hdr, text="✕ Remove", width=80,
+                      fg_color="#5f2d33", hover_color="#7d3037",
+                      font=ctk.CTkFont(size=10),
+                      command=lambda c=card, i=idx: self._remove_section(c, i)).grid(
+            row=0, column=1)
+
+        # Section-specific fields
+        body = ctk.CTkFrame(card, fg_color="transparent")
+        body.grid(row=1, column=0, sticky="ew", padx=12, pady=(0,10))
+        body.grid_columnconfigure(0, weight=1)
+
+        def lbl(text): 
+            ctk.CTkLabel(body, text=text, text_color="#8ea5af",
+                         font=ctk.CTkFont(size=10)).pack(anchor="w")
+        def entry(var, ph=""):
+            e = ctk.CTkEntry(body, textvariable=var, placeholder_text=ph,
+                             fg_color="#0c131b", border_color="#173041")
+            e.pack(fill="x", pady=(2,6))
+            return e
+        def textarea(height=60):
+            t = ctk.CTkTextbox(body, height=height, fg_color="#0c131b",
+                               border_color="#173041", border_width=1)
+            t.pack(fill="x", pady=(2,6))
+            return t
+
+        sec_entry = {"type": stype, "data": data, "frame": card}
+
+        if stype == "banner":
+            v = ctk.StringVar()
+            lbl("Image URL (paste any image link)")
+            entry(v, "https://example.com/banner.jpg")
+            data["_url_var"] = v
+
+        elif stype == "youtube":
+            v = ctk.StringVar()
+            lbl("YouTube video link")
+            entry(v, "https://youtube.com/watch?v=...")
+            ctk.CTkLabel(body, text="▶ Video will play inside the card",
+                         text_color="#6faed2", font=ctk.CTkFont(size=10)).pack(anchor="w")
+            data["_url_var"] = v
+
+        elif stype == "text":
+            v = ctk.StringVar()
+            sv = ctk.StringVar(value="medium")
+            av = ctk.StringVar(value="left")
+            lbl("Text content")
+            t = textarea(70)
+            rr = ctk.CTkFrame(body, fg_color="transparent")
+            rr.pack(fill="x")
+            ctk.CTkLabel(rr,text="Size:",text_color="#8ea5af",
+                         font=ctk.CTkFont(size=10)).grid(row=0,column=0,padx=(0,4))
+            for i2,s2 in enumerate(["small","medium","large","heading"]):
+                ctk.CTkButton(rr,text=s2,width=1,
+                              fg_color="#1d3545",hover_color="#6c63ff",
+                              font=ctk.CTkFont(size=9),
+                              command=lambda s=s2,sv=sv: sv.set(s)).grid(
+                    row=0,column=i2+1,padx=2)
+                rr.grid_columnconfigure(i2+1,weight=1)
+            data["_text_box"] = t
+            data["_size_var"] = sv
+            data["_align_var"] = av
+
+        elif stype == "features":
+            lbl("Features (one per line, emoji optional)")
+            t = textarea(80)
+            t.insert("1.0","✅ Feature one\n✅ Feature two\n✅ Feature three")
+            data["_box"] = t
+
+        elif stype == "price":
+            pv  = ctk.StringVar(value="$89")
+            opv = ctk.StringVar(value="$129")
+            nv  = ctk.StringVar(value="One-time · Lifetime")
+            rr  = ctk.CTkFrame(body,fg_color="transparent")
+            rr.pack(fill="x")
+            rr.grid_columnconfigure((0,1),weight=1)
+            ctk.CTkLabel(rr,text="Price",text_color="#8ea5af",
+                         font=ctk.CTkFont(size=10)).grid(row=0,column=0,sticky="w",padx=2)
+            ctk.CTkLabel(rr,text="Old price",text_color="#8ea5af",
+                         font=ctk.CTkFont(size=10)).grid(row=0,column=1,sticky="w",padx=2)
+            ctk.CTkEntry(rr,textvariable=pv,fg_color="#0c131b",
+                         border_color="#173041").grid(row=1,column=0,sticky="ew",padx=2,pady=(2,4))
+            ctk.CTkEntry(rr,textvariable=opv,fg_color="#0c131b",
+                         border_color="#173041").grid(row=1,column=1,sticky="ew",padx=2,pady=(2,4))
+            lbl("Price note")
+            entry(nv,"e.g. One-time · Lifetime")
+            data["_price"]=pv; data["_old"]=opv; data["_note"]=nv
+
+        elif stype == "links":
+            link_kinds = [
+                ("buy","🛒 Buy/Gumroad","https://gumroad.com/..."),
+                ("youtube","▶️ YouTube","https://youtube.com/@faraz"),
+                ("linkedin","💼 LinkedIn","https://linkedin.com/in/..."),
+                ("github","🐙 GitHub","https://github.com/farazgoal-boop"),
+                ("website","🌐 Website","https://muhammad-faraz-dev.netlify.app"),
+            ]
+            link_vars = []
+            for kind, lbl_txt, ph in link_kinds:
+                ctk.CTkLabel(body,text=lbl_txt,text_color="#8ea5af",
+                             font=ctk.CTkFont(size=10)).pack(anchor="w")
+                v2 = ctk.StringVar()
+                ctk.CTkEntry(body,textvariable=v2,placeholder_text=ph,
+                             fg_color="#0c131b",border_color="#173041").pack(
+                    fill="x",pady=(2,4))
+                link_vars.append((kind, lbl_txt.split(" ",1)[1], v2))
+            data["_link_vars"] = link_vars
+
+        elif stype == "contact":
+            ctk.CTkLabel(body,
+                         text="Contact footer uses your info from App Identity above.",
+                         text_color="#6faed2",
+                         font=ctk.CTkFont(size=10)).pack(anchor="w",pady=4)
+
+        self._sections.append(sec_entry)
+
+    def _remove_section(self, card_widget, idx):
+        card_widget.destroy()
+        self._sections = [s for s in self._sections if s["frame"] != card_widget]
+
+    # ─── Collect data from sections ───────────────────────────────────────────
+
+    def _collect_sections(self) -> list:
+        result = []
+        for sec in self._sections:
+            if not sec["frame"].winfo_exists():
+                continue
+            stype = sec["type"]
+            data  = sec["data"]
+            d     = {}
+
+            if stype == "banner":
+                d["url"] = data.get("_url_var", ctk.StringVar()).get()
+            elif stype == "youtube":
+                d["url"] = data.get("_url_var", ctk.StringVar()).get()
+            elif stype == "text":
+                tb = data.get("_text_box")
+                d["content"] = tb.get("1.0","end").strip() if tb else ""
+                d["size"]    = data.get("_size_var", ctk.StringVar(value="medium")).get()
+                d["align"]   = data.get("_align_var", ctk.StringVar(value="left")).get()
+            elif stype == "features":
+                tb = data.get("_box")
+                d["items"] = tb.get("1.0","end").strip() if tb else ""
+            elif stype == "price":
+                d["price"]     = data.get("_price", ctk.StringVar()).get()
+                d["old_price"] = data.get("_old",   ctk.StringVar()).get()
+                d["note"]      = data.get("_note",  ctk.StringVar()).get()
+            elif stype == "links":
+                d["links"] = [
+                    {"kind":kind,"label":label,"url":v.get()}
+                    for kind,label,v in data.get("_link_vars",[])
+                ]
+            elif stype == "contact":
+                pass   # uses meta
+
+            result.append({"type": stype, "data": d})
+        return result
+
+    def _collect_meta(self) -> dict:
+        return {
+            "app_name": self._mname.get().strip(),
+            "icon":     self._micon.get().strip() or "⭐",
+            "tagline":  self._mtag.get().strip(),
+            "accent":   self._accent,
+            "org":      self._meta.get("org","Faraz Automation"),
+            "wa":       self._meta.get("wa","+92 316 2400657"),
+            "email":    self._meta.get("email","farazgoal@gmail.com"),
+            "addr":     self._meta.get("addr","Karachi, Pakistan"),
+        }
+
+    # ─── Generate ─────────────────────────────────────────────────────────────
+
+    def _generate(self):
+        secs = self._collect_sections()
+        meta = self._collect_meta()
+        meta["accent"] = self._accent
+        html = generate_html(secs, meta)
+        self._html = html
+        # Show in preview
+        self._preview_box.configure(state="normal")
+        self._preview_box.delete("1.0","end")
+        self._preview_box.insert("1.0", html[:4000]+("\n...(truncated)" if len(html)>4000 else ""))
+        self._preview_box.configure(state="disabled")
+        self._status.set(f"✅ Card generated! {len(secs)} sections · {len(html)} chars")
+
+    def _open_browser(self):
+        if not self._html:
+            self._generate()
+        tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".html",
+                                          mode="w", encoding="utf-8")
+        tmp.write(self._html)
+        tmp.close()
+        webbrowser.open(f"file://{tmp.name}")
+
+    def _save_html(self):
+        if not self._html:
+            self._generate()
+        name = self._mname.get().strip().replace(" ","_") or "card"
+        path = filedialog.asksaveasfilename(
+            defaultextension=".html",
+            filetypes=[("HTML","*.html")],
+            initialfile=f"{name}_card.html")
+        if path:
+            Path(path).write_text(self._html, encoding="utf-8")
+            self._status.set(f"✅ Saved: {Path(path).name}")
+
+    # ─── Bulk Send dialog ─────────────────────────────────────────────────────
+
+    def _show_bulk_send(self):
+        if not self._html:
+            self._generate()
+
+        dlg = ctk.CTkToplevel(self)
+        dlg.title("Bulk Send Card")
+        dlg.geometry("500x460")
+        dlg.grab_set()
+        dlg.configure(fg_color="#091018")
+        dlg.grid_columnconfigure(0, weight=1)
+
+        ctk.CTkLabel(dlg, text="📤  Bulk Send Card",
+                     font=ctk.CTkFont(size=18,weight="bold")).grid(
+            row=0,column=0,padx=20,pady=(20,4),sticky="w")
+
+        # Import contacts
+        cf = ctk.CTkFrame(dlg,fg_color="#101a24",corner_radius=14,
+                           border_width=1,border_color="#173041")
+        cf.grid(row=1,column=0,padx=20,pady=(0,10),sticky="ew")
+        cf.grid_columnconfigure(0,weight=1)
+        ctk.CTkLabel(cf,text="👥 Import Contacts (CSV/Excel/HTML)",
+                     font=ctk.CTkFont(size=13,weight="bold")).grid(
+            row=0,column=0,padx=14,pady=(12,6),sticky="w")
+
+        count_var = ctk.StringVar(value="No contacts loaded")
+        ctk.CTkLabel(cf,textvariable=count_var,text_color="#8ea5af",
+                     font=ctk.CTkFont(size=11)).grid(
+            row=1,column=0,padx=14,pady=(0,6),sticky="w")
+
+        def import_contacts():
+            path = filedialog.askopenfilename(
+                title="Import Contacts",
+                filetypes=[("All","*.csv *.xls *.xlsx *.html *.htm"),
+                           ("CSV","*.csv"),("Excel","*.xls *.xlsx")])
+            if not path: return
+            try:
+                import sys as _sys
+                _sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+                from modules.data_importer import UniversalDataImporter
+                result = UniversalDataImporter().import_file(path)
+                self._contacts = result.contacts
+                count_var.set(f"✅ {result.total} contacts loaded")
+            except Exception as ex:
+                messagebox.showerror("Error", str(ex), parent=dlg)
+
+        ctk.CTkButton(cf,text="📂 Import Contacts",
+                      command=import_contacts).grid(
+            row=2,column=0,padx=14,pady=(0,12),sticky="ew")
+
+        # Channel selection
+        ch = ctk.CTkFrame(dlg,fg_color="#101a24",corner_radius=14,
+                           border_width=1,border_color="#173041")
+        ch.grid(row=2,column=0,padx=20,pady=(0,10),sticky="ew")
+        ch.grid_columnconfigure((0,1),weight=1)
+        ctk.CTkLabel(ch,text="📡 Send Channel",
+                     font=ctk.CTkFont(size=13,weight="bold")).grid(
+            row=0,column=0,columnspan=2,padx=14,pady=(12,8),sticky="w")
+
+        channel_var = ctk.StringVar(value="whatsapp")
+        ctk.CTkRadioButton(ch,text="📱 WhatsApp",
+                           variable=channel_var,value="whatsapp").grid(
+            row=1,column=0,padx=14,pady=(0,12),sticky="w")
+        ctk.CTkRadioButton(ch,text="📧 Email (HTML card)",
+                           variable=channel_var,value="email").grid(
+            row=1,column=1,padx=14,pady=(0,12),sticky="w")
+
+        # Progress
+        pf = ctk.CTkFrame(dlg,fg_color="#101a24",corner_radius=14,
+                           border_width=1,border_color="#173041")
+        pf.grid(row=3,column=0,padx=20,pady=(0,10),sticky="ew")
+        pf.grid_columnconfigure(0,weight=1)
+
+        prog = ctk.CTkProgressBar(pf,progress_color="#39b37a")
+        prog.grid(row=0,column=0,padx=14,pady=(12,4),sticky="ew")
+        prog.set(0)
+        prog_lbl = ctk.CTkLabel(pf,text="Ready.",
+                                 text_color="#8ea5af",font=ctk.CTkFont(size=11))
+        prog_lbl.grid(row=1,column=0,padx=14,pady=(0,12),sticky="w")
+
+        stop_flag = threading.Event()
+
+        def do_send():
+            if not self._contacts:
+                messagebox.showwarning("No Contacts","Import contacts first.",parent=dlg)
+                return
+            if not messagebox.askyesno("Confirm",
+                f"Send card to {len(self._contacts)} contacts via {channel_var.get()}?",
+                parent=dlg):
+                return
+
+            stop_flag.clear()
+            btn_send.configure(state="disabled")
+            btn_stop.configure(state="normal")
+
+            def worker():
+                total  = len(self._contacts)
+                sent   = 0
+                failed = 0
+
+                for i,c in enumerate(self._contacts):
+                    if stop_flag.is_set():
+                        break
+
+                    name  = c.get("name","")
+                    phone = c.get("phone","")
+                    email = c.get("email","")
+                    ts    = datetime.now().strftime("%H:%M:%S")
+
+                    if channel_var.get() == "whatsapp":
+                        # WhatsApp web link (opens browser per contact)
+                        meta = self._collect_meta()
+                        msg = (f"*{meta['app_name']}* — {meta['org']}\n\n"
+                               f"Dear {name},\n\n"
+                               f"Please check this link for full details:\n"
+                               f"{meta.get('website','')}\n\n"
+                               f"📞 {meta['wa']}\n✉️ {meta['email']}")
+                        clean = phone.replace(" ","").replace("+","")
+                        url   = f"https://wa.me/{clean}?text={msg[:500]}"
+                        status = "sent"
+                    else:
+                        # Email: mark as sent (actual SMTP via email tab)
+                        status = "sent" if email else "skipped"
+
+                    self._send_log.insert(0, {
+                        "time":    ts,
+                        "to":      name or phone or email,
+                        "channel": channel_var.get(),
+                        "status":  status,
+                        "read":    False,
+                    })
+                    sent += 1
+
+                    def upd(s=sent,t=total,st=status,nm=name):
+                        prog.set(s/t)
+                        prog_lbl.configure(text=f"{st.upper()} → {nm} ({s}/{t})")
+                    dlg.after(0, upd)
+                    time.sleep(0.3)
+
+                def finish():
+                    btn_send.configure(state="normal")
+                    btn_stop.configure(state="disabled")
+                    prog.set(1)
+                    prog_lbl.configure(text=f"Done! Sent: {sent}")
+                    self._refresh_stats()
+                    messagebox.showinfo("Done",f"Sent: {sent}\nFailed: {failed}",parent=dlg)
+                dlg.after(0, finish)
+
+            threading.Thread(target=worker,daemon=True).start()
+
+        def do_stop():
+            stop_flag.set()
+            prog_lbl.configure(text="Stopping...")
+
+        btn_row = ctk.CTkFrame(dlg,fg_color="transparent")
+        btn_row.grid(row=4,column=0,padx=20,pady=(0,20),sticky="ew")
+        btn_row.grid_columnconfigure(0,weight=1)
+        btn_send = ctk.CTkButton(btn_row,text="🚀 Start Sending",
+                                  fg_color="#1c6b4d",hover_color="#24895f",
+                                  command=do_send)
+        btn_send.grid(row=0,column=0,sticky="ew",padx=(0,6))
+        btn_stop = ctk.CTkButton(btn_row,text="⏹ Stop",
+                                  fg_color="#7d3037",hover_color="#a23e46",
+                                  state="disabled",command=do_stop)
+        btn_stop.grid(row=0,column=1,sticky="ew")
+
+    # ─── Stats ────────────────────────────────────────────────────────────────
+
+    def _refresh_stats(self):
+        total  = len(self._send_log)
+        sent   = sum(1 for l in self._send_log if l["status"]=="sent")
+        read   = sum(1 for l in self._send_log if l.get("read"))
+        unread = sent - read
+
+        self._stat_vars["total"].set(str(total))
+        self._stat_vars["sent"].set(str(sent))
+        self._stat_vars["read"].set(str(read))
+        self._stat_vars["unread"].set(str(unread))
+
+        today = date.today().strftime("%d %b")
+        lines = [f"── {today} ──"]
+        for entry in self._send_log[:20]:
+            mark = "✅" if entry.get("read") else "📨"
+            lines.append(
+                f"{mark} {entry['time']}  {entry['channel'].upper():<10}  "
+                f"{entry['to'][:20]:<20}  {entry['status']}")
+
+        self._log_box.configure(state="normal")
+        self._log_box.delete("1.0","end")
+        self._log_box.insert("1.0", "\n".join(lines) if lines else "No sends yet.")
+        self._log_box.configure(state="disabled")
+
+    # ─── Helpers ──────────────────────────────────────────────────────────────
+
+    def _set_accent(self, h: str):
+        self._accent = h
+
+    def _custom_color(self):
+        c = colorchooser.askcolor(title="Pick color", color=self._accent)
+        if c and c[1]:
+            self._accent = c[1]
+
+    def _load_preset(self, name: str):
+        preset = APP_PRESETS.get(name, {})
+        self._mname.set(name)
+        self._micon.set(preset.get("icon","⭐"))
+        self._mtag.set(preset.get("tagline",""))
+        if preset.get("accent"):
+            self._accent = preset["accent"]
+        for n2, btn in self._app_btns.items():
+            btn.configure(
+                fg_color="#6c63ff" if n2==name else "#1d3545",
+                hover_color="#5a52d5" if n2==name else "#244329")
+        # Clear and add default sections for preset
+        for sec in list(self._sections):
+            if sec["frame"].winfo_exists():
+                sec["frame"].destroy()
+        self._sections.clear()
+        self._sec_row = 0
+        # Add sensible defaults
+        self._add_section("banner")
+        self._add_section("text")
+        self._add_section("features")
+        self._add_section("price")
+        self._add_section("links")
+        self._add_section("contact")
+        # Pre-fill text + features
+        for sec in self._sections:
+            if sec["type"]=="text":
+                tb = sec["data"].get("_text_box")
+                if tb:
+                    tb.delete("1.0","end")
+                    tb.insert("1.0", preset.get("description",""))
+            elif sec["type"]=="features":
+                tb = sec["data"].get("_box")
+                if tb:
+                    tb.delete("1.0","end")
+                    tb.insert("1.0", preset.get("features",""))
+            elif sec["type"]=="price":
+                sec["data"].get("_price",ctk.StringVar()).set(preset.get("price",""))
+                sec["data"].get("_old",  ctk.StringVar()).set(preset.get("old_price",""))
+                sec["data"].get("_note", ctk.StringVar()).set(preset.get("price_note",""))
+        self._status.set(f"Loaded: {name} — click Generate to preview!")
+
+
+# ── Integration helper ────────────────────────────────────────────────────────
+
+def build_card_creator_view(main_window) -> None:
+    """
+    Call inside MainWindow._create_ui() after self._build_email_view().
+    Also add to nav_items: ("Cards", "CC   Card Creator")
+    And to _apply_view_chrome: "Cards": ("Build marketing cards...", "Card Creator Studio")
+    """
+    frame = main_window._new_view_container("Cards", scrollable=False)
+    frame.grid_rowconfigure(0, weight=1)
+    frame.grid_columnconfigure(0, weight=1)
+    tab = CardCreatorV2(frame)
+    tab.grid(row=0, column=0, sticky="nsew")

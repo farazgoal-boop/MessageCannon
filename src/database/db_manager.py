@@ -19,7 +19,8 @@ from ..models import Contact, Campaign, Template, MessageLog, MessageStatus
 DEFAULT_SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS contacts (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    phone TEXT NOT NULL UNIQUE,
+    phone TEXT UNIQUE,
+    email TEXT,
     name TEXT,
     tags TEXT,
     custom_fields TEXT,
@@ -45,8 +46,10 @@ CREATE TABLE IF NOT EXISTS campaigns (
 CREATE TABLE IF NOT EXISTS message_logs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     campaign_id INTEGER,
-    contact_phone TEXT NOT NULL,
+    contact_phone TEXT,
+    contact_email TEXT,
     contact_name TEXT,
+    subject TEXT,
     message_text TEXT NOT NULL,
     status TEXT DEFAULT 'pending',
     sent_at TIMESTAMP,
@@ -54,6 +57,19 @@ CREATE TABLE IF NOT EXISTS message_logs (
     retry_count INTEGER DEFAULT 0,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (campaign_id) REFERENCES campaigns(id)
+);
+
+CREATE TABLE IF NOT EXISTS messages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    phone TEXT NOT NULL,
+    message_text TEXT NOT NULL,
+    status TEXT DEFAULT 'pending',
+    sent_at TIMESTAMP,
+    delivered_at TIMESTAMP,
+    read_at TIMESTAMP,
+    error_reason TEXT,
+    whatsapp_message_id TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE TABLE IF NOT EXISTS templates (
@@ -75,6 +91,8 @@ CREATE INDEX IF NOT EXISTS idx_contacts_phone ON contacts(phone);
 CREATE INDEX IF NOT EXISTS idx_message_logs_campaign ON message_logs(campaign_id);
 CREATE INDEX IF NOT EXISTS idx_message_logs_status ON message_logs(status);
 CREATE INDEX IF NOT EXISTS idx_campaigns_created ON campaigns(created_at);
+CREATE INDEX IF NOT EXISTS idx_messages_phone ON messages(phone);
+CREATE INDEX IF NOT EXISTS idx_messages_status ON messages(status);
 """
 
 
@@ -111,9 +129,47 @@ class DatabaseManager:
                 conn.commit()
             
             Logger.info(f"Database initialized at {self.db_path}")
+            self._run_migrations()
         except Exception as e:
             Logger.error(f"Database initialization error: {e}")
             raise
+
+    def _run_migrations(self) -> None:
+        """Run safe ALTER TABLE migrations to update the database to the current schema version."""
+        try:
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                
+                # Check contacts columns
+                cursor.execute("PRAGMA table_info(contacts)")
+                cols = [row[1] for row in cursor.fetchall()]
+                if "email" not in cols:
+                    try:
+                        cursor.execute("ALTER TABLE contacts ADD COLUMN email TEXT")
+                        conn.commit()
+                        Logger.info("Added email column to contacts table")
+                    except Exception as e:
+                        Logger.error(f"Migration error (contacts.email): {e}")
+
+                # Check message_logs columns
+                cursor.execute("PRAGMA table_info(message_logs)")
+                cols = [row[1] for row in cursor.fetchall()]
+                if "contact_email" not in cols:
+                    try:
+                        cursor.execute("ALTER TABLE message_logs ADD COLUMN contact_email TEXT")
+                        conn.commit()
+                        Logger.info("Added contact_email column to message_logs table")
+                    except Exception as e:
+                        Logger.error(f"Migration error (message_logs.contact_email): {e}")
+                if "subject" not in cols:
+                    try:
+                        cursor.execute("ALTER TABLE message_logs ADD COLUMN subject TEXT")
+                        conn.commit()
+                        Logger.info("Added subject column to message_logs table")
+                    except Exception as e:
+                        Logger.error(f"Migration error (message_logs.subject): {e}")
+        except Exception as e:
+            Logger.error(f"Error running database migrations: {e}")
 
     def _load_schema_sql(self) -> str:
         """Load schema SQL from source/package paths with safe fallback."""
@@ -168,11 +224,12 @@ class DatabaseManager:
                 cursor = conn.cursor()
                 cursor.execute(
                     """
-                    INSERT INTO contacts (phone, name, tags, custom_fields)
-                    VALUES (?, ?, ?, ?)
+                    INSERT INTO contacts (phone, email, name, tags, custom_fields)
+                    VALUES (?, ?, ?, ?, ?)
                     """,
                     (
                         contact.phone,
+                        contact.email,
                         contact.name,
                         ','.join(contact.tags) if contact.tags else '',
                         json.dumps(contact.custom_fields)
@@ -181,7 +238,7 @@ class DatabaseManager:
                 conn.commit()
                 return cursor.lastrowid
         except sqlite3.IntegrityError:
-            Logger.warning(f"Contact with phone {contact.phone} already exists")
+            Logger.warning(f"Contact with phone {contact.phone} or email {contact.email} already exists")
             return None
         except Exception as e:
             Logger.error(f"Error adding contact: {e}")
@@ -205,11 +262,12 @@ class DatabaseManager:
                     try:
                         cursor.execute(
                             """
-                            INSERT INTO contacts (phone, name, tags, custom_fields)
-                            VALUES (?, ?, ?, ?)
+                            INSERT INTO contacts (phone, email, name, tags, custom_fields)
+                            VALUES (?, ?, ?, ?, ?)
                             """,
                             (
                                 contact.phone,
+                                contact.email,
                                 contact.name,
                                 ','.join(contact.tags) if contact.tags else '',
                                 json.dumps(contact.custom_fields)
@@ -217,7 +275,7 @@ class DatabaseManager:
                         )
                         count += 1
                     except sqlite3.IntegrityError:
-                        Logger.debug(f"Duplicate contact: {contact.phone}")
+                        Logger.debug(f"Duplicate contact: {contact.phone} / {contact.email}")
                         continue
                 
                 conn.commit()
@@ -252,9 +310,16 @@ class DatabaseManager:
                 contacts = []
                 
                 for row in cursor.fetchall():
+                    email_val = ""
+                    try:
+                        email_val = row['email'] or ''
+                    except (IndexError, sqlite3.OperationalError):
+                        pass
+
                     contact = Contact(
                         id=row['id'],
-                        phone=row['phone'],
+                        phone=row['phone'] or '',
+                        email=email_val,
                         name=row['name'] or '',
                         tags=row['tags'].split(',') if row['tags'] else [],
                         custom_fields=json.loads(row['custom_fields']) if row['custom_fields'] else {},
@@ -269,7 +334,7 @@ class DatabaseManager:
     
     def search_contacts(self, query: str) -> List[Contact]:
         """
-        Search contacts by name or phone.
+        Search contacts by name, phone, or email.
         
         Args:
             query: Search query
@@ -282,20 +347,36 @@ class DatabaseManager:
                 cursor = conn.cursor()
                 search_pattern = f"%{query}%"
                 
-                cursor.execute(
+                # Check columns to decide query
+                cursor.execute("PRAGMA table_info(contacts)")
+                cols = [r[1] for r in cursor.fetchall()]
+                if "email" in cols:
+                    sql_query = """
+                        SELECT * FROM contacts 
+                        WHERE phone LIKE ? OR name LIKE ? OR email LIKE ?
+                        LIMIT 100
                     """
-                    SELECT * FROM contacts 
-                    WHERE phone LIKE ? OR name LIKE ?
-                    LIMIT 100
-                    """,
-                    (search_pattern, search_pattern)
-                )
+                    params = (search_pattern, search_pattern, search_pattern)
+                else:
+                    sql_query = """
+                        SELECT * FROM contacts 
+                        WHERE phone LIKE ? OR name LIKE ?
+                        LIMIT 100
+                    """
+                    params = (search_pattern, search_pattern)
+
+                cursor.execute(sql_query, params)
                 
                 contacts = []
                 for row in cursor.fetchall():
+                    email_val = ""
+                    if "email" in cols:
+                        email_val = row['email'] or ''
+
                     contact = Contact(
                         id=row['id'],
-                        phone=row['phone'],
+                        phone=row['phone'] or '',
+                        email=email_val,
                         name=row['name'] or '',
                         tags=row['tags'].split(',') if row['tags'] else [],
                         custom_fields=json.loads(row['custom_fields']) if row['custom_fields'] else {},
@@ -441,14 +522,38 @@ class DatabaseManager:
         try:
             with self.get_connection() as conn:
                 cursor = conn.cursor()
-                cursor.execute(
+                
+                # Check columns to decide query
+                cursor.execute("PRAGMA table_info(message_logs)")
+                cols = [r[1] for r in cursor.fetchall()]
+                
+                if "contact_email" in cols and "subject" in cols:
+                    sql_query = """
+                        INSERT INTO message_logs 
+                        (campaign_id, contact_phone, contact_email, contact_name, subject, message_text, status, 
+                         sent_at, error_message, retry_count)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """
-                    INSERT INTO message_logs 
-                    (campaign_id, contact_phone, contact_name, message_text, status, 
-                     sent_at, error_message, retry_count)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
+                    params = (
+                        log.campaign_id,
+                        log.contact_phone,
+                        log.contact_email,
+                        log.contact_name,
+                        log.subject,
+                        log.message_text,
+                        log.status.value,
+                        log.sent_at.isoformat() if log.sent_at else None,
+                        log.error_message,
+                        log.retry_count
+                    )
+                else:
+                    sql_query = """
+                        INSERT INTO message_logs 
+                        (campaign_id, contact_phone, contact_name, message_text, status, 
+                         sent_at, error_message, retry_count)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """
+                    params = (
                         log.campaign_id,
                         log.contact_phone,
                         log.contact_name,
@@ -458,7 +563,8 @@ class DatabaseManager:
                         log.error_message,
                         log.retry_count
                     )
-                )
+
+                cursor.execute(sql_query, params)
                 conn.commit()
                 return cursor.lastrowid
         except Exception as e:
@@ -480,6 +586,9 @@ class DatabaseManager:
             with self.get_connection() as conn:
                 cursor = conn.cursor()
                 
+                cursor.execute("PRAGMA table_info(message_logs)")
+                cols = [r[1] for r in cursor.fetchall()]
+                
                 if campaign_id:
                     cursor.execute(
                         """
@@ -498,11 +607,20 @@ class DatabaseManager:
                 
                 logs = []
                 for row in cursor.fetchall():
+                    contact_email_val = ""
+                    subject_val = ""
+                    if "contact_email" in cols:
+                        contact_email_val = row['contact_email'] or ''
+                    if "subject" in cols:
+                        subject_val = row['subject'] or ''
+
                     log = MessageLog(
                         id=row['id'],
                         campaign_id=row['campaign_id'],
-                        contact_phone=row['contact_phone'],
-                        contact_name=row['contact_name'],
+                        contact_phone=row['contact_phone'] or '',
+                        contact_email=contact_email_val,
+                        contact_name=row['contact_name'] or '',
+                        subject=subject_val,
                         message_text=row['message_text'],
                         status=MessageStatus(row['status']),
                         sent_at=datetime.fromisoformat(row['sent_at']) if row['sent_at'] else None,
@@ -515,6 +633,146 @@ class DatabaseManager:
         except Exception as e:
             Logger.error(f"Error getting message logs: {e}")
             return []
+
+    # Delivery Tracking Operations
+    def create_tracked_message(
+        self,
+        phone: str,
+        message_text: str,
+        status: str = "pending",
+        sent_at: Optional[datetime] = None,
+        delivered_at: Optional[datetime] = None,
+        read_at: Optional[datetime] = None,
+        error_reason: Optional[str] = None,
+        whatsapp_message_id: Optional[str] = None,
+    ) -> Optional[int]:
+        """Create a tracked outbound message record."""
+        try:
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    """
+                    INSERT INTO messages
+                    (phone, message_text, status, sent_at, delivered_at, read_at, error_reason, whatsapp_message_id)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        phone,
+                        message_text,
+                        status,
+                        sent_at.isoformat() if sent_at else None,
+                        delivered_at.isoformat() if delivered_at else None,
+                        read_at.isoformat() if read_at else None,
+                        error_reason,
+                        whatsapp_message_id,
+                    )
+                )
+                conn.commit()
+                return cursor.lastrowid
+        except Exception as e:
+            Logger.error(f"Error creating tracked message: {e}")
+            return None
+
+    def update_tracked_message(self, message_id: int, **fields: Any) -> bool:
+        """Update tracked message fields by ID."""
+        allowed_fields = {
+            "phone",
+            "message_text",
+            "status",
+            "sent_at",
+            "delivered_at",
+            "read_at",
+            "error_reason",
+            "whatsapp_message_id",
+        }
+        updates: List[str] = []
+        values: List[Any] = []
+
+        for key, value in fields.items():
+            if key not in allowed_fields:
+                continue
+            if isinstance(value, datetime):
+                value = value.isoformat()
+            updates.append(f"{key} = ?")
+            values.append(value)
+
+        if not updates:
+            return False
+
+        values.append(message_id)
+
+        try:
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    f"UPDATE messages SET {', '.join(updates)} WHERE id = ?",
+                    values,
+                )
+                conn.commit()
+                return cursor.rowcount > 0
+        except Exception as e:
+            Logger.error(f"Error updating tracked message: {e}")
+            return False
+
+    def get_tracked_messages(self, statuses: Optional[List[str]] = None, limit: int = 100) -> List[Dict[str, Any]]:
+        """Return tracked message rows as dictionaries."""
+        try:
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                query = "SELECT * FROM messages"
+                params: List[Any] = []
+
+                if statuses:
+                    placeholders = ", ".join("?" for _ in statuses)
+                    query += f" WHERE status IN ({placeholders})"
+                    params.extend(statuses)
+
+                query += " ORDER BY created_at DESC LIMIT ?"
+                params.append(limit)
+
+                cursor.execute(query, params)
+                return [dict(row) for row in cursor.fetchall()]
+        except Exception as e:
+            Logger.error(f"Error getting tracked messages: {e}")
+            return []
+
+    def get_tracked_message_stats(self) -> Dict[str, Any]:
+        """Aggregate delivery tracking statistics."""
+        try:
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    """
+                    SELECT
+                        SUM(CASE WHEN status IN ('sent', 'delivered', 'read') THEN 1 ELSE 0 END) AS sent_count,
+                        SUM(CASE WHEN status IN ('delivered', 'read') THEN 1 ELSE 0 END) AS delivered_count,
+                        SUM(CASE WHEN status = 'read' THEN 1 ELSE 0 END) AS read_count,
+                        SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) AS failed_count,
+                        COUNT(*) AS total_count
+                    FROM messages
+                    """
+                )
+                row = cursor.fetchone()
+                total = int(row["total_count"] or 0)
+                delivered = int(row["delivered_count"] or 0)
+                return {
+                    "sent_count": int(row["sent_count"] or 0),
+                    "delivered_count": delivered,
+                    "read_count": int(row["read_count"] or 0),
+                    "failed_count": int(row["failed_count"] or 0),
+                    "delivery_rate": round((delivered / total) * 100, 2) if total else 0.0,
+                    "total_count": total,
+                }
+        except Exception as e:
+            Logger.error(f"Error getting tracked message stats: {e}")
+            return {
+                "sent_count": 0,
+                "delivered_count": 0,
+                "read_count": 0,
+                "failed_count": 0,
+                "delivery_rate": 0.0,
+                "total_count": 0,
+            }
     
     # Template Operations
     def add_template(self, template: Template) -> Optional[int]:
@@ -605,6 +863,14 @@ class DatabaseManager:
         except Exception as e:
             Logger.error(f"Error setting setting: {e}")
             return False
+
+    def set_setting_json(self, key: str, value: Any) -> bool:
+        """Store structured setting data as JSON."""
+        try:
+            return self.set_setting(key, json.dumps(value))
+        except Exception as e:
+            Logger.error(f"Error setting JSON setting: {e}")
+            return False
     
     def get_setting(self, key: str, default: str = "") -> str:
         """
@@ -625,4 +891,16 @@ class DatabaseManager:
                 return row['value'] if row else default
         except Exception as e:
             Logger.error(f"Error getting setting: {e}")
+            return default
+
+    def get_setting_json(self, key: str, default: Optional[Any] = None) -> Any:
+        """Read structured setting data stored as JSON."""
+        raw_value = self.get_setting(key, "")
+        if not raw_value:
+            return default
+
+        try:
+            return json.loads(raw_value)
+        except json.JSONDecodeError:
+            Logger.warning(f"Invalid JSON stored for setting {key}")
             return default

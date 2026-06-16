@@ -1,0 +1,49 @@
+<svg width="1280" height="720" viewBox="0 0 1280 720" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="MessageCannon Luxury Upwork Sales Cover">
+        <defs>
+          <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+            <stop offset="0%" stop-color="#0A1128"/>
+            <stop offset="56%" stop-color="#1F2041"/>
+            <stop offset="100%" stop-color="#3A506B"/>
+          </linearGradient>
+          <linearGradient id="accent" x1="0" y1="0" x2="1" y2="0">
+            <stop offset="0%" stop-color="#F6D365"/>
+            <stop offset="100%" stop-color="#FFF3C4"/>
+          </linearGradient>
+          <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+            <feDropShadow dx="0" dy="14" stdDeviation="22" flood-color="#05070F" flood-opacity="0.42"/>
+          </filter>
+          <clipPath id="portraitClip">
+            <rect x="950" y="96" width="258" height="520" rx="32" ry="32"/>
+          </clipPath>
+        </defs>
+        <rect width="1280" height="720" fill="url(#bg)"/>
+        <circle cx="1140" cy="90" r="148" fill="#F6D365" opacity="0.14"/>
+        <circle cx="164" cy="646" r="208" fill="#FFFFFF" opacity="0.05"/>
+        <path d="M0 568 L660 280 L1280 540 L1280 720 L0 720 Z" fill="#05070F" opacity="0.34"/>
+        <path d="M0 112 L420 0 L840 0 L304 224 Z" fill="#F6D365" opacity="0.14"/>
+        <rect x="72" y="74" width="782" height="574" rx="34" fill="#FFFFFF" opacity="0.06"/>
+        <g filter="url(#shadow)">
+          <rect x="72" y="74" width="126" height="126" rx="30" fill="#05070F" opacity="0.9"/>
+          <image href="../../src/assets/icons/app.png" x="84" y="86" width="102" height="102" preserveAspectRatio="xMidYMid meet"/>
+        </g>
+        <text x="220" y="134" fill="#FFE7A8" font-family="Trebuchet MS, Segoe UI, Arial, sans-serif" font-size="23" font-weight="800" letter-spacing="2">FARAZ AUTOMATION</text>
+        <text x="220" y="168" fill="#D9E4EF" font-family="Trebuchet MS, Segoe UI, Arial, sans-serif" font-size="22" font-weight="600">Luxury WhatsApp campaign desktop app</text>
+        <text x="72" y="282" fill="#FFFFFF" font-family="Trebuchet MS, Segoe UI, Arial, sans-serif" font-size="76" font-weight="900">PREMIUM</text>
+<text x="72" y="360" fill="#FFFFFF" font-family="Trebuchet MS, Segoe UI, Arial, sans-serif" font-size="76" font-weight="900">CAMPAIGN</text>
+<text x="72" y="438" fill="#FFFFFF" font-family="Trebuchet MS, Segoe UI, Arial, sans-serif" font-size="74" font-weight="900">SOFTWARE</text>
+        <text x="78" y="510" fill="#F7E7F0" font-family="Trebuchet MS, Segoe UI, Arial, sans-serif" font-size="28" font-weight="600">Use a sharper luxury layout to sell clean automation workflows,</text>
+<text x="78" y="546" fill="#F7E7F0" font-family="Trebuchet MS, Segoe UI, Arial, sans-serif" font-size="28" font-weight="600">stronger visual trust, and premium-looking reporting dashboards.</text>
+        <rect x="78" y="594" width="180" height="48" rx="18" fill="#173245" opacity="0.94"/>
+<text x="168.0" y="625" fill="#FFFFFF" font-family="Trebuchet MS, Segoe UI, Arial, sans-serif" font-size="19" font-weight="800" text-anchor="middle">Sales Ready</text>
+<rect x="280" y="594" width="180" height="48" rx="18" fill="#1C6B4D" opacity="0.94"/>
+<text x="370.0" y="625" fill="#FFFFFF" font-family="Trebuchet MS, Segoe UI, Arial, sans-serif" font-size="19" font-weight="800" text-anchor="middle">Human Brand</text>
+<rect x="482" y="594" width="180" height="48" rx="18" fill="#7A5825" opacity="0.94"/>
+<text x="572.0" y="625" fill="#FFFFFF" font-family="Trebuchet MS, Segoe UI, Arial, sans-serif" font-size="19" font-weight="800" text-anchor="middle">Premium UI</text>
+        <text x="78" y="676" fill="#FFE8C2" font-family="Trebuchet MS, Segoe UI, Arial, sans-serif" font-size="22" font-weight="700">Made for Upwork sales art, polished proposals, and higher-value positioning.</text>
+        <g filter="url(#shadow)">
+          <rect x="950" y="96" width="258" height="520" rx="32" fill="#05070F" opacity="0.62"/>
+          <rect x="972" y="118" width="214" height="42" rx="18" fill="url(#accent)" opacity="0.97"/>
+          <text x="1079" y="146" fill="#1B1209" font-family="Trebuchet MS, Segoe UI, Arial, sans-serif" font-size="19" font-weight="900" text-anchor="middle">FOUNDER TRUST</text>
+          <image href="../../profile.png" x="950" y="96" width="258" height="520" preserveAspectRatio="xMidYMid meet" clip-path="url(#portraitClip)"/>
+        </g>
+      </svg>

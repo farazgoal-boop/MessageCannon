@@ -1,14 +1,11 @@
-"""
-License manager for MessageCannon.
-"""
+"""License manager for MessageCannon."""
 
-import hashlib
 import json
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional, Dict, Any
 from .helpers import get_app_data_dir, load_json, save_json
-from .constants import TRIAL_DAYS
+from .constants import PAID_PASSKEY, TRIAL_DAYS
 
 
 class LicenseManager:
@@ -88,10 +85,16 @@ class LicenseManager:
         license_type = license_data.get("type", "trial")
         
         if license_type == "trial":
-            trial_end_str = license_data.get("trial_end")
-            trial_end = datetime.fromisoformat(trial_end_str)
+            trial_start_str = license_data.get("trial_start")
+            if not trial_start_str:
+                return LicenseManager._create_trial()
+
+            trial_start = datetime.fromisoformat(trial_start_str)
+            # Recompute the effective trial end from the current product policy so
+            # older stored trial files cannot keep a longer legacy trial window.
+            trial_end = trial_start + timedelta(days=TRIAL_DAYS)
             now = datetime.now()
-            
+
             days_remaining = (trial_end - now).days
             
             if days_remaining < 0:
@@ -148,22 +151,7 @@ class LicenseManager:
         if not license_key:
             return False
         
-        try:
-            # Simple offline validation using hash
-            # Format: MessageCannon-{key}-{hash}
-            parts = license_key.split("-")
-            if len(parts) != 3 or parts[0] != "MessageCannon":
-                return False
-            
-            key_part = parts[1]
-            provided_hash = parts[2]
-            
-            # Verify hash
-            expected_hash = hashlib.sha256(f"MessageCannon-{key_part}-salt".encode()).hexdigest()[:16]
-            
-            return provided_hash == expected_hash
-        except Exception:
-            return False
+        return license_key.strip() == PAID_PASSKEY
     
     @staticmethod
     def activate_license(license_key: str) -> Dict[str, Any]:
@@ -193,3 +181,35 @@ class LicenseManager:
             return {"success": True, "message": "License activated successfully"}
         except Exception as e:
             return {"success": False, "message": f"Failed to activate license: {str(e)}"}
+
+    @staticmethod
+    def deactivate_license() -> Dict[str, Any]:
+        """Deactivate a commercial license without resetting the free trial."""
+        license_file = LicenseManager.get_license_path()
+
+        if not license_file.exists():
+            return {"success": False, "message": "No active license found"}
+
+        try:
+            with open(license_file, 'r') as f:
+                license_data = json.load(f)
+
+            if license_data.get("type") != "commercial":
+                return {"success": False, "message": "No commercial license is active"}
+
+            expired_start = datetime.now() - timedelta(days=TRIAL_DAYS + 1)
+            expired_end = expired_start + timedelta(days=TRIAL_DAYS)
+            replacement_data = {
+                "type": "trial",
+                "trial_start": expired_start.isoformat(),
+                "trial_end": expired_end.isoformat(),
+                "license_key": None,
+                "deactivated_at": datetime.now().isoformat(),
+            }
+
+            with open(license_file, 'w') as f:
+                json.dump(replacement_data, f)
+
+            return {"success": True, "message": "License deactivated successfully"}
+        except Exception as e:
+            return {"success": False, "message": f"Failed to deactivate license: {str(e)}"}

@@ -1,38 +1,95 @@
-"""
-WhatsApp sender for sending messages via WhatsApp Web.
-"""
+"""WhatsApp Web sender with session persistence and delivery tracking."""
 
-import time
+from __future__ import annotations
+
 import random
-from typing import Callable, Optional, List, Dict
-from threading import Thread, Event
-import queue
+import threading
+import time
+from pathlib import Path
+from typing import Any, Callable, Dict, List, Optional
+from urllib.parse import quote
 
-from ..models import Contact, MessageLog, MessageStatus, Campaign
-from ..utils.logger import Logger
+from selenium.common.exceptions import TimeoutException
+from selenium.webdriver.common.by import By
+from selenium.webdriver.remote.webelement import WebElement
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.support.ui import WebDriverWait
+
+from ..delivery_tracker import DeliveryTracker
+from ..models import Contact
+from ..session_manager import SessionManager, SessionState
 from ..utils.constants import (
-    MIN_MESSAGE_DELAY,
-    MAX_MESSAGE_DELAY,
     JITTER_RANGE,
     MAX_MESSAGES_PER_SESSION,
-    MAX_RETRY_ATTEMPTS,
-    RETRY_DELAY
+    MAX_MESSAGE_DELAY,
+    MIN_MESSAGE_DELAY,
+    WHATSAPP_WEB_URL,
 )
+from ..utils.logger import Logger
+
+
+ProgressCallback = Callable[[int, int, str], None]
+EventCallback = Callable[[str, Dict[str, Any]], None]
 
 
 class WhatsAppSender:
-    """Handles WhatsApp message sending."""
-    
+    """Automate sending through WhatsApp Web using Selenium."""
+
     def __init__(self):
-        """Initialize WhatsApp sender."""
+        self.session_manager = SessionManager()
+        self.delivery_tracker = DeliveryTracker()
         self.is_sending = False
-        self.pause_event = Event()
-        self.pause_event.set()  # Initially not paused
-        self.stop_event = Event()
-        self.message_queue: queue.Queue = queue.Queue()
+        self.pause_event = threading.Event()
+        self.pause_event.set()
+        self.stop_event = threading.Event()
+        self.driver = None
+        self.driver_lock = threading.RLock()
         self.sent_count = 0
         self.failed_count = 0
-    
+
+    def initialize(self) -> SessionState:
+        """Launch the browser if needed and ensure a WhatsApp session is available."""
+        with self.driver_lock:
+            if self.driver is None:
+                self.driver = self.session_manager.build_driver()
+
+            state = self.session_manager.ensure_active_session(self.driver)
+            if state.is_active:
+                self.delivery_tracker.start_monitoring(self.resolve_tracked_message_status, interval_seconds=5)
+            return state
+
+    def shutdown(self) -> None:
+        """Stop background monitoring and close the browser."""
+        self.delivery_tracker.stop_monitoring()
+        with self.driver_lock:
+            if self.driver is not None:
+                try:
+                    self.driver.quit()
+                except Exception:
+                    Logger.warning("Failed to close Selenium driver cleanly")
+                self.driver = None
+
+    def get_session_state(self) -> SessionState:
+        """Return current persisted session state."""
+        return self.session_manager.get_session_state()
+
+    def reset_session(self) -> None:
+        """Clear the saved browser profile and force a fresh QR login."""
+        self.shutdown()
+        self.session_manager.reset_session(mark_logged_out=True)
+
+    def export_report(self, format: str = "csv") -> Path:
+        """Export delivery tracking data."""
+        return self.delivery_tracker.export_report(format=format)
+
+    def get_delivery_stats(self) -> Dict[str, Any]:
+        """Return delivery tracking aggregates."""
+        return self.delivery_tracker.get_stats()
+
+    def get_recent_activity(self, limit: int = 20) -> List[Dict[str, Any]]:
+        """Return recent outbound tracked messages."""
+        return self.delivery_tracker.get_recent_messages(limit=limit)
+
     def send_messages(
         self,
         contacts: List[Contact],
@@ -40,201 +97,295 @@ class WhatsAppSender:
         delay: int = 30,
         use_jitter: bool = True,
         max_messages: int = MAX_MESSAGES_PER_SESSION,
-        progress_callback: Optional[Callable[[int, int, str], None]] = None
-    ) -> Dict[str, int]:
-        """
-        Send messages to contacts.
-        
-        Args:
-            contacts: List of Contact objects
-            messages: List of message texts (should match contacts length)
-            delay: Delay between messages in seconds
-            use_jitter: Whether to add random jitter
-            max_messages: Maximum messages to send
-            progress_callback: Callback function for progress updates
-            
-        Returns:
-            Dictionary with send statistics
-        """
-        # Validate inputs
+        progress_callback: Optional[ProgressCallback] = None,
+        event_callback: Optional[EventCallback] = None,
+    ) -> Dict[str, Any]:
+        """Send a batch of messages and continuously update tracking records."""
         if len(contacts) != len(messages):
             Logger.error("Contacts and messages count mismatch")
-            return {'sent': 0, 'failed': len(contacts), 'total': len(contacts)}
-        
-        if max_messages > MAX_MESSAGES_PER_SESSION:
-            max_messages = MAX_MESSAGES_PER_SESSION
-        
-        # Validate delay
+            return {"sent": 0, "failed": len(contacts), "total": len(contacts)}
+
         if not (MIN_MESSAGE_DELAY <= delay <= MAX_MESSAGE_DELAY):
             delay = 30
-        
+
+        capped_total = min(len(contacts), max_messages, MAX_MESSAGES_PER_SESSION)
+        state = self.initialize()
+        if state.requires_qr and not state.is_active:
+            if event_callback:
+                event_callback("session", {"status": state.status_text})
+            return {"sent": 0, "failed": capped_total, "total": capped_total, "status": state.status_text}
+
         self.is_sending = True
         self.sent_count = 0
         self.failed_count = 0
         self.stop_event.clear()
-        
+
         start_time = time.time()
-        
-        # Main sending loop
-        for i, (contact, message) in enumerate(zip(contacts[:max_messages], messages[:max_messages])):
-            # Check for stop signal
+        for index, (contact, message) in enumerate(zip(contacts[:capped_total], messages[:capped_total]), start=1):
             if self.stop_event.is_set():
-                Logger.info("Sending stopped by user")
                 break
-            
-            # Wait if paused
+
             self.pause_event.wait()
-            
-            try:
-                # Call progress callback
-                if progress_callback:
-                    progress_callback(i + 1, max_messages, f"Sending to {contact.phone}")
-                
-                # Send message
-                success = self._send_to_whatsapp(contact, message)
-                
-                if success:
-                    self.sent_count += 1
-                    Logger.info(f"Message sent to {contact.phone}")
-                else:
-                    self.failed_count += 1
-                    Logger.warning(f"Failed to send message to {contact.phone}")
-                
-                # Calculate delay with jitter
-                actual_delay = self._calculate_delay(delay, use_jitter)
-                
-                # Wait before next message
-                if i < max_messages - 1:  # Don't delay after last message
-                    time.sleep(actual_delay)
-            
-            except Exception as e:
-                Logger.error(f"Error sending to {contact.phone}: {e}")
+            if progress_callback:
+                progress_callback(index, capped_total, f"Sending to {contact.phone}")
+
+            tracked_id = self.delivery_tracker.create_message(contact.phone, message, status="pending")
+            success = self._send_single_message(contact, message, tracked_id, event_callback)
+
+            if success:
+                self.sent_count += 1
+            else:
                 self.failed_count += 1
-        
+
+            if index < capped_total:
+                time.sleep(self._calculate_delay(delay, use_jitter))
+
         elapsed_time = time.time() - start_time
         self.is_sending = False
-        
-        result = {
-            'sent': self.sent_count,
-            'failed': self.failed_count,
-            'total': min(len(contacts), max_messages),
-            'elapsed_time': elapsed_time
+        stats = self.get_delivery_stats()
+        return {
+            "sent": self.sent_count,
+            "failed": self.failed_count,
+            "total": capped_total,
+            "elapsed_time": elapsed_time,
+            "delivery_rate": stats.get("delivery_rate", 0.0),
         }
-        
-        return result
-    
-    def _send_to_whatsapp(self, contact: Contact, message: str) -> bool:
-        """
-        Send single message to WhatsApp.
-        
-        Args:
-            contact: Contact object
-            message: Message text
-            
-        Returns:
-            True if sent successfully, False otherwise
-        """
-        try:
-            # Method 1: Try pywhatkit
-            try:
-                import pywhatkit
-                pywhatkit.sendwhatmsg_instantly(contact.phone, message, wait_time=5)
-                return True
-            except ImportError:
-                Logger.debug("pywhatkit not available, trying selenium")
-            except Exception as e:
-                Logger.debug(f"pywhatkit failed: {e}, trying selenium")
-            
-            # Method 2: Try selenium (fallback)
-            try:
-                return self._send_via_selenium(contact, message)
-            except ImportError:
-                Logger.error("Neither pywhatkit nor selenium available")
-                return False
-        
-        except Exception as e:
-            Logger.error(f"Error sending message: {e}")
-            return False
-    
-    def _send_via_selenium(self, contact: Contact, message: str) -> bool:
-        """
-        Send message via Selenium (WhatsApp Web automation).
-        
-        Args:
-            contact: Contact object
-            message: Message text
-            
-        Returns:
-            True if sent successfully, False otherwise
-        """
-        try:
-            from selenium import webdriver
-            from selenium.webdriver.common.by import By
-            from selenium.webdriver.support.ui import WebDriverWait
-            from selenium.webdriver.support import expected_conditions as EC
-            
-            # This is a placeholder - full implementation would require
-            # proper WhatsApp Web automation
-            Logger.debug(f"Selenium send to {contact.phone}: {message[:50]}...")
-            
-            # In a real implementation, this would:
-            # 1. Open WhatsApp Web
-            # 2. Search for contact
-            # 3. Type message
-            # 4. Send
-            
-            return True
-        
-        except Exception as e:
-            Logger.error(f"Selenium send error: {e}")
-            return False
-    
-    def _calculate_delay(self, base_delay: int, use_jitter: bool) -> float:
-        """
-        Calculate actual delay with optional jitter.
-        
-        Args:
-            base_delay: Base delay in seconds
-            use_jitter: Whether to add jitter
-            
-        Returns:
-            Actual delay in seconds
-        """
-        if not use_jitter:
-            return float(base_delay)
-        
-        # Add random variation ±5 seconds
-        jitter = random.randint(-JITTER_RANGE, JITTER_RANGE)
-        return float(max(1, base_delay + jitter))
-    
+
     def pause_sending(self) -> None:
-        """Pause message sending."""
         self.pause_event.clear()
         Logger.info("Message sending paused")
-    
+
     def resume_sending(self) -> None:
-        """Resume message sending."""
         self.pause_event.set()
         Logger.info("Message sending resumed")
-    
+
     def stop_sending(self) -> None:
-        """Stop message sending."""
         self.stop_event.set()
+        self.pause_event.set()
         Logger.info("Message sending stopped")
-    
-    def get_status(self) -> Dict[str, any]:
-        """
-        Get sending status.
-        
-        Returns:
-            Status dictionary
-        """
+
+    def get_status(self) -> Dict[str, Any]:
         return {
-            'is_sending': self.is_sending,
-            'is_paused': not self.pause_event.is_set(),
-            'sent': self.sent_count,
-            'failed': self.failed_count
+            "is_sending": self.is_sending,
+            "is_paused": not self.pause_event.is_set(),
+            "sent": self.sent_count,
+            "failed": self.failed_count,
+            "session": self.get_session_state().status_text,
         }
+
+    def get_progress(self, total: int) -> float:
+        if total == 0:
+            return 0.0
+        return min(((self.sent_count + self.failed_count) / total) * 100.0, 100.0)
+
+    def resolve_tracked_message_status(self, tracked_message: Dict[str, Any]) -> Optional[str]:
+        """Inspect WhatsApp Web DOM to determine the current delivery status."""
+        if self.driver is None:
+            return None
+
+        phone = str(tracked_message.get("phone") or "")
+        message_text = str(tracked_message.get("message_text") or "")
+        if not phone or not message_text:
+            return None
+
+        with self.driver_lock:
+            try:
+                self._open_chat(phone)
+                message_element = self._find_message_element(message_text)
+                return self._extract_status_from_message(message_element)
+            except Exception as exc:
+                Logger.debug(f"Could not resolve delivery status for {phone}: {exc}")
+                return None
+
+    def _send_single_message(
+        self,
+        contact: Contact,
+        message: str,
+        tracked_id: Optional[int],
+        event_callback: Optional[EventCallback],
+    ) -> bool:
+        with self.driver_lock:
+            try:
+                self._open_chat(contact.phone, message)
+                composer = self._wait_for_composer()
+                if composer.text.strip() == "":
+                    composer.send_keys(message)
+
+                send_button = self._wait_for_send_button()
+                send_button.click()
+
+                message_element = self._wait_for_message_echo(message)
+                resolved_status = self._extract_status_from_message(message_element) or "sent"
+
+                if tracked_id is not None:
+                    self.delivery_tracker.update_status(tracked_id, "sent")
+                    whatsapp_message_id = message_element.get_attribute("data-id") or message_element.get_attribute("data-message-id")
+                    if whatsapp_message_id:
+                        self.delivery_tracker.db.update_tracked_message(
+                            tracked_id,
+                            whatsapp_message_id=whatsapp_message_id,
+                        )
+                    self.delivery_tracker.update_status(tracked_id, resolved_status)
+
+                if event_callback:
+                    event_callback(
+                        "message",
+                        {
+                            "phone": contact.phone,
+                            "message": message,
+                            "status": resolved_status,
+                        },
+                    )
+                return True
+            except Exception as exc:
+                Logger.error(f"Failed sending to {contact.phone}: {exc}")
+                if tracked_id is not None:
+                    self.delivery_tracker.update_status(tracked_id, "failed", error_reason=str(exc))
+                if event_callback:
+                    event_callback(
+                        "message",
+                        {
+                            "phone": contact.phone,
+                            "message": message,
+                            "status": "failed",
+                            "error": str(exc),
+                        },
+                    )
+                return False
+
+    def _open_chat(self, phone: str, message: Optional[str] = None) -> None:
+        if self.driver is None:
+            raise RuntimeError("WhatsApp driver is not initialized")
+
+        chat_url = f"{WHATSAPP_WEB_URL}send?phone={phone}"
+        if message is not None:
+            chat_url += f"&text={quote(message)}"
+        self.driver.get(chat_url)
+        WebDriverWait(self.driver, 45).until(lambda driver: self._wait_targets_present(driver))
+
+    def _wait_targets_present(self, driver) -> bool:
+        selectors = [
+            "div[contenteditable='true'][data-tab='10']",
+            "div[contenteditable='true'][role='textbox']",
+            "button[aria-label='Send']",
+            "span[data-icon='send']",
+        ]
+        for selector in selectors:
+            try:
+                if driver.find_elements(By.CSS_SELECTOR, selector):
+                    return True
+            except Exception:
+                continue
+        return False
+
+    def _wait_for_composer(self) -> WebElement:
+        if self.driver is None:
+            raise RuntimeError("WhatsApp driver is not initialized")
+
+        selector_candidates = [
+            (By.CSS_SELECTOR, "div[contenteditable='true'][data-tab='10']"),
+            (By.CSS_SELECTOR, "div[contenteditable='true'][role='textbox']"),
+            (By.XPATH, "//footer//div[@contenteditable='true']"),
+        ]
+        last_error: Optional[Exception] = None
+        for by, selector in selector_candidates:
+            try:
+                return WebDriverWait(self.driver, 20).until(EC.presence_of_element_located((by, selector)))
+            except Exception as exc:
+                last_error = exc
+        raise TimeoutException("Message composer not found") from last_error
+
+    def _wait_for_send_button(self) -> WebElement:
+        if self.driver is None:
+            raise RuntimeError("WhatsApp driver is not initialized")
+
+        button_candidates = [
+            (By.CSS_SELECTOR, "button[aria-label='Send']"),
+            (By.XPATH, "//button[@aria-label='Send']"),
+            (By.XPATH, "//span[@data-icon='send']/ancestor::button[1]"),
+        ]
+        last_error: Optional[Exception] = None
+        for by, selector in button_candidates:
+            try:
+                return WebDriverWait(self.driver, 20).until(EC.element_to_be_clickable((by, selector)))
+            except Exception as exc:
+                last_error = exc
+        raise TimeoutException("Send button not found") from last_error
+
+    def _wait_for_message_echo(self, message: str) -> WebElement:
+        if self.driver is None:
+            raise RuntimeError("WhatsApp driver is not initialized")
+
+        WebDriverWait(self.driver, 20).until(lambda driver: len(self._find_outgoing_messages()) > 0)
+        end_time = time.time() + 20
+        while time.time() < end_time:
+            try:
+                return self._find_message_element(message)
+            except Exception:
+                time.sleep(0.5)
+        raise TimeoutException("Sent message did not appear in chat")
+
+    def _find_message_element(self, message: str) -> WebElement:
+        outgoing_messages = self._find_outgoing_messages()
+        normalized_message = self._normalize_message(message)
+        for element in reversed(outgoing_messages):
+            text = self._normalize_message(element.text)
+            if normalized_message and normalized_message in text:
+                return element
+        if outgoing_messages:
+            return outgoing_messages[-1]
+        raise TimeoutException("No outgoing messages found")
+
+    def _find_outgoing_messages(self) -> List[WebElement]:
+        if self.driver is None:
+            return []
+
+        selectors = [
+            "div.message-out",
+            "div[data-testid='msg-container'][data-is-outgoing='true']",
+            "div[data-testid='msg-container']",
+        ]
+        for selector in selectors:
+            try:
+                elements = self.driver.find_elements(By.CSS_SELECTOR, selector)
+                if elements:
+                    return elements
+            except Exception:
+                continue
+        return []
+
+    def _extract_status_from_message(self, message_element: WebElement) -> Optional[str]:
+        icon_map = {
+            "msg-check": "sent",
+            "msg-dblcheck": "delivered",
+            "msg-dblcheck-ack": "read",
+        }
+        for icon_name, status in icon_map.items():
+            try:
+                if message_element.find_elements(By.CSS_SELECTOR, f"span[data-icon='{icon_name}']"):
+                    return status
+            except Exception:
+                continue
+
+        try:
+            aria_chunks = (message_element.get_attribute("aria-label") or "").lower()
+            if "read" in aria_chunks:
+                return "read"
+            if "delivered" in aria_chunks:
+                return "delivered"
+            if "sent" in aria_chunks:
+                return "sent"
+        except Exception:
+            pass
+        return None
+
+    def _calculate_delay(self, base_delay: int, use_jitter: bool) -> float:
+        if not use_jitter:
+            return float(base_delay)
+        return float(max(1, base_delay + random.randint(-JITTER_RANGE, JITTER_RANGE)))
+
+    def _normalize_message(self, message: str) -> str:
+        return " ".join((message or "").split())
     
     def get_progress(self, total: int) -> float:
         """
