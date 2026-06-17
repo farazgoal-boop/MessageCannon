@@ -6,6 +6,7 @@ import json
 import os
 import sys
 import threading
+import time
 from datetime import datetime
 from pathlib import Path
 from tkinter import BooleanVar, IntVar, StringVar, filedialog, messagebox
@@ -20,6 +21,7 @@ import customtkinter as ctk
 from PIL import Image
 from ..ui.card_creator_tab import build_card_creator_view
 from ..ui.campaigns_tab import build_campaigns_view
+from ..ui.reports_chart import ReportsChart
 
 
 def _ensure_tcl_tk_paths() -> None:
@@ -238,6 +240,11 @@ class MainWindow(ctk.CTk):
         self.send_thread: Optional[threading.Thread] = None
         self.license_dialog: Optional[ctk.CTkToplevel] = None
         self.license_locked = False
+        self._active_view = "Dashboard"
+        self._refresh_job: Optional[str] = None
+        self._search_job: Optional[str] = None
+        self._reports_chart: Optional[ReportsChart] = None
+        self._last_heartbeat = time.time()
         self.brand_logo = self._load_brand_image((58, 58))
         self.header_brand_logo = self._load_brand_image((34, 34))
 
@@ -297,12 +304,13 @@ class MainWindow(ctk.CTk):
         self._enforce_license()
         self._load_templates()
         self._reload_contacts()
-        self._refresh_stats()
+        self._refresh_stats(update_text_feeds=True, update_dashboard_periods=True)
         self._refresh_preview()
         self._show_view("Dashboard")
 
         self.after(800, self._start_session_bootstrap)
-        self.after(5000, self._periodic_refresh)
+        self.after(10000, self._periodic_refresh)
+        self.after(2000, self._heartbeat_check)
 
     def _load_brand_image(self, size: tuple[int, int]) -> Optional[ctk.CTkImage]:
         image_path = Path(__file__).resolve().parents[1] / "assets" / "icons" / "app.png"
@@ -975,7 +983,7 @@ class MainWindow(ctk.CTk):
         ctk.CTkButton(toolbar, text="Refresh", fg_color="#203243", command=self._reload_contacts).grid(row=0, column=2, padx=(0, 14), pady=14)
         search_entry = ctk.CTkEntry(toolbar, textvariable=self.search_var, placeholder_text="Search by name or phone")
         search_entry.grid(row=0, column=3, padx=(0, 14), pady=14, sticky="ew")
-        search_entry.bind("<KeyRelease>", lambda _event: self._render_contacts_directory())
+        search_entry.bind("<KeyRelease>", lambda _event: self._schedule_contact_search())
 
         self.contacts_summary_label = ctk.CTkLabel(frame, text="0 contacts loaded", text_color="#8ea5af")
         self.contacts_summary_label.grid(row=2, column=0, sticky="w", padx=6, pady=(0, 10))
@@ -1224,7 +1232,11 @@ class MainWindow(ctk.CTk):
             actions,
             values=["today", "week", "month", "all"],
             variable=self.report_period_var,
-            command=lambda _value: self._refresh_stats(),
+            command=lambda _value: self._refresh_stats(
+                update_chart=True,
+                update_text_feeds=True,
+                update_dashboard_periods=True,
+            ),
             fg_color="#173245",
             button_color="#1d3545",
             button_hover_color="#203243",
@@ -1265,7 +1277,7 @@ class MainWindow(ctk.CTk):
         )
         self._reports_chart_host = tk.Frame(chart_frame, bg="#0c131b", height=180)
         self._reports_chart_host.pack(fill="x", padx=8, pady=(0, 10))
-        self._reports_chart_canvas = None
+        self._reports_chart = ReportsChart(self._reports_chart_host)
 
         ctk.CTkLabel(body, text="Recent Delivery Activity", font=ctk.CTkFont(size=18, weight="bold")).grid(
             row=3, column=0, padx=18, pady=(4, 8), sticky="w"
@@ -1461,6 +1473,7 @@ class MainWindow(ctk.CTk):
         return frame
 
     def _show_view(self, view_name: str) -> None:
+        self._active_view = view_name
         self._apply_view_chrome(view_name)
         self.header_title.configure(text=view_name)
         for name, frame in self.view_containers.items():
@@ -1476,8 +1489,13 @@ class MainWindow(ctk.CTk):
                 border_color="#173245" if is_active else "#183144",
                 text_color="#d8ebf6" if is_active else "#a7bac6",
             )
-        if view_name in {"Compose", "Reports", "Dashboard"}:
-            self._refresh_stats()
+        if view_name == "Reports":
+            self._refresh_stats(update_chart=True, update_text_feeds=True, update_dashboard_periods=True)
+        elif view_name in {"Compose", "Dashboard"}:
+            self._refresh_stats(
+                update_text_feeds=(view_name == "Dashboard"),
+                update_dashboard_periods=True,
+            )
         if view_name == "Compose":
             self._refresh_preview()
 
@@ -1539,7 +1557,7 @@ class MainWindow(ctk.CTk):
             },
         )
         self._update_settings_summary()
-        self._refresh_stats()
+        self._refresh_stats(update_text_feeds=True, update_dashboard_periods=True)
 
     def _apply_theme(self, selected_theme: str) -> None:
         ctk.set_appearance_mode(selected_theme)
@@ -1706,7 +1724,7 @@ class MainWindow(ctk.CTk):
         self._render_compose_contacts()
         self._update_compose_summary()
         self._refresh_preview()
-        self._refresh_stats()
+        self._refresh_stats(update_text_feeds=True, update_dashboard_periods=True)
 
     def _sync_contact_selection(self) -> None:
         valid_keys = set()
@@ -1719,7 +1737,13 @@ class MainWindow(ctk.CTk):
             if key not in valid_keys:
                 del self.contact_selection_vars[key]
 
+    def _schedule_contact_search(self) -> None:
+        if self._search_job is not None:
+            self.after_cancel(self._search_job)
+        self._search_job = self.after(300, self._render_contacts_directory)
+
     def _render_contacts_directory(self) -> None:
+        self._search_job = None
         for child in self.contacts_directory.winfo_children():
             child.destroy()
 
@@ -1739,10 +1763,21 @@ class MainWindow(ctk.CTk):
                 text_color="#8ea5af",
             ).pack(padx=18, pady=(0, 18), anchor="w")
             self._bind_scrollable_frame_mousewheel(self.contacts_directory)
-            self._sync_widget_theme(self.contacts_directory)
             return
 
-        for contact in results:
+        display_limit = 200
+        visible = results[:display_limit]
+        if len(results) > display_limit:
+            notice = ctk.CTkFrame(self.contacts_directory, fg_color="#122331", corner_radius=12)
+            notice.pack(fill="x", padx=6, pady=(6, 2))
+            ctk.CTkLabel(
+                notice,
+                text=f"Showing first {display_limit} of {len(results)} matches — refine your search to narrow results.",
+                text_color="#8ea5af",
+                font=ctk.CTkFont(size=12),
+            ).pack(padx=12, pady=8, anchor="w")
+
+        for contact in visible:
             card = ctk.CTkFrame(self.contacts_directory, fg_color="#0c131b", corner_radius=18, border_width=1, border_color="#163144")
             card.pack(fill="x", padx=6, pady=6)
             top = ctk.CTkFrame(card, fg_color="transparent")
@@ -1774,7 +1809,6 @@ class MainWindow(ctk.CTk):
             ).pack(side="right")
 
         self._bind_scrollable_frame_mousewheel(self.contacts_directory)
-        self._sync_widget_theme(self.contacts_directory)
 
     def _render_compose_contacts(self) -> None:
         for child in self.compose_contacts_frame.winfo_children():
@@ -1860,10 +1894,29 @@ class MainWindow(ctk.CTk):
         )
         if not file_path:
             return
-        imported_count, errors = self.contact_manager.import_from_file(file_path)
+
+        self.progress_status_var.set("Importing contacts...")
+        self._log_activity(f"Import started from {Path(file_path).name}")
+
+        def worker() -> None:
+            try:
+                imported_count, errors = self.contact_manager.import_from_file(file_path)
+                self.after(0, lambda: self._finish_import(imported_count, errors, file_path))
+            except Exception as exc:
+                Logger.error(f"Contact import failed: {exc}")
+                self.after(0, lambda: messagebox.showerror("Import Failed", str(exc)))
+                self.after(0, lambda: self.progress_status_var.set("Import failed"))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _finish_import(self, imported_count: int, errors: List[str], file_path: str) -> None:
         self._reload_contacts()
+        self.progress_status_var.set("Ready")
         if errors:
-            messagebox.showwarning("Import completed with warnings", f"Imported {imported_count} contacts\n\n" + "\n".join(errors[:10]))
+            messagebox.showwarning(
+                "Import completed with warnings",
+                f"Imported {imported_count} contacts\n\n" + "\n".join(errors[:10]),
+            )
         else:
             messagebox.showinfo("Contacts Imported", f"Imported {imported_count} contacts successfully.")
         self._log_activity(f"Imported {imported_count} contacts from {Path(file_path).name}")
@@ -1908,7 +1961,7 @@ class MainWindow(ctk.CTk):
                 state = self.whatsapp_sender.initialize()
                 self._set_session_status(state.status_text)
                 self._log_activity(state.status_text)
-                self.after(0, self._refresh_stats)
+                self.after(0, lambda: self._refresh_stats(update_dashboard_periods=True))
             except Exception as exc:
                 Logger.warning(f"Session bootstrap failed: {exc}")
                 self._set_session_status("Session expired - please scan QR")
@@ -1981,7 +2034,7 @@ class MainWindow(ctk.CTk):
                 self.after(0, lambda: self.progress_status_var.set("Campaign failed"))
                 self._log_activity(f"Campaign failed: {exc}")
             finally:
-                self.after(0, self._refresh_stats)
+                self.after(0, lambda: self._refresh_stats(update_dashboard_periods=True))
 
         self.send_thread = threading.Thread(target=worker, daemon=True)
         self.send_thread.start()
@@ -2022,9 +2075,14 @@ class MainWindow(ctk.CTk):
         status = str(payload.get("status", "unknown"))
         if phone:
             self._log_activity(f"{phone}: {status}")
-        self._refresh_stats()
 
-    def _refresh_stats(self) -> None:
+    def _refresh_stats(
+        self,
+        *,
+        update_chart: bool = False,
+        update_text_feeds: bool = False,
+        update_dashboard_periods: bool = False,
+    ) -> None:
         stats = self.whatsapp_sender.get_delivery_stats()
         sent_count = int(stats.get("sent_count", 0))
         delivered_count = int(stats.get("delivered_count", 0))
@@ -2043,71 +2101,48 @@ class MainWindow(ctk.CTk):
         )
         self._update_report_summary()
 
-        session_state = self.whatsapp_sender.get_session_state()
-        today_stats = self.db.get_message_stats_for_period("today")
-        week_stats = self.db.get_message_stats_for_period("week")
-        month_stats = self.db.get_message_stats_for_period("month")
+        if update_dashboard_periods:
+            session_state = self.whatsapp_sender.get_session_state()
+            today_stats = self.db.get_message_stats_for_period("today")
+            week_stats = self.db.get_message_stats_for_period("week")
+            month_stats = self.db.get_message_stats_for_period("month")
 
-        self.dashboard_cards["Sent Today"].configure(text=str(today_stats.get("sent_count", 0)))
-        self.dashboard_cards["Delivery Rate"].configure(text=f"{delivery_rate:.1f}%")
-        self.dashboard_cards["Active Session"].configure(text="Active" if session_state.is_active else "Scan QR")
-        self.dashboard_card_meta["Sent Today"].configure(
-            text=f"This week: {week_stats.get('sent_count', 0)} · Month: {month_stats.get('sent_count', 0)}"
-        )
-        self.dashboard_card_meta["Delivery Rate"].configure(text=f"Delivered {delivered_count} | Read {read_count}")
-        self.dashboard_card_meta["Active Session"].configure(text=session_state.status_text)
-        self._update_license_ui()
-        self._set_session_status(session_state.status_text)
-        self.activity_summary_var.set(f"{min(len(self.activity_items), 20)} recent events")
+            self.dashboard_cards["Sent Today"].configure(text=str(today_stats.get("sent_count", 0)))
+            self.dashboard_cards["Delivery Rate"].configure(text=f"{delivery_rate:.1f}%")
+            self.dashboard_cards["Active Session"].configure(text="Active" if session_state.is_active else "Scan QR")
+            self.dashboard_card_meta["Sent Today"].configure(
+                text=f"This week: {week_stats.get('sent_count', 0)} · Month: {month_stats.get('sent_count', 0)}"
+            )
+            self.dashboard_card_meta["Delivery Rate"].configure(text=f"Delivered {delivered_count} | Read {read_count}")
+            self.dashboard_card_meta["Active Session"].configure(text=session_state.status_text)
+            self._update_license_ui()
+            self._set_session_status(session_state.status_text)
 
-        recent_messages = self.whatsapp_sender.get_recent_activity(limit=12)
-        rows = [
-            f"[{str(row.get('status', 'unknown')).upper():<10}] {row.get('phone')}   #{row.get('id')}   {row.get('sent_at') or row.get('created_at')}"
-            for row in recent_messages
-        ]
-        self._replace_text(self.reports_text, "\n".join(rows) if rows else "No tracked messages yet.")
-        self._replace_text(self.activity_text, "\n".join(self.activity_items[:20]) if self.activity_items else "No activity yet.")
-        self._update_reports_chart(read_count, sent_count - read_count if sent_count >= read_count else 0)
+        if update_text_feeds:
+            self.activity_summary_var.set(f"{min(len(self.activity_items), 20)} recent events")
+            recent_messages = self.whatsapp_sender.get_recent_activity(limit=12)
+            rows = [
+                f"[{str(row.get('status', 'unknown')).upper():<10}] {row.get('phone')}   #{row.get('id')}   {row.get('sent_at') or row.get('created_at')}"
+                for row in recent_messages
+            ]
+            self._replace_text(self.reports_text, "\n".join(rows) if rows else "No tracked messages yet.")
+            self._replace_text(self.activity_text, "\n".join(self.activity_items[:20]) if self.activity_items else "No activity yet.")
+
+        if update_chart and self._active_view == "Reports" and self._reports_chart is not None:
+            unread_count = sent_count - read_count if sent_count >= read_count else 0
+            self._reports_chart.update(read_count, unread_count)
 
     def _update_reports_chart(self, read_count: int, unread_count: int) -> None:
-        """Render read vs unread pie chart in Reports tab."""
-        if not hasattr(self, "_reports_chart_host"):
-            return
-        try:
-            from matplotlib.figure import Figure
-            from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
-
-            if self._reports_chart_canvas is not None:
-                self._reports_chart_canvas.get_tk_widget().destroy()
-                self._reports_chart_canvas = None
-
-            figure = Figure(figsize=(4.5, 1.8), dpi=100, facecolor="#0c131b")
-            axis = figure.add_subplot(111)
-            if read_count + unread_count == 0:
-                axis.text(0.5, 0.5, "No data yet", ha="center", va="center", color="#8ea5af")
-                axis.set_facecolor("#0c131b")
-                axis.axis("off")
-            else:
-                axis.pie(
-                    [read_count, unread_count],
-                    labels=["Read", "Unread"],
-                    colors=["#39b37a", "#7d3037"],
-                    autopct="%1.0f%%",
-                    textprops={"color": "#d8ebf6", "fontsize": 9},
-                )
-                axis.set_facecolor("#0c131b")
-            self._reports_chart_canvas = FigureCanvasTkAgg(figure, master=self._reports_chart_host)
-            self._reports_chart_canvas.draw()
-            self._reports_chart_canvas.get_tk_widget().pack(fill="both", expand=True)
-        except Exception as exc:
-            Logger.warning(f"Chart render skipped: {exc}")
+        """Legacy hook — delegates to reusable chart instance."""
+        if self._reports_chart is not None:
+            self._reports_chart.update(read_count, unread_count)
 
     def _export_report(self) -> None:
         try:
             output_path = self.whatsapp_sender.export_report(self.report_format_var.get())
             self._log_activity(f"Report exported to {output_path.name}")
             messagebox.showinfo("Report Exported", f"Saved report to:\n{output_path}")
-            self._refresh_stats()
+            self._refresh_stats(update_chart=True, update_text_feeds=True, update_dashboard_periods=True)
         except Exception as exc:
             Logger.error(f"Export failed: {exc}")
             messagebox.showerror("Export Failed", str(exc))
@@ -2132,8 +2167,25 @@ class MainWindow(ctk.CTk):
         return str(contact.id if contact.id is not None else f"idx-{index}-{contact.phone}")
 
     def _periodic_refresh(self) -> None:
-        self._refresh_stats()
-        self.after(5000, self._periodic_refresh)
+        if self._refresh_job is not None:
+            self.after_cancel(self._refresh_job)
+        try:
+            if self._active_view == "Reports":
+                self._refresh_stats(update_chart=True, update_text_feeds=True)
+            elif self._active_view == "Dashboard":
+                self._refresh_stats(update_dashboard_periods=True, update_text_feeds=True)
+            else:
+                self._refresh_stats()
+        finally:
+            self._refresh_job = self.after(10000, self._periodic_refresh)
+
+    def _heartbeat_check(self) -> None:
+        now = time.time()
+        elapsed = now - self._last_heartbeat
+        if elapsed > 5.0:
+            Logger.warning(f"UI heartbeat delay detected: {elapsed:.1f}s since last tick")
+        self._last_heartbeat = now
+        self.after(2000, self._heartbeat_check)
 
     def _build_email_view(self) -> None:
         """Bulk Email Campaign view — full CustomTkinter UI matching app style."""
@@ -2230,17 +2282,24 @@ class MainWindow(ctk.CTk):
                 row=i, column=1, padx=(4, 18), pady=5, sticky="ew")
 
         def test_connection():
-            try:
-                conn = smtplib.SMTP(self._em_host.get(), int(self._em_port.get()))
-                conn.starttls(context=ssl.create_default_context())
-                conn.login(self._em_user.get(), self._em_pass.get())
-                conn.quit()
-                messagebox.showinfo("Success ✅", "SMTP connection successful!")
-            except smtplib.SMTPAuthenticationError:
-                messagebox.showerror("Auth Failed",
-                    "Wrong username/password.\nFor Gmail use an App Password.")
-            except Exception as ex:
-                messagebox.showerror("Connection Failed", str(ex))
+            def worker() -> None:
+                try:
+                    conn = smtplib.SMTP(
+                        self._em_host.get(), int(self._em_port.get()), timeout=10,
+                    )
+                    conn.starttls(context=ssl.create_default_context())
+                    conn.login(self._em_user.get(), self._em_pass.get())
+                    conn.quit()
+                    self.after(0, lambda: messagebox.showinfo("Success ✅", "SMTP connection successful!"))
+                except smtplib.SMTPAuthenticationError:
+                    self.after(0, lambda: messagebox.showerror(
+                        "Auth Failed",
+                        "Wrong username/password.\nFor Gmail use an App Password.",
+                    ))
+                except Exception as ex:
+                    self.after(0, lambda: messagebox.showerror("Connection Failed", str(ex)))
+
+            threading.Thread(target=worker, daemon=True).start()
 
         ctk.CTkButton(smtp_card, text="🔌  Test Connection",
                       fg_color="#1c6b4d", hover_color="#24895f",
@@ -2430,7 +2489,8 @@ class MainWindow(ctk.CTk):
                 try:
                     ctx = ssl.create_default_context()
                     conn = smtplib.SMTP(
-                        self._em_host.get(), int(self._em_port.get()))
+                        self._em_host.get(), int(self._em_port.get()), timeout=10,
+                    )
                     conn.starttls(context=ctx)
                     conn.login(self._em_user.get(), self._em_pass.get())
                 except Exception as ex:

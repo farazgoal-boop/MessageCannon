@@ -936,11 +936,10 @@ class CardCreatorV2(ctk.CTkFrame):
             meta = self._collect_meta()
             meta["accent"] = self._accent
             preview_html = generate_html(secs, meta, for_preview=True)
-            self._html = self._get_export_html()
             if self._ensure_html_frame():
                 self._html_frame.load_html(preview_html)
                 self._preview_fallback.pack_forget()
-            self._status.set(f"✅ Live preview · {len(secs)} sections · {len(self._html)} chars")
+            self._status.set(f"✅ Live preview · {len(secs)} sections · {len(preview_html)} chars")
         except Exception as exc:
             logger.exception("Preview update failed")
             self._status.set(f"Preview error: {exc}")
