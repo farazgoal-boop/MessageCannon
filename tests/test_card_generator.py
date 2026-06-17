@@ -52,6 +52,48 @@ class TestCardGenerator(unittest.TestCase):
         self.assertNotIn("<iframe", preview)
         self.assertIn("<iframe", export)
 
+    def test_links_section_no_raw_html_leak(self) -> None:
+        """Ensure link URLs/labels are escaped and never leak raw HTML as visible text."""
+        sections = [{
+            "type": "links",
+            "data": {"links": [{"kind": "youtube", "label": "YouTube",
+                                "url": "https://youtube.com/@faraz"}]},
+        }]
+        meta = {
+            "app_name": "Test",
+            "icon": "📨",
+            "tagline": "Test",
+            "accent": "#6c63ff",
+            "org": "Faraz Automation",
+            "wa": "+92",
+            "email": "a@b.com",
+            "addr": "Karachi",
+            "style": CARD_STYLE_TEMPLATES["Dark Premium"],
+        }
+        result = generate_html(sections, meta, for_preview=False)
+        self.assertIn('target="_blank"', result)
+        self.assertEqual(result.count("<a href="), result.count("</a>"))
+        self.assertIn('href="https://youtube.com/@faraz"', result)
+        import re
+        anchors = re.findall(
+            r'<a href="([^"]*)" target="_blank" style="display:flex[^"]*">',
+            result,
+        )
+        self.assertEqual(anchors, ["https://youtube.com/@faraz"])
+
+    def test_links_section_escapes_quotes_in_url(self) -> None:
+        """Quoted pasted URLs must not break the href attribute."""
+        sections = [{
+            "type": "links",
+            "data": {"links": [{"kind": "youtube", "label": "YouTube",
+                                "url": '"https://youtube.com/@faraz"'}]},
+        }]
+        meta = {"app_name": "Test", "style": CARD_STYLE_TEMPLATES["Dark Premium"]}
+        result = generate_html(sections, meta, for_preview=False)
+        self.assertIn('href="https://youtube.com/@faraz"', result)
+        self.assertNotRegex(result, r'href=""\s*target=')
+        self.assertNotRegex(result, r'href="https://[^"]*""\s*target=')
+
     def test_all_templates_produce_html(self) -> None:
         for name, style in CARD_STYLE_TEMPLATES.items():
             meta = {"app_name": name, "style": style, "accent": style["accent"]}

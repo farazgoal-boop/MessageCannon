@@ -5,6 +5,7 @@ bulk send via WhatsApp + Email, and read/unread tracking.
 """
 
 import logging
+import html as html_module
 import tkinter as tk
 from tkinter import filedialog, messagebox, colorchooser
 import customtkinter as ctk
@@ -114,16 +115,31 @@ def get_yt_thumbnail(vid_id: str) -> str:
     return f"https://img.youtube.com/vi/{vid_id}/hqdefault.jpg"
 
 
+def safe_attr(value: str) -> str:
+    """Escape a string for safe use inside an HTML attribute."""
+    return html_module.escape(str(value), quote=True)
+
+
+def safe_text(value: str) -> str:
+    """Escape a string for safe use as HTML text content."""
+    return html_module.escape(str(value), quote=False)
+
+
+def _clean_url(url: str) -> str:
+    """Strip whitespace and stray surrounding quotes from pasted URLs."""
+    return str(url).strip().strip('"').strip("'").strip()
+
+
 def generate_html(sections: list, meta: dict, for_preview: bool = False) -> str:
     """Generate complete standalone HTML card from sections + meta."""
     accent   = meta.get("accent", "#6c63ff")
-    app_name = meta.get("app_name", "My App")
+    app_name = safe_text(meta.get("app_name", "My App"))
     icon     = meta.get("icon", "⭐")
-    tagline  = meta.get("tagline", "")
-    org      = meta.get("org", "Faraz Automation")
-    wa       = meta.get("wa", "+92 316 2400657")
-    email    = meta.get("email", "farazgoal@gmail.com")
-    addr     = meta.get("addr", "Karachi, Pakistan")
+    tagline  = safe_text(meta.get("tagline", ""))
+    org      = safe_text(meta.get("org", "Faraz Automation"))
+    wa       = safe_text(meta.get("wa", "+92 316 2400657"))
+    email    = safe_text(meta.get("email", "farazgoal@gmail.com"))
+    addr     = safe_text(meta.get("addr", "Karachi, Pakistan"))
     style    = meta.get("style", CARD_STYLE_TEMPLATES["Dark Premium"])
     card_bg  = style.get("bg", "#1a1a2e")
     body_bg  = style.get("body_bg", "#111827")
@@ -131,7 +147,7 @@ def generate_html(sections: list, meta: dict, for_preview: bool = False) -> str:
     header_bg = style.get("header_bg", "#0a1628")
     if not meta.get("accent"):
         accent = style.get("accent", accent)
-    buy_url = meta.get("buy_link", "").strip() or "#"
+    buy_url = safe_attr(_clean_url(meta.get("buy_link", "").strip() or "#"))
 
     body_parts = []
 
@@ -159,21 +175,23 @@ def generate_html(sections: list, meta: dict, for_preview: bool = False) -> str:
         data  = sec.get("data", {})
 
         if stype == "banner" and data.get("url"):
+            banner_url = safe_attr(_clean_url(data["url"]))
             body_parts.append(f"""
     <div style="width:100%;aspect-ratio:16/9;overflow:hidden;background:#111">
-      <img src="{data['url']}" style="width:100%;height:100%;object-fit:cover;display:block"
+      <img src="{banner_url}" style="width:100%;height:100%;object-fit:cover;display:block"
         onerror="this.parentElement.style.background='#1a1a2e'">
     </div>""")
 
         elif stype == "youtube" and data.get("url"):
-            vid = get_yt_id(data["url"])
+            vid = get_yt_id(_clean_url(data["url"]))
             if vid:
+                vid_safe = safe_attr(vid)
                 if for_preview:
-                    thumb = get_yt_thumbnail(vid)
+                    thumb = safe_attr(get_yt_thumbnail(vid))
                     body_parts.append(f"""
     <div style="width:100%;aspect-ratio:16/9;background:#000;
       margin-bottom:16px;position:relative;cursor:pointer"
-      onclick="window.open('https://youtube.com/watch?v={vid}','_blank')">
+      onclick="window.open('https://youtube.com/watch?v={vid_safe}','_blank')">
       <img src="{thumb}" style="width:100%;height:100%;object-fit:cover;display:block">
       <div style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);
         width:60px;height:60px;background:rgba(255,0,0,0.85);border-radius:50%;
@@ -188,7 +206,7 @@ def generate_html(sections: list, meta: dict, for_preview: bool = False) -> str:
     <div style="width:100%;aspect-ratio:16/9;background:#000;margin-bottom:16px">
       <iframe
         width="100%" height="100%"
-        src="https://www.youtube.com/embed/{vid}?rel=0&modestbranding=1"
+        src="https://www.youtube.com/embed/{vid_safe}?rel=0&modestbranding=1"
         frameborder="0"
         allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
         allowfullscreen
@@ -199,7 +217,7 @@ def generate_html(sections: list, meta: dict, for_preview: bool = False) -> str:
         elif stype == "text":
             size    = data.get("size", "medium")
             align   = data.get("align", "left")
-            content = data.get("content", "")
+            content = safe_text(data.get("content", ""))
             fs = {"small":"12px","medium":"14px","large":"18px","heading":"22px"}.get(size,"14px")
             fw = "500" if size == "heading" else "400"
             body_parts.append(f"""
@@ -209,7 +227,7 @@ def generate_html(sections: list, meta: dict, for_preview: bool = False) -> str:
     </div>""")
 
         elif stype == "features":
-            items = [f.strip() for f in data.get("items","").split("\n") if f.strip()]
+            items = [safe_text(f.strip()) for f in data.get("items","").split("\n") if f.strip()]
             if items:
                 rows = "".join(
                     f'<div style="display:flex;align-items:flex-start;gap:8px;margin-bottom:7px">'
@@ -219,9 +237,9 @@ def generate_html(sections: list, meta: dict, for_preview: bool = False) -> str:
     <div style="padding:12px 24px">{rows}</div>""")
 
         elif stype == "price":
-            price     = data.get("price","")
-            old_price = data.get("old_price","")
-            note      = data.get("note","")
+            price     = safe_text(data.get("price",""))
+            old_price = safe_text(data.get("old_price",""))
+            note      = safe_text(data.get("note",""))
             if price:
                 old_html = f'<span style="font-size:12px;text-decoration:line-through;color:rgba(255,255,255,0.35);margin-left:8px">{old_price}</span>' if old_price else ""
                 note_html = f'<div style="font-size:11px;color:rgba(255,255,255,0.45);margin-top:3px">{note}</div>' if note else ""
@@ -251,16 +269,19 @@ def generate_html(sections: list, meta: dict, for_preview: bool = False) -> str:
                 rows = ""
                 icons = {"buy":"🛒","youtube":"▶️","linkedin":"💼","github":"🐙","website":"🌐","gumroad":"🎯","other":"🔗"}
                 for lnk in link_list:
-                    if lnk.get("url"):
+                    url = _clean_url(lnk.get("url", ""))
+                    if url:
                         ic = icons.get(lnk.get("kind","other"),"🔗")
+                        label = safe_text(lnk.get("label", "Link"))
+                        url_attr = safe_attr(url)
                         rows += (
-                            f'<a href="{lnk["url"]}" target="_blank" '
+                            f'<a href="{url_attr}" target="_blank" '
                             f'style="display:flex;align-items:center;gap:10px;padding:9px 14px;'
                             f'background:rgba(255,255,255,0.05);border-radius:8px;'
                             f'text-decoration:none;margin-bottom:6px;'
                             f'border:0.5px solid rgba(255,255,255,0.08)">'
                             f'<span style="font-size:15px">{ic}</span>'
-                            f'<span style="font-size:12px;color:rgba(255,255,255,0.75);flex:1">{lnk.get("label","Link")}</span>'
+                            f'<span style="font-size:12px;color:rgba(255,255,255,0.75);flex:1">{label}</span>'
                             f'<span style="font-size:11px;color:rgba(255,255,255,0.3)">↗</span></a>'
                         )
                 body_parts.append(f'<div style="padding:8px 24px">{rows}</div>')
@@ -851,8 +872,8 @@ class CardCreatorV2(ctk.CTkFrame):
                 d["note"]      = data.get("_note",  ctk.StringVar()).get()
             elif stype == "links":
                 d["links"] = [
-                    {"kind":kind,"label":label,"url":v.get()}
-                    for kind,label,v in data.get("_link_vars",[])
+                    {"kind": kind, "label": label, "url": _clean_url(v.get())}
+                    for kind, label, v in data.get("_link_vars", [])
                 ]
             elif stype == "contact":
                 pass   # uses meta
@@ -870,7 +891,7 @@ class CardCreatorV2(ctk.CTkFrame):
     def _collect_buy_link(self) -> str:
         """Resolve Gumroad/buy URL from links section."""
         if hasattr(self, "_buy_var"):
-            url = self._buy_var.get().strip()
+            url = _clean_url(self._buy_var.get())
             if url:
                 return url
         for sec in self._sections:
@@ -878,7 +899,7 @@ class CardCreatorV2(ctk.CTkFrame):
                 continue
             for kind, _label, var in sec["data"].get("_link_vars", []):
                 if kind == "buy":
-                    url = var.get().strip()
+                    url = _clean_url(var.get())
                     if url:
                         return url
         return ""
