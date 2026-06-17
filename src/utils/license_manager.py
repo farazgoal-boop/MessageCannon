@@ -4,7 +4,7 @@ import json
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional, Dict, Any
-from .helpers import get_app_data_dir, load_json, save_json
+from .paths import get_license_path as get_app_license_path
 from .constants import PAID_PASSKEY, TRIAL_DAYS
 
 
@@ -16,7 +16,7 @@ class LicenseManager:
     @staticmethod
     def get_license_path() -> Path:
         """Get license file path."""
-        return get_app_data_dir() / LicenseManager.LICENSE_FILE
+        return get_app_license_path()
     
     @staticmethod
     def check_license() -> Dict[str, Any]:

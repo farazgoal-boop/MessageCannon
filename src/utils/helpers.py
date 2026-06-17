@@ -2,37 +2,12 @@
 Helper functions and utilities.
 """
 
-import os
 import json
 from pathlib import Path
 from typing import Any, Dict, Optional
 from datetime import datetime
 
-
-def get_app_data_dir() -> Path:
-    """
-    Get application data directory.
-    
-    Returns:
-        Path to .messagecannon directory in user home
-    """
-    app_dir = Path.home() / ".messagecannon"
-    app_dir.mkdir(parents=True, exist_ok=True)
-    return app_dir
-
-
-def get_config_dir() -> Path:
-    """Get configuration directory."""
-    config_dir = get_app_data_dir() / "config"
-    config_dir.mkdir(parents=True, exist_ok=True)
-    return config_dir
-
-
-def get_database_path() -> Path:
-    """Get database file path."""
-    db_dir = get_app_data_dir() / "data"
-    db_dir.mkdir(parents=True, exist_ok=True)
-    return db_dir / "messagecannon.db"
+from .paths import get_app_data_dir, get_config_dir, get_database_path
 
 
 def save_json(data: Dict[str, Any], filename: str, directory: Optional[Path] = None) -> bool:
@@ -210,3 +185,19 @@ def mark_first_launch_complete() -> None:
     config_dir = get_config_dir()
     first_launch_file = config_dir / ".first_launch_complete"
     first_launch_file.touch()
+
+
+__all__ = [
+    "get_app_data_dir",
+    "get_config_dir",
+    "get_database_path",
+    "save_json",
+    "load_json",
+    "format_timestamp",
+    "truncate_string",
+    "format_phone_display",
+    "humanize_number",
+    "calculate_eta",
+    "is_first_launch",
+    "mark_first_launch_complete",
+]

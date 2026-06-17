@@ -8,7 +8,7 @@ from pathlib import Path
 from datetime import datetime
 from typing import Optional
 
-from ..utils.helpers import get_app_data_dir
+from ..utils.paths import get_app_data_dir
 from ..utils.logger import Logger
 
 

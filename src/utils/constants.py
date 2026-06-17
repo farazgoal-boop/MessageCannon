@@ -54,7 +54,7 @@ PAID_PASSKEY = "3march2013"
 
 # Database
 DB_FILENAME = "messagecannon.db"
-DB_LOCATION = "~/.messagecannon"
+DB_LOCATION = "%APPDATA%/MessageCannon Pro"
 
 # File extensions
 ALLOWED_IMPORT_FORMATS = [".xlsx", ".xls", ".csv"]

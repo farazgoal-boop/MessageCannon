@@ -16,6 +16,7 @@ from selenium.webdriver.support.ui import WebDriverWait
 from .database.db_manager import DatabaseManager
 from .utils.constants import WHATSAPP_WEB_URL
 from .utils.logger import Logger
+from .utils.paths import get_session_dir
 
 
 @dataclass
@@ -36,8 +37,7 @@ class SessionManager:
 
     def __init__(self, session_dir: Optional[Path] = None):
         self.db = DatabaseManager()
-        self.session_dir = (session_dir or Path("./whatsapp_session")).resolve()
-        self.session_dir.mkdir(parents=True, exist_ok=True)
+        self.session_dir = session_dir or get_session_dir()
 
     def _default_state(self) -> Dict[str, str]:
         return {

@@ -3,10 +3,10 @@ Logging utility module for MessageCannon application.
 """
 
 import logging
-import os
 from datetime import datetime
-from pathlib import Path
 from typing import Optional
+
+from .paths import get_logs_dir
 
 
 class Logger:
@@ -26,11 +26,7 @@ class Logger:
         if Logger._logger is not None:
             return
         
-        # Create logs directory
-        log_dir = Path.home() / ".messagecannon" / "logs"
-        log_dir.mkdir(parents=True, exist_ok=True)
-        
-        # Create logger
+        log_dir = get_logs_dir()
         Logger._logger = logging.getLogger("MessageCannon")
         Logger._logger.setLevel(logging.DEBUG)
         

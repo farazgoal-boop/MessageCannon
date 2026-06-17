@@ -15,6 +15,7 @@ from reportlab.pdfgen import canvas
 
 from .database.db_manager import DatabaseManager
 from .utils.logger import Logger
+from .utils.paths import get_reports_dir
 
 
 class DeliveryTracker:
@@ -24,8 +25,7 @@ class DeliveryTracker:
 
     def __init__(self, reports_dir: Optional[Path] = None):
         self.db = DatabaseManager()
-        self.reports_dir = (reports_dir or Path("./reports")).resolve()
-        self.reports_dir.mkdir(parents=True, exist_ok=True)
+        self.reports_dir = reports_dir or get_reports_dir()
         self._monitor_thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
 

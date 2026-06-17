@@ -11,7 +11,7 @@ from datetime import datetime
 from contextlib import contextmanager
 import threading
 
-from ..utils.helpers import get_database_path
+from ..utils.paths import get_database_path
 from ..utils.logger import Logger
 from ..models import Contact, Campaign, Template, MessageLog, MessageStatus
 
