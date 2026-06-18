@@ -1,0 +1,100 @@
+# Cross-platform CI builds for MessageCannon Pro (Linux + macOS).
+#
+# CAVEATS:
+# 1. Selenium/WhatsApp Web automation may behave differently on Linux/Mac.
+#    ChromeDriver paths and browser detection differ by OS. Builds compile in CI,
+#    but WhatsApp sending should be manually tested on real Linux/Mac hardware
+#    before claiming full support. Gumroad listing can note: "Linux/Mac builds
+#    available — WhatsApp automation tested primarily on Windows."
+#
+# 2. The Mac build is NOT code-signed (no Apple Developer certificate). Users see
+#    an "unidentified developer" warning. They must right-click → Open, or allow
+#    it in System Settings → Privacy & Security. Document this for Mac buyers.
+#
+# 3. The Linux artifact is a raw binary, not a .deb or AppImage. Users run:
+#    chmod +x messagecannon-pro && ./messagecannon-pro
+#    A proper .deb or AppImage can be added later.
+#
+# Windows builds remain local via build/build_windows.bat.
+
+name: Build Cross-Platform
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  build-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            python3-tk \
+            python3-dev \
+            tk-dev \
+            libxcb-xinerama0 \
+            libgl1
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller
+
+      - name: Build Linux binary
+        run: pyinstaller --noconfirm MessageCannon_Pro_linux.spec
+
+      - name: Make binary executable
+        run: chmod +x dist/messagecannon-pro
+
+      - name: Upload Linux artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: messagecannon-pro-linux
+          path: dist/messagecannon-pro
+
+  build-mac:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller
+
+      - name: Build Mac app bundle
+        run: pyinstaller --noconfirm MessageCannon_Pro_mac.spec
+
+      - name: Create DMG
+        run: |
+          cd dist
+          hdiutil create \
+            -volname "MessageCannon Pro" \
+            -srcfolder "MessageCannon Pro.app" \
+            -ov \
+            -format UDZO \
+            MessageCannon-Pro.dmg
+
+      - name: Upload Mac artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: messagecannon-pro-mac
+          path: dist/MessageCannon-Pro.dmg
