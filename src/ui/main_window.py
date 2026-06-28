@@ -2840,7 +2840,31 @@ class MainWindow(ctk.CTk):
         self.after(2000, self._heartbeat_check)
 
     def _on_close(self) -> None:
+        # Prevent double-close while shutdown is in progress
+        self.protocol("WM_DELETE_WINDOW", lambda: None)
+
+        # Signal active send threads to stop
+        self._em_stop_flag.set()
         try:
-            self.whatsapp_sender.shutdown()
-        finally:
-            self.destroy()
+            self._stop_sending()
+        except Exception:
+            pass
+
+        def _do_shutdown() -> None:
+            try:
+                self.whatsapp_sender.shutdown()
+            except Exception:
+                pass
+            self.after(0, self._safe_destroy)
+
+        threading.Thread(target=_do_shutdown, daemon=True).start()
+
+        # Hard deadline: force-destroy after 4 s regardless of shutdown state
+        self.after(4000, self._safe_destroy)
+
+    def _safe_destroy(self) -> None:
+        try:
+            if self.winfo_exists():
+                self.destroy()
+        except Exception:
+            pass
