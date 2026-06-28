@@ -60,6 +60,9 @@ class ContactManager:
                         continue
                     email_raw = ""
 
+                if not normalized_phone and not email_raw:
+                    continue
+
                 custom_fields = {
                     key[7:]: value
                     for key, value in row.items()
