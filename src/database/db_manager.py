@@ -512,6 +512,25 @@ class DatabaseManager:
             Logger.error(f"Error getting campaigns: {e}")
             return []
     
+    def update_campaign(self, campaign_id: int, sent_count: int, failed_count: int) -> bool:
+        """Update campaign sent/failed counts after completion."""
+        try:
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    """
+                    UPDATE campaigns
+                    SET sent_count = ?, failed_count = ?, updated_at = CURRENT_TIMESTAMP
+                    WHERE id = ?
+                    """,
+                    (sent_count, failed_count, campaign_id),
+                )
+                conn.commit()
+                return cursor.rowcount > 0
+        except Exception as e:
+            Logger.error(f"Error updating campaign: {e}")
+            return False
+
     # Message Log Operations
     def add_message_log(self, log: MessageLog) -> Optional[int]:
         """
@@ -816,13 +835,13 @@ class DatabaseManager:
             return {"sent_count": 0, "read_count": 0, "failed_count": 0, "total_count": 0, "success_rate": 0.0}
 
     def get_recent_campaigns_summary(self, limit: int = 5) -> List[Dict[str, Any]]:
-        """Return recent campaigns with name, date, sent count."""
+        """Return recent campaigns with name, date, sent count, and message template."""
         try:
             with self.get_connection() as conn:
                 cursor = conn.cursor()
                 cursor.execute(
                     """
-                    SELECT id, name, sent_count, failed_count, created_at
+                    SELECT id, name, sent_count, failed_count, created_at, message_template
                     FROM campaigns
                     ORDER BY created_at DESC
                     LIMIT ?

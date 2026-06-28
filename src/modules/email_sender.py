@@ -10,6 +10,7 @@ import time
 import uuid
 import logging
 import threading
+from datetime import datetime
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from email.mime.base import MIMEBase
@@ -19,6 +20,9 @@ from typing import Optional, Callable
 from pathlib import Path
 import json
 import re
+
+from ..database.db_manager import DatabaseManager
+from ..models import Campaign, MessageLog, MessageStatus
 
 logger = logging.getLogger(__name__)
 
@@ -150,6 +154,7 @@ class BulkEmailSender:
     def __init__(self):
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
+        self.db = DatabaseManager()
 
     # ─── Connection test ─────────────────────────────────────────────────────
 
@@ -209,6 +214,16 @@ class BulkEmailSender:
                 on_done(result)
             return
 
+        campaign_name = f"{campaign.name} {datetime.now().strftime('%Y-%m-%d %H:%M')}"
+        db_campaign = Campaign(
+            name=campaign_name,
+            message_template=campaign.subject,
+            total_contacts=len(contacts),
+            message_delay=int(campaign.delay_seconds),
+            use_jitter=False,
+        )
+        campaign_id = self.db.add_campaign(db_campaign)
+
         for i, contact in enumerate(contacts):
             if self._stop_event.is_set():
                 result.stopped_early = True
@@ -222,6 +237,7 @@ class BulkEmailSender:
                 result.skipped += 1
                 continue
 
+            subject = body_html = body_text = ""
             try:
                 subject, body_html, body_text = campaign.render(contact)
                 msg = self._build_message(config, campaign, email_addr,
@@ -229,18 +245,54 @@ class BulkEmailSender:
                 conn.sendmail(config.sender_email, email_addr, msg.as_string())
                 result.sent += 1
                 logger.info(f"Email sent → {email_addr}")
+                self.db.add_message_log(MessageLog(
+                    campaign_id=campaign_id,
+                    contact_email=email_addr,
+                    contact_name=contact.get("name", ""),
+                    subject=subject,
+                    message_text=body_html,
+                    status=MessageStatus.SENT,
+                    sent_at=datetime.now(),
+                ))
             except smtplib.SMTPServerDisconnected:
                 # Reconnect once
                 try:
                     conn = self._connect(config)
                     conn.sendmail(config.sender_email, email_addr, msg.as_string())
                     result.sent += 1
+                    self.db.add_message_log(MessageLog(
+                        campaign_id=campaign_id,
+                        contact_email=email_addr,
+                        contact_name=contact.get("name", ""),
+                        subject=subject,
+                        message_text=body_html,
+                        status=MessageStatus.SENT,
+                        sent_at=datetime.now(),
+                    ))
                 except Exception as e2:
                     result.failed += 1
                     result.errors.append(f"{email_addr}: {e2}")
+                    self.db.add_message_log(MessageLog(
+                        campaign_id=campaign_id,
+                        contact_email=email_addr,
+                        contact_name=contact.get("name", ""),
+                        subject=subject,
+                        message_text=body_html,
+                        status=MessageStatus.FAILED,
+                        error_message=str(e2),
+                    ))
             except Exception as e:
                 result.failed += 1
                 result.errors.append(f"{email_addr}: {e}")
+                self.db.add_message_log(MessageLog(
+                    campaign_id=campaign_id,
+                    contact_email=email_addr,
+                    contact_name=contact.get("name", ""),
+                    subject=subject,
+                    message_text=body_html,
+                    status=MessageStatus.FAILED,
+                    error_message=str(e),
+                ))
 
             if on_progress:
                 on_progress(result.sent, result.failed, result.total, email_addr)
@@ -253,6 +305,9 @@ class BulkEmailSender:
             conn.quit()
         except Exception:
             pass
+
+        if campaign_id:
+            self.db.update_campaign(campaign_id, result.sent, result.failed)
 
         if on_done:
             on_done(result)

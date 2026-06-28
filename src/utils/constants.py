@@ -20,17 +20,65 @@ RETRY_DELAY = 60  # seconds
 WINDOW_WIDTH = 1100
 WINDOW_HEIGHT = 750
 
-# Color Scheme (professional dark slate + WhatsApp greens)
-COLOR_PRIMARY = "#0B3F3A"          # Top bar / brand strip
-COLOR_SECONDARY = "#165A53"        # Secondary actions
-COLOR_ACCENT = "#2ECB73"           # Accent green
-COLOR_DARK_BG = "#101922"          # Main dark surface
-COLOR_LIGHT_BG = "#F2F6F8"         # Light surface background
-COLOR_DARK_TEXT = "#EDF5F2"        # Primary text on dark
-COLOR_LIGHT_TEXT = "#9CB1C0"       # Muted text on dark
-COLOR_WARNING = "#FF6B6B"          # Warning red
-COLOR_SUCCESS = "#2DBD6E"          # Success green
-COLOR_INFO = "#56B4E9"             # Informational blue
+# Color Scheme — Dark Premium Dashboard
+COLOR_PRIMARY    = "#0d9488"       # Teal primary accent
+COLOR_SECONDARY  = "#0f766e"       # Darker teal
+COLOR_ACCENT     = "#14b8a6"       # Light teal highlight
+
+# Sidebar (dark navy — unchanged)
+SIDEBAR_BG       = "#1e2530"
+SIDEBAR_HOVER    = "#252e3d"
+SIDEBAR_ACTIVE   = "#1e3a5c"
+SIDEBAR_TEXT     = "#94a3b8"
+SIDEBAR_TEXT_ON  = "#ffffff"
+
+# Top bar
+TOPBAR_BG        = "#0d1521"       # Dark top bar
+TOPBAR_BORDER    = "#1e3347"
+
+# Content area
+CONTENT_BG       = "#0a1118"       # Deep dark bg
+CARD_BG          = "#101a24"       # Card surface
+CARD_BG_INNER    = "#0c131b"       # Textbox / inner area
+CARD_BORDER      = "#1e3347"       # Card border
+
+# Text
+TEXT_PRIMARY     = "#e5e7eb"       # Primary light text
+TEXT_MUTED       = "#94a3b8"       # Muted text
+TEXT_ACCENT      = "#5eead4"       # Teal accent text
+
+# Inputs
+INPUT_BG         = "#2a3142"
+INPUT_BORDER     = "#3d4555"
+INPUT_TEXT       = "#e5e7eb"
+
+# Badges — uniform muted teal
+BADGE_BG         = "#152535"
+BADGE_TEXT       = "#5eead4"
+
+# Stat card colours (dashboard)
+STAT_TEAL        = "#0d9488"
+STAT_BLUE        = "#2563eb"
+STAT_ORANGE      = "#ea580c"
+STAT_PURPLE      = "#7c3aed"
+
+# ── Disciplined button color system ──────────────────────────────────────────
+BTN_PRIMARY      = "#4f46e5"   # Indigo — all primary actions
+BTN_PRIMARY_HVR  = "#4338ca"
+BTN_DANGER       = "#991b1b"   # Red — destructive only (Stop, Reset, Delete)
+BTN_DANGER_HVR   = "#7f1d1d"
+BTN_NEUTRAL      = "#1e2d3d"   # Dark slate — secondary/utility
+BTN_NEUTRAL_HVR  = "#253548"
+
+# Legacy aliases (kept for other imports)
+COLOR_SUCCESS    = "#4f46e5"
+COLOR_WARNING    = "#4f46e5"
+COLOR_DANGER     = "#991b1b"
+COLOR_INFO       = "#1e2d3d"
+COLOR_DARK_BG    = "#0a1118"
+COLOR_LIGHT_BG   = "#101a24"
+COLOR_DARK_TEXT  = "#e5e7eb"
+COLOR_LIGHT_TEXT = "#94a3b8"
 
 # Phone validation
 PAKISTAN_COUNTRY_CODE = "+92"

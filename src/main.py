@@ -7,6 +7,7 @@ from pathlib import Path
 
 import customtkinter as ctk
 from PIL import Image
+from src.ui import theme as T
 
 
 def _ensure_tcl_tk_paths() -> None:
@@ -87,9 +88,10 @@ def _show_startup_splash(app: MainWindow) -> None:
     splash.title(f"{APP_NAME} Loading")
     splash.overrideredirect(True)
     splash.attributes("-topmost", True)
-    splash.configure(fg_color="#081019")
+    splash.configure(fg_color=T.BG_MAIN)
 
-    shell = ctk.CTkFrame(splash, fg_color="#0f1b26", corner_radius=24, border_width=1, border_color="#173041")
+    shell = ctk.CTkFrame(splash, fg_color=T.BG_SURFACE, corner_radius=24,
+                         border_width=1, border_color=T.BG_BORDER)
     shell.pack(fill="both", expand=True, padx=2, pady=2)
     shell.grid_columnconfigure(1, weight=1)
 
@@ -108,33 +110,34 @@ def _show_startup_splash(app: MainWindow) -> None:
         width=88,
         height=88,
         corner_radius=22,
-        fg_color="#173245",
+        fg_color=T.BG_INNER,
         font=ctk.CTkFont(size=28, weight="bold"),
     ).grid(row=0, column=0, rowspan=3, padx=(24, 16), pady=24)
 
-    ctk.CTkLabel(shell, text=APP_NAME, font=ctk.CTkFont(size=30, weight="bold")).grid(
+    ctk.CTkLabel(shell, text=APP_NAME, font=ctk.CTkFont(size=30, weight="bold"),
+                 text_color=T.TEXT_HEAD).grid(
         row=0, column=1, padx=(0, 24), pady=(26, 4), sticky="w"
     )
     ctk.CTkLabel(
         shell,
         text="Premium Messaging Workspace",
-        text_color="#6faed2",
+        text_color=T.ACCENT,
         font=ctk.CTkFont(size=13, weight="bold"),
     ).grid(row=1, column=1, padx=(0, 24), sticky="w")
     ctk.CTkLabel(
         shell,
         text="Preparing sessions, analytics, and campaign controls...",
-        text_color="#9cb2be",
+        text_color=T.TEXT_MUTED,
     ).grid(row=2, column=1, padx=(0, 24), pady=(4, 10), sticky="w")
 
-    progress = ctk.CTkProgressBar(shell, progress_color="#39b37a")
+    progress = ctk.CTkProgressBar(shell, progress_color=T.SUCCESS)
     progress.grid(row=3, column=0, columnspan=2, padx=24, pady=(0, 12), sticky="ew")
     progress.set(0.78)
 
     ctk.CTkLabel(
         shell,
         text=f"Version {APP_VERSION}",
-        text_color="#7f99a7",
+        text_color=T.TEXT_DIM,
     ).grid(row=4, column=0, columnspan=2, padx=24, pady=(0, 22), sticky="w")
 
     splash._logo_ref = logo

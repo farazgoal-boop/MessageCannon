@@ -20,7 +20,6 @@ from email.mime.text import MIMEText
 import customtkinter as ctk
 from PIL import Image
 from ..ui.card_creator_tab import build_card_creator_view
-from ..ui.campaigns_tab import build_campaigns_view
 from ..ui.reports_chart import ReportsChart
 
 
@@ -45,8 +44,9 @@ from ..core.contact_manager import ContactManager
 from ..core.message_processor import MessageProcessor
 from ..core.whatsapp_sender import WhatsAppSender
 from ..database.db_manager import DatabaseManager
-from ..models import Contact, Template
+from ..models import Contact, Template, Campaign, MessageLog, MessageStatus
 from ..utils.constants import APP_NAME, APP_VERSION, WINDOW_HEIGHT, WINDOW_WIDTH
+from . import theme as T
 from ..utils.license_manager import LicenseManager
 from ..utils.logger import Logger
 
@@ -234,13 +234,15 @@ class MainWindow(ctk.CTk):
         self.templates: List[Template] = []
         self.contact_selection_vars: Dict[str, BooleanVar] = {}
         self.sidebar_buttons: Dict[str, ctk.CTkButton] = {}
+        self.sidebar_accent_bars: Dict[str, ctk.CTkFrame] = {}
         self.view_frames: Dict[str, ctk.CTkFrame] = {}
         self.view_containers: Dict[str, object] = {}
         self.activity_items: List[str] = []
         self.send_thread: Optional[threading.Thread] = None
+        self._em_send_thread: Optional[threading.Thread] = None
         self.license_dialog: Optional[ctk.CTkToplevel] = None
         self.license_locked = False
-        self._active_view = "Dashboard"
+        self._active_view = "Campaigns"
         self._refresh_job: Optional[str] = None
         self._search_job: Optional[str] = None
         self._reports_chart: Optional[ReportsChart] = None
@@ -288,10 +290,27 @@ class MainWindow(ctk.CTk):
         self.dashboard_week_var = StringVar(value="0")
         self.dashboard_month_var = StringVar(value="0")
 
+        # Compose channel toggle + shared email send state
+        self._compose_channel_var = StringVar(value="WhatsApp")
+        self._em_provider  = StringVar(value="Gmail")
+        self._em_host      = StringVar(value="smtp.gmail.com")
+        self._em_port      = StringVar(value="587")
+        self._em_user      = StringVar()
+        self._em_pass      = StringVar()
+        self._em_from_name = StringVar(value="My Business")
+        self._em_from_addr = StringVar()
+        self._em_delay     = StringVar(value="5")
+        self._em_subj_var  = StringVar(value="Hello {name}!")
+        self._em_tpl_var   = StringVar(value="(none)")
+        self._em_stop_flag = threading.Event()
+        self._em_contacts_list: list = []
+        self._em_count_var = StringVar(value="No email contacts imported")
+        self._em_compose_count_var = StringVar(value="0 contacts with email")
+
         self.title(f"{APP_NAME} v{APP_VERSION}")
         self.geometry(f"{WINDOW_WIDTH}x{WINDOW_HEIGHT}")
         self.minsize(1220, 760)
-        self.configure(fg_color="#0a1118")
+        self.configure(fg_color=T.BG_MAIN)
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
         self._load_settings()
@@ -306,7 +325,7 @@ class MainWindow(ctk.CTk):
         self._reload_contacts()
         self._refresh_stats(update_text_feeds=True, update_dashboard_periods=True)
         self._refresh_preview()
-        self._show_view("Dashboard")
+        self._show_view("Campaigns")
 
         self.after(800, self._start_session_bootstrap)
         self.after(10000, self._periodic_refresh)
@@ -350,7 +369,15 @@ class MainWindow(ctk.CTk):
                 return light_color if is_light_mode else dark_value
         return color
 
+    # TkinterWeb (used by HtmlFrame in the card preview) has C-level Tcl state
+    # that crashes fatally when winfo_children() or configure() are called on it
+    # from outside. Skip these classes entirely during theme sync.
+    _THEME_SYNC_SKIP_CLASSES = frozenset({"HtmlFrame", "TkinterWeb", "HtmlLabel", "HtmlText"})
+
     def _sync_widget_theme(self, widget: object) -> None:
+        if widget.__class__.__name__ in self._THEME_SYNC_SKIP_CLASSES:
+            return
+
         if hasattr(widget, "cget") and hasattr(widget, "configure"):
             for attr in self.THEME_SYNC_ATTRIBUTES:
                 try:
@@ -373,13 +400,20 @@ class MainWindow(ctk.CTk):
                         pass
 
         if hasattr(widget, "winfo_children"):
-            for child in widget.winfo_children():
+            try:
+                children = widget.winfo_children()
+            except Exception:
+                return
+            for child in children:
                 self._sync_widget_theme(child)
 
     def _sync_theme_overrides(self) -> None:
         self._sync_widget_theme(self)
         if self.license_dialog is not None and self.license_dialog.winfo_exists():
             self._sync_widget_theme(self.license_dialog)
+        if hasattr(self, "_compose_em_body"):
+            self._compose_em_body.configure(bg=T.BG_INNER, fg=T.TEXT_HEAD,
+                                            insertbackground=T.TEXT_HEAD)
 
     def _bind_scrollable_frame_mousewheel(self, scrollable_frame: ctk.CTkScrollableFrame) -> None:
         canvas = getattr(scrollable_frame, "_parent_canvas", None)
@@ -412,170 +446,204 @@ class MainWindow(ctk.CTk):
         bind_tree(scrollable_frame)
 
     def _create_ui(self) -> None:
-        self.sidebar = ctk.CTkFrame(self, width=240, corner_radius=0, fg_color="#0c1620")
+        # ── SIDEBAR — uses pack() internally to avoid CTkFrame grid row bugs ──
+        self.grid_columnconfigure(0, minsize=220)
+        self.sidebar = ctk.CTkFrame(self, corner_radius=0, fg_color=T.BG_MAIN)
         self.sidebar.grid(row=0, column=0, sticky="nsew")
-        self.sidebar.grid_rowconfigure(7, weight=1)
 
+        # ── Brand (packed top) ────────────────────────────────────────────────
         brand_panel = ctk.CTkFrame(self.sidebar, fg_color="transparent")
-        brand_panel.grid(row=0, column=0, padx=20, pady=(24, 18), sticky="ew")
+        brand_panel.pack(side="top", fill="x", padx=16, pady=(18, 12))
         brand_panel.grid_columnconfigure(1, weight=1)
-
         if self.brand_logo is not None:
-            ctk.CTkLabel(brand_panel, text="", image=self.brand_logo).grid(row=0, column=0, rowspan=2, padx=(4, 14), sticky="w")
+            ctk.CTkLabel(brand_panel, text="", image=self.brand_logo).grid(
+                row=0, column=0, rowspan=2, padx=(0, 10), sticky="w")
+        ctk.CTkLabel(brand_panel, text="MessageCannon",
+                     font=ctk.CTkFont(size=14, weight="bold"),
+                     text_color=T.TEXT_HEAD).grid(row=0, column=1, sticky="w")
+        ctk.CTkLabel(brand_panel, text="Pro  |  Campaign Suite",
+                     text_color=T.ACCENT, font=ctk.CTkFont(size=10, weight="bold"),
+                     ).grid(row=1, column=1, sticky="w")
 
-        brand = ctk.CTkLabel(
-            brand_panel,
-            text="MessageCannon\nControl Center",
-            justify="left",
-            font=ctk.CTkFont(size=24, weight="bold"),
-            text_color="#dbe8f0",
-        )
-        brand.grid(row=0, column=1, sticky="w")
+        ctk.CTkFrame(self.sidebar, height=1, fg_color=T.BG_BORDER, corner_radius=0
+                     ).pack(side="top", fill="x")
 
-        ctk.CTkLabel(
-            brand_panel,
-            text="Premium Campaign Workspace",
-            text_color="#6d8798",
-            font=ctk.CTkFont(size=12, weight="bold"),
-        ).grid(row=1, column=1, pady=(2, 0), sticky="w")
-
-        nav_items = [
-            ("Dashboard", "DB   Dashboard"),
-            ("Contacts", "CT   Contacts"),
-            ("Compose", "CP   Compose"),
-            ("Campaigns", "CM   Campaigns"),
-            ("Reports", "RP   Reports"),
-            ("Email",    "EM   Email"),
-            ("Cards",     "CC   Card Creator"),
-            ("Settings", "ST   Settings"),
-        ]
-        for row_index, (view_name, label) in enumerate(nav_items, start=1):
-            button = ctk.CTkButton(
-                self.sidebar,
-                text=label,
-                anchor="w",
-                height=46,
-                corner_radius=16,
-                fg_color="transparent",
-                hover_color="#203243",
-                border_width=1,
-                border_color="#183144",
-                text_color="#dbe8f0",
-                command=lambda name=view_name: self._show_view(name),
-            )
-            button.grid(row=row_index, column=0, padx=18, pady=6, sticky="ew")
-            self.sidebar_buttons[view_name] = button
-
-        self.sidebar_premium_panel = ctk.CTkFrame(self.sidebar, fg_color="#101f2b", corner_radius=18)
-        self.sidebar_premium_panel.grid(row=8, column=0, padx=18, pady=(18, 8), sticky="ew")
-        self.sidebar_premium_panel.grid_columnconfigure(0, weight=1)
-        ctk.CTkLabel(
-            self.sidebar_premium_panel,
-            text="Premium Access",
-            font=ctk.CTkFont(size=16, weight="bold"),
-        ).grid(row=0, column=0, padx=14, pady=(14, 4), sticky="w")
-        ctk.CTkLabel(
-            self.sidebar_premium_panel,
-            text="Persistent sessions, live delivery analytics, and campaign-grade controls.",
-            text_color="#88a0af",
-            justify="left",
-            wraplength=180,
-        ).grid(row=1, column=0, padx=14, pady=(0, 12), sticky="w")
-
-        ctk.CTkLabel(
-            self.sidebar,
-            textvariable=self.session_status_var,
-            wraplength=170,
-            justify="left",
-            text_color="#94b9b2",
-        ).grid(row=9, column=0, padx=22, pady=(8, 6), sticky="ew")
-
-        ctk.CTkButton(
-            self.sidebar,
-            text="Reset Session",
-            fg_color="#4e2428",
-            hover_color="#6a2d33",
-            command=self._reset_session,
-        ).grid(row=10, column=0, padx=18, pady=(0, 12), sticky="ew")
+        # ── Bottom widgets (packed bottom first so nav fills remaining space) ──
+        _bot = ctk.CTkFrame(self.sidebar, fg_color="transparent")
+        _bot.pack(side="bottom", fill="x")
 
         self.sidebar_license_badge = ctk.CTkLabel(
-            self.sidebar,
-            textvariable=self.license_badge_var,
-            fg_color="#173227",
-            corner_radius=999,
-            padx=12,
-            pady=6,
-            text_color="#d7f8e3",
+            _bot, textvariable=self.license_badge_var,
+            fg_color=T.BADGE_BG, corner_radius=999,
+            padx=12, pady=5, text_color=T.SUCCESS,
+            font=ctk.CTkFont(size=11, weight="bold"),
         )
-        self.sidebar_license_badge.grid(row=11, column=0, padx=18, pady=(0, 20), sticky="w")
+        self.sidebar_license_badge.pack(side="bottom", anchor="w", padx=12, pady=(0, 14))
 
-        self.content = ctk.CTkFrame(self, fg_color="#0a1118", corner_radius=0)
+        ctk.CTkButton(
+            _bot, text="Reset Session", height=30, corner_radius=6,
+            fg_color=T.DANGER, hover_color=T.DANGER_HOVER,
+            text_color=T.TEXT_HEAD, font=ctk.CTkFont(size=11),
+            command=self._reset_session,
+        ).pack(side="bottom", fill="x", padx=10, pady=(0, 6))
+
+        ctk.CTkLabel(_bot, textvariable=self.session_status_var,
+                     wraplength=190, justify="left",
+                     text_color=T.TEXT_MUTED, font=ctk.CTkFont(size=11),
+                     ).pack(side="bottom", fill="x", padx=12, pady=(4, 3))
+
+        self.sidebar_premium_panel = ctk.CTkFrame(
+            _bot, fg_color=T.BG_SURFACE, corner_radius=10,
+            border_width=1, border_color=T.BG_BORDER)
+        self.sidebar_premium_panel.pack(side="bottom", fill="x", padx=10, pady=(0, 6))
+        self.sidebar_premium_panel.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(self.sidebar_premium_panel, text="Premium Access",
+                     font=ctk.CTkFont(size=12, weight="bold"),
+                     text_color=T.TEXT_HEAD).grid(row=0, column=0, padx=12, pady=(10, 2), sticky="w")
+        ctk.CTkLabel(self.sidebar_premium_panel, text="Sessions  ·  Analytics  ·  Campaigns",
+                     text_color=T.TEXT_MUTED, font=ctk.CTkFont(size=10),
+                     ).grid(row=1, column=0, padx=12, pady=(0, 10), sticky="w")
+
+        ctk.CTkFrame(_bot, height=1, fg_color=T.BG_BORDER, corner_radius=0
+                     ).pack(side="bottom", fill="x")
+
+        # ── Nav items (packed into middle nav_frame) ───────────────────────────
+        nav_frame = ctk.CTkFrame(self.sidebar, fg_color="transparent")
+        nav_frame.pack(side="top", fill="both", expand=True, padx=8, pady=(10, 4))
+
+        nav_items = [
+            ("Campaigns", "⊞", "Campaigns"),
+            ("Contacts",  "☰", "Contacts"),
+            ("Compose",   "✉", "Compose"),
+            ("History",   "◈", "History"),
+            ("Cards",     "❏", "Cards"),
+            ("Settings",  "⚙", "Settings"),
+        ]
+        for view_name, icon, label in nav_items:
+            btn_frame = tk.Frame(nav_frame, bg=T.BG_MAIN)
+            btn_frame.pack(fill="x", pady=2)
+
+            accent_bar = tk.Frame(btn_frame, width=4, bg=T.BG_MAIN)
+            accent_bar.pack(side="left", fill="y", padx=(0, 4))
+
+            button = ctk.CTkButton(
+                btn_frame,
+                text=f"{icon}  {label}",
+                anchor="w",
+                height=40,
+                corner_radius=8,
+                fg_color=T.NAV_INACTIVE,
+                hover_color=T.BG_SURFACE,
+                border_width=0,
+                text_color=T.TEXT_HEAD,
+                font=ctk.CTkFont(size=13),
+                command=lambda name=view_name: self._show_view(name),
+            )
+            button.pack(side="left", fill="x", expand=True)
+
+            self.sidebar_buttons[view_name] = button
+            self.sidebar_accent_bars[view_name] = accent_bar
+
+        # ── TOP BAR (white) ────────────────────────────────────────────────
+        self.content = ctk.CTkFrame(self, fg_color=T.BG_MAIN, corner_radius=0)
         self.content.grid(row=0, column=1, sticky="nsew")
         self.content.grid_rowconfigure(1, weight=1)
         self.content.grid_columnconfigure(0, weight=1)
 
-        header = ctk.CTkFrame(self.content, height=112, corner_radius=22, fg_color="#0d1620")
+        header = ctk.CTkFrame(self.content, corner_radius=0, fg_color=T.BG_MAIN,
+                               border_width=0)
         header.grid(row=0, column=0, sticky="ew")
         header.grid_columnconfigure(1, weight=1)
-        header.grid_rowconfigure(0, weight=1)
 
-        header_copy = ctk.CTkFrame(header, fg_color="transparent")
-        header_copy.grid(row=0, column=0, padx=28, pady=18, sticky="w")
+        # Thin accent line at bottom of header
+        ctk.CTkFrame(header, height=1, fg_color=T.BG_SURFACE, corner_radius=0).grid(
+            row=2, column=0, columnspan=2, sticky="ew")
+
+        # Left: page title + breadcrumb
+        header_left = ctk.CTkFrame(header, fg_color="transparent")
+        header_left.grid(row=0, column=0, padx=24, pady=(16, 4), sticky="w")
 
         self.header_title = ctk.CTkLabel(
-            header_copy,
-            text="Dashboard",
-            font=ctk.CTkFont(size=28, weight="bold"),
-            text_color="#dbe8f0",
+            header_left,
+            text="Campaigns",
+            font=ctk.CTkFont(size=26, weight="bold"),
+            text_color=T.TEXT_HEAD,
         )
         self.header_title.grid(row=0, column=0, sticky="w")
-        self.header_subtitle = ctk.CTkLabel(
-            header_copy,
-            textvariable=self.header_context_var,
-            text_color="#87a3ad",
-            wraplength=560,
-            justify="left",
-        )
-        self.header_subtitle.grid(row=1, column=0, pady=(4, 0), sticky="w")
 
-        header_actions = ctk.CTkFrame(header, fg_color="transparent")
-        header_actions.grid(row=0, column=1, padx=18, pady=18, sticky="e")
-        if self.header_brand_logo is not None:
-            ctk.CTkLabel(
-                header_actions,
-                text="",
-                image=self.header_brand_logo,
-                fg_color="#102131",
-                corner_radius=14,
-                padx=10,
-                pady=10,
-            ).grid(row=0, column=0, padx=(0, 10), sticky="e")
+        # Breadcrumb row
+        breadcrumb = ctk.CTkFrame(header, fg_color="transparent")
+        breadcrumb.grid(row=1, column=0, columnspan=3, padx=24, pady=(0, 14), sticky="w")
+        ctk.CTkLabel(breadcrumb, text="Home", text_color=T.TEXT_MUTED,
+                     font=ctk.CTkFont(size=11)).pack(side="left")
+        ctk.CTkLabel(breadcrumb, text=" › ", text_color=T.TEXT_MUTED,
+                     font=ctk.CTkFont(size=11)).pack(side="left")
+        self.header_subtitle = ctk.CTkLabel(
+            breadcrumb,
+            textvariable=self.header_context_var,
+            text_color=T.TEXT_MUTED,
+            font=ctk.CTkFont(size=11),
+        )
+        self.header_subtitle.pack(side="left")
+
+        # Right: search + action icons
+        header_right = ctk.CTkFrame(header, fg_color="transparent")
+        header_right.grid(row=0, column=1, padx=24, pady=16, sticky="e")
+
+        # Search bar
+        self._header_search_var = tk.StringVar()
+        search_entry = ctk.CTkEntry(
+            header_right,
+            textvariable=self._header_search_var,
+            placeholder_text="Search…",
+            width=200,
+            height=34,
+            corner_radius=16,
+            border_color=T.BG_BORDER,
+            fg_color=T.BG_MAIN,
+            text_color=T.TEXT_HEAD,
+        )
+        search_entry.pack(side="left", padx=(0, 10))
+        self._header_search_var.trace_add("write", self._on_header_search)
+
+        # Settings shortcut icon
+        ctk.CTkButton(
+            header_right,
+            text="⚙",
+            width=34,
+            height=34,
+            corner_radius=16,
+            fg_color=T.BADGE_BG,
+            hover_color=T.BG_BORDER,
+            text_color=T.ACCENT,
+            font=ctk.CTkFont(size=14),
+            command=lambda: self._show_view("Settings"),
+        ).pack(side="left", padx=3)
 
         self.header_pill = ctk.CTkLabel(
-            header_actions,
+            header_right,
             textvariable=self.header_badge_var,
-            fg_color="#173245",
+            fg_color=T.BADGE_BG,
             corner_radius=999,
-            padx=14,
-            pady=7,
-            text_color="#d8ebf6",
-            font=ctk.CTkFont(size=12, weight="bold"),
+            padx=12,
+            pady=5,
+            text_color=T.ACCENT,
+            font=ctk.CTkFont(size=11, weight="bold"),
         )
-        self.header_pill.grid(row=0, column=1, sticky="e")
+        self.header_pill.pack(side="left", padx=(12, 0))
 
-        self.view_host = ctk.CTkFrame(self.content, fg_color="#0a1118")
-        self.view_host.grid(row=1, column=0, sticky="nsew", padx=18, pady=18)
+        # ── VIEW HOST (light gray) ─────────────────────────────────────────
+        self.view_host = ctk.CTkFrame(self.content, fg_color=T.BG_MAIN, corner_radius=0)
+        self.view_host.grid(row=1, column=0, sticky="nsew", padx=24, pady=16)
         self.view_host.grid_rowconfigure(0, weight=1)
         self.view_host.grid_columnconfigure(0, weight=1)
 
-        self._build_dashboard_view()
+        self._build_campaigns_home_view()
         self._build_contacts_view()
         self._build_compose_view()
-        self._build_reports_view()
+        self._build_campaign_history_view()
         self._build_settings_view()
-        self._build_email_view()
         build_card_creator_view(self)
-        build_campaigns_view(self)
 
         self.bind("<Control-n>", lambda _event: self._show_view("Compose"))
         self.bind("<Control-i>", lambda _event: self._import_contacts())
@@ -614,14 +682,14 @@ class MainWindow(ctk.CTk):
         dialog.resizable(False, False)
         dialog.transient(self)
         dialog.grab_set()
-        dialog.configure(fg_color="#091018")
+        dialog.configure(fg_color=T.BG_MAIN)
         dialog.protocol("WM_DELETE_WINDOW", self._close_license_dialog_and_exit)
 
         dialog.grid_columnconfigure(0, weight=1)
         dialog.grid_rowconfigure(1, weight=1)
 
-        header = ctk.CTkFrame(dialog, fg_color="#102131", corner_radius=26)
-        header.grid(row=0, column=0, padx=20, pady=(20, 14), sticky="ew")
+        header = ctk.CTkFrame(dialog, fg_color=T.BG_SURFACE, corner_radius=14)
+        header.grid(row=0, column=0, padx=24, pady=(20, 12), sticky="ew")
         header.grid_columnconfigure(1, weight=1)
 
         crown = ctk.CTkLabel(
@@ -630,53 +698,53 @@ class MainWindow(ctk.CTk):
             image=self.brand_logo,
             width=64,
             height=64,
-            corner_radius=18,
-            fg_color="#c59d3d",
-            text_color="#1c1300",
+            corner_radius=16,
+            fg_color=T.ACCENT,
+            text_color=T.TEXT_HEAD,
             font=ctk.CTkFont(size=24, weight="bold"),
         )
-        crown.grid(row=0, column=0, rowspan=3, padx=(20, 14), pady=20, sticky="n")
+        crown.grid(row=0, column=0, rowspan=3, padx=(20, 14), pady=24, sticky="n")
         ctk.CTkLabel(
             header,
             text="Trial Expired",
-            font=ctk.CTkFont(size=28, weight="bold"),
-        ).grid(row=0, column=1, padx=(0, 20), pady=(18, 4), sticky="w")
+            font=ctk.CTkFont(size=24, weight="bold"),
+            text_color=T.TEXT_HEAD,
+        ).grid(row=0, column=1, padx=(0, 20), pady=(16, 4), sticky="w")
         ctk.CTkLabel(
             header,
             text="Unlock the premium workspace for persistent sessions, delivery insights, and a cleaner campaign workflow.",
-            wraplength=560,
+            wraplength=520,
             justify="left",
-            text_color="#b8cad6",
-        ).grid(row=1, column=1, padx=(0, 20), pady=(0, 10), sticky="w")
+            text_color=T.TEXT_MUTED,
+        ).grid(row=1, column=1, padx=(0, 20), pady=(0, 8), sticky="w")
 
         feature_badges = ctk.CTkFrame(header, fg_color="transparent")
-        feature_badges.grid(row=2, column=1, padx=(0, 18), pady=(0, 16), sticky="ew")
-        for index, label in enumerate(["3-Day Trial", "Session Save", "Delivery Reports", "Premium Dashboard"]):
+        feature_badges.grid(row=2, column=1, padx=(0, 16), pady=(0, 14), sticky="ew")
+        for index, label in enumerate(
+                ["3-Day Trial", "Session Save", "Delivery Reports", "Premium Dashboard"]):
             ctk.CTkLabel(
-                feature_badges,
-                text=label,
-                fg_color="#1b3950",
-                corner_radius=999,
-                padx=10,
-                pady=4,
-                text_color="#dbe9f5",
+                feature_badges, text=label, fg_color=T.BADGE_BG,
+                corner_radius=999, padx=10, pady=4,
+                text_color=T.ACCENT, font=ctk.CTkFont(size=11),
             ).grid(row=0, column=index, padx=4, pady=4, sticky="w")
 
-        body = ctk.CTkFrame(dialog, fg_color="#0f1822", corner_radius=24)
-        body.grid(row=1, column=0, padx=20, pady=(0, 14), sticky="nsew")
+        body = ctk.CTkFrame(dialog, fg_color=T.BG_SURFACE, corner_radius=14,
+                            border_width=1, border_color=T.BG_BORDER)
+        body.grid(row=1, column=0, padx=24, pady=(0, 14), sticky="nsew")
         body.grid_columnconfigure(0, weight=3)
         body.grid_columnconfigure(1, weight=2)
         body.grid_rowconfigure(0, weight=1)
 
-        left_panel = ctk.CTkFrame(body, fg_color="#111f2c", corner_radius=20)
-        left_panel.grid(row=0, column=0, padx=(18, 10), pady=18, sticky="nsew")
+        left_panel = ctk.CTkFrame(body, fg_color=T.BG_INNER, corner_radius=12)
+        left_panel.grid(row=0, column=0, padx=(16, 8), pady=16, sticky="nsew")
         left_panel.grid_columnconfigure(0, weight=1)
 
         ctk.CTkLabel(
             left_panel,
             text="Premium Access Includes",
-            font=ctk.CTkFont(size=20, weight="bold"),
-        ).grid(row=0, column=0, padx=20, pady=(20, 10), sticky="w")
+            font=ctk.CTkFont(size=15, weight="bold"),
+            text_color=T.TEXT_HEAD,
+        ).grid(row=0, column=0, padx=16, pady=(16, 10), sticky="w")
         premium_points = [
             "Saved WhatsApp sessions so QR scans are not repeated on every restart",
             "Delivery and read analytics with CSV/PDF export support",
@@ -686,100 +754,110 @@ class MainWindow(ctk.CTk):
         for index, point in enumerate(premium_points, start=1):
             ctk.CTkLabel(
                 left_panel,
-                text=f"+ {point}",
+                text=f"✓  {point}",
                 justify="left",
-                wraplength=360,
-                text_color="#9fb5c3",
-            ).grid(row=index, column=0, padx=20, pady=6, sticky="w")
+                wraplength=340,
+                text_color=T.TEXT_MUTED,
+                font=ctk.CTkFont(size=12),
+            ).grid(row=index, column=0, padx=16, pady=5, sticky="w")
 
         stat_row = ctk.CTkFrame(left_panel, fg_color="transparent")
-        stat_row.grid(row=5, column=0, padx=16, pady=(16, 18), sticky="ew")
-        for index, (title, value, color) in enumerate([
-            ("Session", "48h", "#1b3950"),
-            ("Trial", "3 days", "#6b5420"),
-            ("Reports", "Live", "#1d4a3c"),
+        stat_row.grid(row=5, column=0, padx=14, pady=(14, 16), sticky="ew")
+        for index, (title, value) in enumerate([
+            ("Session", "48h"),
+            ("Trial",   "3 days"),
+            ("Reports", "Live"),
         ]):
-            card = ctk.CTkFrame(stat_row, fg_color=color, corner_radius=16)
-            card.grid(row=0, column=index, padx=6, sticky="nsew")
+            card = ctk.CTkFrame(stat_row, fg_color=T.BADGE_BG, corner_radius=10)
+            card.grid(row=0, column=index, padx=5, sticky="nsew")
             stat_row.grid_columnconfigure(index, weight=1)
-            ctk.CTkLabel(card, text=title, text_color="#d5e4ea").pack(anchor="w", padx=12, pady=(10, 2))
-            ctk.CTkLabel(card, text=value, font=ctk.CTkFont(size=18, weight="bold")).pack(anchor="w", padx=12, pady=(0, 10))
+            ctk.CTkLabel(card, text=title, text_color=T.TEXT_MUTED,
+                         font=ctk.CTkFont(size=11)).pack(anchor="w", padx=12, pady=(10, 2))
+            ctk.CTkLabel(card, text=value, font=ctk.CTkFont(size=15, weight="bold"),
+                         text_color=T.ACCENT).pack(anchor="w", padx=12, pady=(0, 12))
 
-        right_panel = ctk.CTkFrame(body, fg_color="#0c141c", corner_radius=20)
-        right_panel.grid(row=0, column=1, padx=(10, 18), pady=18, sticky="nsew")
+        right_panel = ctk.CTkFrame(body, fg_color=T.BG_INNER, corner_radius=12)
+        right_panel.grid(row=0, column=1, padx=(8, 16), pady=16, sticky="nsew")
         right_panel.grid_columnconfigure(0, weight=1)
 
         ctk.CTkLabel(
             right_panel,
             text="Activate This Device",
-            font=ctk.CTkFont(size=20, weight="bold"),
-        ).grid(row=0, column=0, padx=20, pady=(20, 8), sticky="w")
+            font=ctk.CTkFont(size=15, weight="bold"),
+            text_color=T.TEXT_HEAD,
+        ).grid(row=0, column=0, padx=16, pady=(16, 6), sticky="w")
         ctk.CTkLabel(
             right_panel,
             text="Enter your paid passkey below. Activation is stored locally on this device.",
             wraplength=240,
             justify="left",
-            text_color="#90a6b3",
-        ).grid(row=1, column=0, padx=20, pady=(0, 14), sticky="w")
+            text_color=T.TEXT_MUTED,
+            font=ctk.CTkFont(size=12),
+        ).grid(row=1, column=0, padx=16, pady=(0, 12), sticky="w")
 
         ctk.CTkLabel(
             right_panel,
             text="If you close the app without activating, the workspace remains locked until a valid passkey is entered.",
             wraplength=240,
             justify="left",
-            text_color="#6eb7d6",
-        ).grid(row=2, column=0, padx=20, pady=(0, 18), sticky="w")
+            text_color=T.ACCENT,
+            font=ctk.CTkFont(size=11),
+        ).grid(row=2, column=0, padx=16, pady=(0, 16), sticky="w")
 
         self.license_entry = ctk.CTkEntry(
             right_panel,
             placeholder_text="Enter paid passkey",
             height=44,
             border_width=1,
-            fg_color="#101b26",
-            border_color="#35566f",
+            corner_radius=8,
+            fg_color=T.BG_SURFACE,
+            border_color=T.BG_BORDER,
+            text_color=T.TEXT_HEAD,
         )
-        self.license_entry.grid(row=3, column=0, padx=20, pady=(0, 8), sticky="ew")
+        self.license_entry.grid(row=3, column=0, padx=24, pady=(0, 8), sticky="ew")
         self.license_entry.bind("<Return>", lambda _event: self._submit_license_activation())
 
         ctk.CTkLabel(
             right_panel,
             textvariable=self.license_message_var,
-            text_color="#ff7c87",
+            text_color=T.DANGER,
             wraplength=240,
             justify="left",
-        ).grid(row=4, column=0, padx=20, pady=(0, 12), sticky="w")
+        ).grid(row=4, column=0, padx=24, pady=(0, 12), sticky="w")
 
-        secure_note = ctk.CTkFrame(right_panel, fg_color="#122331", corner_radius=16)
-        secure_note.grid(row=5, column=0, padx=20, pady=(0, 14), sticky="ew")
+        secure_note = ctk.CTkFrame(right_panel, fg_color=T.BADGE_BG, corner_radius=12,
+                                   border_width=1, border_color=T.BG_BORDER)
+        secure_note.grid(row=5, column=0, padx=24, pady=(0, 14), sticky="ew")
         ctk.CTkLabel(
             secure_note,
             text="Secure local activation",
-            font=ctk.CTkFont(size=15, weight="bold"),
+            font=ctk.CTkFont(size=13, weight="bold"),
+            text_color=T.ACCENT,
         ).pack(anchor="w", padx=14, pady=(12, 4))
         ctk.CTkLabel(
             secure_note,
             text="The passkey is validated inside the app and stored only as local license state on this machine.",
             justify="left",
             wraplength=220,
-            text_color="#9fb5c3",
+            text_color=T.TEXT_MUTED,
         ).pack(anchor="w", padx=14, pady=(0, 12))
 
         actions = ctk.CTkFrame(right_panel, fg_color="transparent")
-        actions.grid(row=6, column=0, padx=20, pady=(6, 20), sticky="ew")
+        actions.grid(row=6, column=0, padx=24, pady=(6, 20), sticky="ew")
         actions.grid_columnconfigure(0, weight=1)
 
         ctk.CTkButton(
             actions,
             text="Exit App",
-            fg_color="#5f2d33",
-            hover_color="#7d3a42",
+            fg_color=T.DANGER, hover_color=T.DANGER_HOVER,
+            corner_radius=8,
             command=self._close_license_dialog_and_exit,
         ).grid(row=0, column=0, padx=(0, 10), sticky="w")
         ctk.CTkButton(
             actions,
             text="Activate Now",
-            fg_color="#1c6b4d",
-            hover_color="#24895f",
+            fg_color=T.ACCENT, hover_color=T.ACCENT_HOVER,
+            corner_radius=8,
             command=self._submit_license_activation,
         ).grid(row=0, column=1, sticky="e")
 
@@ -826,400 +904,728 @@ class MainWindow(ctk.CTk):
         self.license_dialog = None
         self.after(0, self._on_close)
 
-    def _build_dashboard_view(self) -> None:
-        frame = self._new_view_frame("Dashboard")
-        frame.grid_columnconfigure((0, 1), weight=1, uniform="cards")
-        frame.grid_rowconfigure(3, weight=1)
+    def _build_campaigns_home_view(self) -> None:
+        frame = self._new_view_frame("Campaigns")
+        frame.grid_columnconfigure(0, weight=1)
+        frame.grid_rowconfigure(2, weight=1)
+
+        # ── Hero: new campaign + 2 summary stats ──────────────────────────────
+        hero = ctk.CTkFrame(frame, fg_color=T.BG_SURFACE, corner_radius=14,
+                            border_width=1, border_color=T.BG_BORDER)
+        hero.grid(row=0, column=0, sticky="ew", pady=(0, 12))
+        hero.grid_columnconfigure(0, weight=1)
+
+        top_bar = ctk.CTkFrame(hero, fg_color="transparent")
+        top_bar.grid(row=0, column=0, padx=20, pady=(20, 12), sticky="ew")
+        top_bar.grid_columnconfigure(0, weight=1)
+
+        ctk.CTkButton(
+            top_bar, text="+ New campaign",
+            height=52, corner_radius=10,
+            fg_color=T.ACCENT, hover_color=T.ACCENT_HOVER,
+            text_color=T.TEXT_HEAD,
+            font=ctk.CTkFont(size=15, weight="bold"),
+            command=lambda: self._show_view("Compose"),
+        ).grid(row=0, column=0, sticky="ew")
+
+        stats_row = ctk.CTkFrame(hero, fg_color="transparent")
+        stats_row.grid(row=1, column=0, padx=20, pady=(0, 20), sticky="ew")
+        stats_row.grid_columnconfigure((0, 1), weight=1, uniform="stats")
 
         self.dashboard_cards: Dict[str, ctk.CTkLabel] = {}
         self.dashboard_card_meta: Dict[str, ctk.CTkLabel] = {}
-        card_specs = [
-            ("Sent Today", "0", "#163b34"),
-            ("Delivery Rate", "0%", "#1f3f59"),
-            ("Active Session", "Checking", "#3e2e18"),
-            ("License State", "Trial", "#3d1f3b"),
-        ]
-        for index, (title, value, color) in enumerate(card_specs):
-            card = ctk.CTkFrame(frame, corner_radius=22, fg_color=color, border_width=1, border_color="#314757")
-            card.grid(row=index // 2, column=index % 2, padx=10, pady=10, sticky="nsew")
-            header = ctk.CTkFrame(card, fg_color="transparent")
-            header.pack(fill="x", padx=18, pady=(16, 4))
-            ctk.CTkLabel(card, text=title, text_color="#cfe3e4").pack(anchor="w", padx=18, pady=(0, 4))
-            ctk.CTkLabel(
-                header,
-                text="Live KPI",
-                fg_color="#0c131b",
-                corner_radius=999,
-                padx=10,
-                pady=5,
-                text_color="#dbe8f0",
-                font=ctk.CTkFont(size=11, weight="bold"),
-            ).pack(side="right")
-            label = ctk.CTkLabel(card, text=value, font=ctk.CTkFont(size=30, weight="bold"))
-            label.pack(anchor="w", padx=18, pady=(0, 6))
-            meta = ctk.CTkLabel(card, text="Awaiting data", text_color="#d6e3e7")
-            meta.pack(anchor="w", padx=18, pady=(0, 18))
-            self.dashboard_cards[title] = label
-            self.dashboard_card_meta[title] = meta
 
-        self.dashboard_license_strip = ctk.CTkFrame(frame, corner_radius=22, fg_color="#121f2c", border_width=1, border_color="#1d3448")
-        self.dashboard_license_strip.grid(row=2, column=0, columnspan=2, padx=10, pady=(0, 12), sticky="ew")
-        self.dashboard_license_strip.grid_columnconfigure(1, weight=1)
-        badge = ctk.CTkLabel(
-            self.dashboard_license_strip,
-            text="Premium",
-            fg_color="#c59d3d",
-            text_color="#231700",
-            corner_radius=999,
-            padx=12,
-            pady=6,
-            font=ctk.CTkFont(size=12, weight="bold"),
-        )
-        badge.grid(row=0, column=0, padx=(18, 10), pady=16, sticky="w")
-        ctk.CTkLabel(
-            self.dashboard_license_strip,
-            text="License Status",
-            font=ctk.CTkFont(size=18, weight="bold"),
-        ).grid(row=0, column=1, padx=(0, 12), pady=16, sticky="w")
-        self.dashboard_license_label = ctk.CTkLabel(
-            self.dashboard_license_strip,
-            textvariable=self.license_status_var,
-            text_color="#a7bac6",
-            justify="left",
-            wraplength=560,
-        )
-        self.dashboard_license_label.grid(row=0, column=2, padx=12, pady=16, sticky="w")
-        self.dashboard_activate_button = ctk.CTkButton(
-            self.dashboard_license_strip,
-            text="Activate",
-            fg_color="#1c6b4d",
-            hover_color="#24895f",
-            text_color="#d7f8e3",
-            text_color_disabled="#9fb5c3",
-            command=self._show_license_gate,
-        )
-        self.dashboard_activate_button.grid(row=0, column=3, padx=18, pady=16, sticky="e")
+        for col, (label_text, var_key, meta_text) in enumerate([
+            ("Sent this week", "Sent Today", "Messages delivered"),
+            ("Delivered",      "Delivery Rate", "Successful receipts"),
+        ]):
+            stat_box = ctk.CTkFrame(stats_row, fg_color=T.BG_INNER, corner_radius=10,
+                                    border_width=1, border_color=T.BG_BORDER)
+            stat_box.grid(row=0, column=col, padx=(0 if col else 0, 8 if col == 0 else 0),
+                          sticky="ew")
+            stat_box.grid_columnconfigure(0, weight=1)
+            ctk.CTkLabel(stat_box, text=label_text, text_color=T.TEXT_MUTED,
+                         font=ctk.CTkFont(size=11)).grid(
+                row=0, column=0, padx=16, pady=(12, 2), sticky="w")
+            val_lbl = ctk.CTkLabel(stat_box, text="0",
+                                   font=ctk.CTkFont(size=28, weight="bold"),
+                                   text_color=T.TEXT_HEAD)
+            val_lbl.grid(row=1, column=0, padx=16, pady=(0, 12), sticky="w")
+            meta_lbl = ctk.CTkLabel(stat_box, text=meta_text, text_color=T.TEXT_MUTED,
+                                    font=ctk.CTkFont(size=10))
+            meta_lbl.grid(row=1, column=1, padx=(0, 12), pady=(0, 12), sticky="se")
+            self.dashboard_cards[var_key] = val_lbl
+            self.dashboard_card_meta[var_key] = meta_lbl
 
-        activity_frame = ctk.CTkFrame(frame, corner_radius=20, fg_color="#111c27", border_width=1, border_color="#1a2e3f")
-        activity_frame.grid(row=3, column=0, columnspan=2, padx=10, pady=(0, 0), sticky="nsew")
-        activity_frame.grid_rowconfigure(1, weight=1)
-        activity_frame.grid_columnconfigure(0, weight=1)
+        # Compat stubs so _refresh_stats doesn't crash on old card keys
+        for stub_key in ("Active Session", "License State"):
+            self.dashboard_cards.setdefault(stub_key, ctk.CTkLabel(frame, text=""))
+            self.dashboard_card_meta.setdefault(stub_key, ctk.CTkLabel(frame, text=""))
 
-        ctk.CTkLabel(activity_frame, text="Recent Activity", font=ctk.CTkFont(size=18, weight="bold")).grid(
-            row=0, column=0, padx=18, pady=(16, 10), sticky="w"
-        )
-        activity_meta = ctk.CTkFrame(activity_frame, fg_color="transparent")
-        activity_meta.grid(row=0, column=0, padx=18, pady=(14, 8), sticky="e")
-        ctk.CTkLabel(
-            activity_meta,
-            textvariable=self.activity_summary_var,
-            fg_color="#173245",
-            corner_radius=999,
-            padx=10,
-            pady=5,
-            text_color="#d8ebf6",
-        ).grid(row=0, column=0, padx=4)
-        ctk.CTkLabel(
-            activity_meta,
-            text="Ops Feed",
-            fg_color="#244329",
-            corner_radius=999,
-            padx=10,
-            pady=5,
-            text_color="#def2df",
-        ).grid(row=0, column=1, padx=4)
+        # ── Recent campaigns list ─────────────────────────────────────────────
+        list_hdr = ctk.CTkFrame(frame, fg_color="transparent")
+        list_hdr.grid(row=1, column=0, sticky="ew", pady=(0, 6))
+        list_hdr.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(list_hdr, text="Recent campaigns",
+                     font=ctk.CTkFont(size=13, weight="bold"),
+                     text_color=T.TEXT_HEAD).grid(row=0, column=0, sticky="w")
+        ctk.CTkButton(list_hdr, text="View all", width=80, height=28,
+                      corner_radius=6, fg_color=T.BADGE_BG, hover_color=T.BG_BORDER,
+                      text_color=T.ACCENT, font=ctk.CTkFont(size=11),
+                      command=lambda: self._show_view("History"),
+                      ).grid(row=0, column=1, sticky="e")
+
+        list_card = ctk.CTkFrame(frame, fg_color=T.BG_SURFACE, corner_radius=14,
+                                 border_width=1, border_color=T.BG_BORDER)
+        list_card.grid(row=2, column=0, sticky="nsew")
+        list_card.grid_rowconfigure(0, weight=1)
+        list_card.grid_columnconfigure(0, weight=1)
+
+        self.home_campaigns_scroll = ctk.CTkScrollableFrame(
+            list_card, fg_color="transparent", corner_radius=0)
+        self.home_campaigns_scroll.grid(row=0, column=0, sticky="nsew", padx=12, pady=12)
+        self.home_campaigns_scroll.grid_columnconfigure(0, weight=1)
+        self._bind_scrollable_frame_mousewheel(self.home_campaigns_scroll)
+
+        # Activity log — visible at row 3
+        act_hdr = ctk.CTkFrame(frame, fg_color="transparent")
+        act_hdr.grid(row=3, column=0, sticky="ew", pady=(12, 4))
+        act_hdr.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(act_hdr, text="Activity log",
+                     font=ctk.CTkFont(size=13, weight="bold"),
+                     text_color=T.TEXT_HEAD).grid(row=0, column=0, sticky="w")
+        ctk.CTkLabel(act_hdr, textvariable=self.activity_summary_var,
+                     text_color=T.TEXT_MUTED, font=ctk.CTkFont(size=11)).grid(
+            row=0, column=1, sticky="e")
+
+        act_card = ctk.CTkFrame(frame, fg_color=T.BG_SURFACE, corner_radius=14,
+                                border_width=1, border_color=T.BG_BORDER)
+        act_card.grid(row=4, column=0, sticky="ew")
+        act_card.grid_columnconfigure(0, weight=1)
+
         self.activity_text = ctk.CTkTextbox(
-            activity_frame,
-            fg_color="#0c131b",
-            border_width=1,
-            border_color="#163144",
-            font=ctk.CTkFont(family="Courier New", size=12),
-        )
-        self.activity_text.grid(row=1, column=0, padx=18, pady=(0, 18), sticky="nsew")
-        self._replace_text(self.activity_text, "No activity yet.")
+            act_card, fg_color=T.BG_INNER, text_color=T.TEXT_MUTED,
+            font=ctk.CTkFont(size=11), height=110, corner_radius=10,
+            border_width=1, border_color=T.BG_BORDER, state="disabled")
+        self.activity_text.grid(row=0, column=0, padx=12, pady=12, sticky="ew")
+
+        self._refresh_campaigns_home()
+
+    def _refresh_campaigns_home(self) -> None:
+        if not hasattr(self, "home_campaigns_scroll"):
+            return
+        scroll = self.home_campaigns_scroll
+        for w in scroll.winfo_children():
+            w.destroy()
+        try:
+            campaigns = self.db.get_recent_campaigns_summary(limit=10)
+        except Exception:
+            campaigns = []
+        if not campaigns:
+            ctk.CTkLabel(scroll, text="No campaigns yet. Start one with '+ New campaign' above.",
+                         text_color=T.TEXT_MUTED, font=ctk.CTkFont(size=13),
+                         ).grid(row=0, column=0, pady=32)
+            return
+        STATUS_COLORS = {"sent": T.SUCCESS, "failed": T.DANGER, "draft": T.TEXT_MUTED}
+        for i, camp in enumerate(campaigns):
+            row = ctk.CTkFrame(scroll, fg_color=T.BG_INNER, corner_radius=10,
+                               border_width=1, border_color=T.BG_BORDER)
+            row.grid(row=i, column=0, sticky="ew", pady=4)
+            row.grid_columnconfigure(1, weight=1)
+            name = camp.get("name", "Untitled")
+            created = camp.get("created_at", "")
+            sent = camp.get("sent_count", 0)
+            failed = camp.get("failed_count", 0)
+            status = "sent" if sent > 0 else "failed" if failed > 0 else "draft"
+            ctk.CTkLabel(row, text=name, font=ctk.CTkFont(size=13, weight="bold"),
+                         text_color=T.TEXT_HEAD).grid(
+                row=0, column=0, padx=14, pady=(10, 2), sticky="w")
+            ctk.CTkLabel(row, text=created, text_color=T.TEXT_MUTED,
+                         font=ctk.CTkFont(size=11)).grid(
+                row=1, column=0, padx=14, pady=(0, 10), sticky="w")
+            ctk.CTkLabel(row, text=f"{sent} sent  ·  {failed} failed",
+                         text_color=T.TEXT_MUTED, font=ctk.CTkFont(size=11)).grid(
+                row=1, column=1, padx=14, pady=(0, 10), sticky="e")
+            ctk.CTkLabel(row, text=status, fg_color=T.BADGE_BG, corner_radius=999,
+                         padx=10, pady=4, text_color=STATUS_COLORS.get(status, T.TEXT_MUTED),
+                         font=ctk.CTkFont(size=10)).grid(
+                row=0, column=1, padx=14, pady=(10, 2), sticky="e")
 
     def _build_contacts_view(self) -> None:
         frame = self._new_view_frame("Contacts")
         frame.grid_rowconfigure(3, weight=1)
         frame.grid_columnconfigure(0, weight=1)
 
-        hero = ctk.CTkFrame(frame, fg_color="#101a24", corner_radius=20, border_width=1, border_color="#183144")
+        hero = ctk.CTkFrame(frame, fg_color=T.BG_SURFACE, corner_radius=14,
+                             border_width=1, border_color=T.BG_BORDER)
         hero.grid(row=0, column=0, sticky="ew", pady=(0, 12))
         hero.grid_columnconfigure(1, weight=1)
 
         hero_left = ctk.CTkFrame(hero, fg_color="transparent")
-        hero_left.grid(row=0, column=0, padx=18, pady=16, sticky="w")
-        ctk.CTkLabel(hero_left, text="Contacts Command Deck", font=ctk.CTkFont(size=22, weight="bold")).pack(anchor="w")
-        ctk.CTkLabel(
-            hero_left,
-            textvariable=self.contacts_search_var,
-            text_color="#90aab6",
-        ).pack(anchor="w", pady=(4, 0))
+        hero_left.grid(row=0, column=0, padx=16, pady=14, sticky="w")
+        ctk.CTkLabel(hero_left, text="Contacts Directory",
+                     font=ctk.CTkFont(size=15, weight="bold"),
+                     text_color=T.TEXT_HEAD).pack(anchor="w")
+        ctk.CTkLabel(hero_left, textvariable=self.contacts_search_var,
+                     text_color=T.TEXT_MUTED, font=ctk.CTkFont(size=12)).pack(anchor="w", pady=(2, 0))
 
         hero_stats = ctk.CTkFrame(hero, fg_color="transparent")
-        hero_stats.grid(row=0, column=1, padx=18, pady=16, sticky="e")
-        for index, (variable, color) in enumerate([
-            (self.contacts_total_var, "#173245"),
-            (self.contacts_visible_var, "#244329"),
-        ]):
-            ctk.CTkLabel(
-                hero_stats,
-                textvariable=variable,
-                fg_color=color,
-                corner_radius=999,
-                padx=12,
-                pady=7,
-                text_color="#e0eef5",
-            ).grid(row=0, column=index, padx=6)
+        hero_stats.grid(row=0, column=1, padx=16, pady=14, sticky="e")
+        for index, variable in enumerate([self.contacts_total_var, self.contacts_visible_var]):
+            ctk.CTkLabel(hero_stats, textvariable=variable, fg_color=T.BADGE_BG,
+                         corner_radius=999, padx=12, pady=6,
+                         text_color=T.ACCENT, font=ctk.CTkFont(size=11, weight="bold"),
+                         ).grid(row=0, column=index, padx=6)
 
-        toolbar = ctk.CTkFrame(frame, fg_color="#101a24", corner_radius=20, border_width=1, border_color="#183144")
+        toolbar = ctk.CTkFrame(frame, fg_color=T.BG_SURFACE, corner_radius=14,
+                               border_width=1, border_color=T.BG_BORDER)
         toolbar.grid_columnconfigure(3, weight=1)
         toolbar.grid(row=1, column=0, sticky="ew", pady=(0, 12))
 
-        ctk.CTkButton(toolbar, text="Import Contacts", command=self._import_contacts).grid(row=0, column=0, padx=14, pady=14)
-        ctk.CTkButton(toolbar, text="Export CSV", fg_color="#1c6b4d", command=self._export_contacts_csv).grid(
-            row=0, column=1, padx=(0, 14), pady=14
-        )
-        ctk.CTkButton(toolbar, text="Refresh", fg_color="#203243", command=self._reload_contacts).grid(row=0, column=2, padx=(0, 14), pady=14)
-        search_entry = ctk.CTkEntry(toolbar, textvariable=self.search_var, placeholder_text="Search by name or phone")
-        search_entry.grid(row=0, column=3, padx=(0, 14), pady=14, sticky="ew")
+        ctk.CTkButton(toolbar, text="Import Contacts",
+                      corner_radius=8, fg_color=T.BADGE_BG, hover_color=T.BG_BORDER,
+                      text_color=T.TEXT_HEAD, command=self._import_contacts).grid(
+            row=0, column=0, padx=12, pady=12)
+        ctk.CTkButton(toolbar, text="Export CSV", corner_radius=8,
+                      fg_color=T.ACCENT, hover_color=T.ACCENT_HOVER,
+                      text_color=T.TEXT_HEAD,
+                      command=self._export_contacts_csv).grid(
+            row=0, column=1, padx=(0, 12), pady=12)
+        ctk.CTkButton(toolbar, text="Refresh", corner_radius=8,
+                      fg_color=T.BG_SURFACE, hover_color=T.BG_SURFACE,
+                      text_color=T.TEXT_MUTED,
+                      command=self._reload_contacts).grid(
+            row=0, column=2, padx=(0, 12), pady=12)
+        search_entry = ctk.CTkEntry(
+            toolbar, textvariable=self.search_var,
+            placeholder_text="Search by name or phone…",
+            corner_radius=8, border_color=T.BG_BORDER, fg_color=T.BG_INNER,
+            text_color=T.TEXT_HEAD)
+        search_entry.grid(row=0, column=3, padx=(0, 12), pady=12, sticky="ew")
         search_entry.bind("<KeyRelease>", lambda _event: self._schedule_contact_search())
 
-        self.contacts_summary_label = ctk.CTkLabel(frame, text="0 contacts loaded", text_color="#8ea5af")
-        self.contacts_summary_label.grid(row=2, column=0, sticky="w", padx=6, pady=(0, 10))
+        self.contacts_summary_label = ctk.CTkLabel(frame, text="0 contacts loaded",
+                                                   text_color=T.TEXT_MUTED,
+                                                   font=ctk.CTkFont(size=12))
+        self.contacts_summary_label.grid(row=2, column=0, sticky="w", padx=4, pady=(0, 6))
 
         self.contacts_directory = ctk.CTkScrollableFrame(
-            frame,
-            fg_color="#101a24",
-            corner_radius=18,
-            border_width=1,
-            border_color="#183144",
-        )
+            frame, fg_color=T.BG_SURFACE, corner_radius=14,
+            border_width=1, border_color=T.BG_BORDER)
         self.contacts_directory.grid(row=3, column=0, sticky="nsew")
         self._bind_scrollable_frame_mousewheel(self.contacts_directory)
 
     def _build_compose_view(self) -> None:
         frame = self._new_view_frame("Compose")
-        frame.grid_columnconfigure(0, weight=3)
-        frame.grid_columnconfigure(1, weight=2)
+        frame.grid_columnconfigure(0, weight=1)
         frame.grid_rowconfigure(1, weight=1)
 
-        top = ctk.CTkFrame(frame, fg_color="#101a24", corner_radius=20, border_width=1, border_color="#173041")
-        top.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 12))
-        top.grid_columnconfigure(3, weight=1)
+        # ── Row 0: Channel toggle bar ──────────────────────────────────────────
+        ch_bar = ctk.CTkFrame(frame, fg_color=T.BG_SURFACE, corner_radius=14,
+                              border_width=1, border_color=T.BG_BORDER)
+        ch_bar.grid(row=0, column=0, sticky="ew", pady=(0, 12))
+        ch_bar.grid_columnconfigure(1, weight=1)
 
-        ctk.CTkLabel(top, text="Template").grid(row=0, column=0, padx=(16, 8), pady=14, sticky="w")
+        ctk.CTkSegmentedButton(
+            ch_bar, values=["WhatsApp", "Email"],
+            variable=self._compose_channel_var,
+            command=self._on_channel_switch,
+            fg_color=T.BG_INNER,
+            selected_color=T.ACCENT, selected_hover_color=T.ACCENT_HOVER,
+            unselected_color=T.BG_INNER, unselected_hover_color=T.BG_SURFACE,
+            text_color=T.TEXT_HEAD, font=ctk.CTkFont(size=13),
+        ).grid(row=0, column=0, padx=16, pady=12, sticky="w")
+
+        ch_meta = ctk.CTkFrame(ch_bar, fg_color="transparent")
+        ch_meta.grid(row=0, column=1, padx=(0, 16), pady=12, sticky="e")
+        self.compose_contacts_chip = ctk.CTkLabel(
+            ch_meta, textvariable=self.compose_contacts_var, fg_color=T.BADGE_BG,
+            corner_radius=999, padx=12, pady=5, text_color=T.ACCENT, font=ctk.CTkFont(size=11))
+        self.compose_contacts_chip.pack(side="left", padx=4)
+        self.compose_delay_chip = ctk.CTkLabel(
+            ch_meta, textvariable=self.compose_delay_var, fg_color=T.BADGE_BG,
+            corner_radius=999, padx=12, pady=5, text_color=T.ACCENT, font=ctk.CTkFont(size=11))
+        self.compose_delay_chip.pack(side="left", padx=4)
+        self.compose_limit_chip = ctk.CTkLabel(
+            ch_meta, textvariable=self.compose_limit_var, fg_color=T.BADGE_BG,
+            corner_radius=999, padx=12, pady=5, text_color=T.ACCENT, font=ctk.CTkFont(size=11))
+        self.compose_limit_chip.pack(side="left", padx=4)
+
+        # ── Row 1a: WhatsApp panel (shown by default) ──────────────────────────
+        self._wa_compose_frame = ctk.CTkFrame(frame, fg_color="transparent", corner_radius=0)
+        self._wa_compose_frame.grid(row=1, column=0, sticky="nsew")
+        self._wa_compose_frame.grid_columnconfigure(0, weight=3)
+        self._wa_compose_frame.grid_columnconfigure(1, weight=2)
+        self._wa_compose_frame.grid_rowconfigure(1, weight=1)
+
+        wa_top = ctk.CTkFrame(self._wa_compose_frame, fg_color=T.BG_SURFACE, corner_radius=14,
+                              border_width=1, border_color=T.BG_BORDER)
+        wa_top.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 12))
+        wa_top.grid_columnconfigure(3, weight=1)
+
+        ctk.CTkLabel(wa_top, text="Template", text_color=T.TEXT_HEAD).grid(
+            row=0, column=0, padx=(16, 8), pady=14, sticky="w")
         self.template_menu = ctk.CTkOptionMenu(
-            top,
-            values=["Custom Message"],
-            variable=self.template_var,
-            command=self._on_template_selected,
-            fg_color="#173245",
-            button_color="#1d3545",
-            button_hover_color="#203243",
-            text_color="#d8ebf6",
-            dropdown_fg_color="#101a24",
-            dropdown_hover_color="#203243",
-            dropdown_text_color="#dbe8f0",
+            wa_top, values=["Custom Message"],
+            variable=self.template_var, command=self._on_template_selected,
+            fg_color=T.BG_SURFACE, button_color=T.BG_SURFACE,
+            button_hover_color=T.BG_BORDER, text_color=T.TEXT_HEAD,
+            dropdown_fg_color=T.BG_SURFACE, dropdown_hover_color=T.BG_BORDER,
+            dropdown_text_color=T.TEXT_HEAD,
         )
         self.template_menu.grid(row=0, column=1, padx=(0, 12), pady=14, sticky="w")
-        ctk.CTkCheckBox(top, text="Select all contacts", variable=self.select_all_var, command=self._toggle_select_all).grid(
-            row=0, column=2, padx=(0, 12), pady=14, sticky="w"
-        )
-        ctk.CTkCheckBox(top, text="Consent confirmed", variable=self.consent_confirmed_var).grid(
-            row=0, column=3, padx=(0, 16), pady=14, sticky="e"
-        )
+        ctk.CTkCheckBox(wa_top, text="Select all contacts", variable=self.select_all_var,
+                        command=self._toggle_select_all,
+                        fg_color=T.ACCENT, border_color=T.ACCENT,
+                        hover_color=T.ACCENT_HOVER, checkmark_color=T.TEXT_HEAD,
+                        corner_radius=4, text_color=T.TEXT_HEAD).grid(
+            row=0, column=2, padx=(0, 12), pady=14, sticky="w")
+        ctk.CTkCheckBox(wa_top, text="Consent confirmed", variable=self.consent_confirmed_var,
+                        fg_color=T.ACCENT, border_color=T.ACCENT,
+                        hover_color=T.ACCENT_HOVER, checkmark_color=T.TEXT_HEAD,
+                        corner_radius=4, text_color=T.TEXT_HEAD).grid(
+            row=0, column=3, padx=(0, 16), pady=14, sticky="e")
 
-        compose_meta = ctk.CTkFrame(top, fg_color="transparent")
-        compose_meta.grid(row=1, column=0, columnspan=4, padx=16, pady=(0, 14), sticky="ew")
-        self.compose_contacts_chip = ctk.CTkLabel(
-            compose_meta,
-            textvariable=self.compose_contacts_var,
-            fg_color="#173245",
-            corner_radius=999,
-            padx=12,
-            pady=6,
-            text_color="#d8ebf6",
-        )
-        self.compose_contacts_chip.grid(row=0, column=0, padx=(0, 8), sticky="w")
-        self.compose_delay_chip = ctk.CTkLabel(
-            compose_meta,
-            textvariable=self.compose_delay_var,
-            fg_color="#244329",
-            corner_radius=999,
-            padx=12,
-            pady=6,
-            text_color="#def2df",
-        )
-        self.compose_delay_chip.grid(row=0, column=1, padx=8, sticky="w")
-        self.compose_limit_chip = ctk.CTkLabel(
-            compose_meta,
-            textvariable=self.compose_limit_var,
-            fg_color="#4a3318",
-            corner_radius=999,
-            padx=12,
-            pady=6,
-            text_color="#ffe4b5",
-        )
-        self.compose_limit_chip.grid(row=0, column=2, padx=8, sticky="w")
-
-        editor_frame = ctk.CTkFrame(frame, fg_color="#101a24", corner_radius=20, border_width=1, border_color="#173041")
-        editor_frame.grid(row=1, column=0, sticky="nsew", padx=(0, 10))
+        editor_frame = ctk.CTkFrame(self._wa_compose_frame, fg_color=T.BG_SURFACE, corner_radius=14,
+                                    border_width=1, border_color=T.BG_BORDER)
+        editor_frame.grid(row=1, column=0, sticky="nsew", padx=(0, 8))
         editor_frame.grid_columnconfigure(0, weight=1)
         editor_frame.grid_rowconfigure(2, weight=1)
         editor_frame.grid_rowconfigure(4, weight=1)
 
-        ctk.CTkLabel(editor_frame, text="Message Editor", font=ctk.CTkFont(size=18, weight="bold")).grid(
-            row=0, column=0, padx=18, pady=(16, 8), sticky="w"
-        )
-        ctk.CTkLabel(
-            editor_frame,
-            text="Campaign Console",
-            text_color="#6faed2",
-            font=ctk.CTkFont(size=12, weight="bold"),
-        ).grid(row=0, column=0, padx=18, pady=(18, 8), sticky="e")
+        ctk.CTkLabel(editor_frame, text="Message editor",
+                     font=ctk.CTkFont(size=15, weight="bold"),
+                     text_color=T.TEXT_HEAD).grid(
+            row=0, column=0, padx=16, pady=(16, 8), sticky="w")
 
         variables_row = ctk.CTkFrame(editor_frame, fg_color="transparent")
-        variables_row.grid(row=1, column=0, padx=14, pady=(0, 10), sticky="ew")
+        variables_row.grid(row=1, column=0, padx=14, pady=(0, 12), sticky="ew")
         for index, variable in enumerate(["{name}", "{amount}", "{date}", "{phone}"]):
             ctk.CTkButton(
-                variables_row,
-                text=variable,
-                width=90,
-                fg_color="#1d3545",
+                variables_row, text=variable, width=90,
+                fg_color=T.BG_SURFACE, hover_color=T.BG_SURFACE, text_color=T.TEXT_MUTED,
                 command=lambda token=variable: self._insert_variable(token),
             ).grid(row=0, column=index, padx=4, pady=4)
 
-        self.message_textbox = ctk.CTkTextbox(editor_frame, fg_color="#0c131b", wrap="word")
-        self.message_textbox.grid(row=2, column=0, padx=18, pady=(0, 14), sticky="nsew")
+        self.message_textbox = ctk.CTkTextbox(editor_frame, fg_color=T.BG_INNER,
+                                              text_color=T.TEXT_HEAD,
+                                              border_width=1, border_color=T.BG_BORDER,
+                                              wrap="word")
+        self.message_textbox.grid(row=2, column=0, padx=16, pady=(0, 14), sticky="nsew")
         self.message_textbox.bind("<KeyRelease>", lambda _event: self._refresh_preview())
 
-        ctk.CTkLabel(editor_frame, text="Contacts", font=ctk.CTkFont(size=18, weight="bold")).grid(
-            row=3, column=0, padx=18, pady=(0, 8), sticky="w"
-        )
-        self.compose_contacts_frame = ctk.CTkScrollableFrame(editor_frame, fg_color="#0c131b", corner_radius=14)
-        self.compose_contacts_frame.grid(row=4, column=0, padx=18, pady=(0, 18), sticky="nsew")
+        ctk.CTkLabel(editor_frame, text="Contacts",
+                     font=ctk.CTkFont(size=14, weight="bold"),
+                     text_color=T.TEXT_HEAD).grid(
+            row=3, column=0, padx=16, pady=(0, 6), sticky="w")
+        self.compose_contacts_frame = ctk.CTkScrollableFrame(
+            editor_frame, fg_color=T.BG_INNER, corner_radius=10,
+            border_width=1, border_color=T.BG_BORDER)
+        self.compose_contacts_frame.grid(row=4, column=0, padx=16, pady=(0, 16), sticky="nsew")
         self._bind_scrollable_frame_mousewheel(self.compose_contacts_frame)
 
-        preview_frame = ctk.CTkFrame(frame, fg_color="#101a24", corner_radius=20, border_width=1, border_color="#173041")
+        preview_frame = ctk.CTkFrame(self._wa_compose_frame, fg_color=T.BG_SURFACE, corner_radius=14,
+                                     border_width=1, border_color=T.BG_BORDER)
         preview_frame.grid(row=1, column=1, sticky="nsew")
         preview_frame.grid_rowconfigure(2, weight=1)
         preview_frame.grid_columnconfigure(0, weight=1)
 
-        ctk.CTkLabel(preview_frame, text="Preview", font=ctk.CTkFont(size=18, weight="bold")).grid(
-            row=0, column=0, padx=18, pady=(16, 8), sticky="w"
-        )
+        ctk.CTkLabel(preview_frame, text="Preview",
+                     font=ctk.CTkFont(size=15, weight="bold"),
+                     text_color=T.TEXT_HEAD).grid(
+            row=0, column=0, padx=16, pady=(16, 8), sticky="w")
         preview_chips = ctk.CTkFrame(preview_frame, fg_color="transparent")
-        preview_chips.grid(row=0, column=0, padx=18, pady=(14, 8), sticky="e")
-        ctk.CTkLabel(
-            preview_chips,
-            text="Live Render",
-            fg_color="#173245",
-            corner_radius=999,
-            padx=10,
-            pady=5,
-            text_color="#d8ebf6",
-        ).grid(row=0, column=0, padx=4)
-        ctk.CTkLabel(
-            preview_chips,
-            text="First 3 Contacts",
-            fg_color="#244329",
-            corner_radius=999,
-            padx=10,
-            pady=5,
-            text_color="#def2df",
-        ).grid(row=0, column=1, padx=4)
-        ctk.CTkLabel(preview_frame, text="Preview for the first 3 selected contacts", text_color="#8ea5af").grid(
-            row=1, column=0, padx=18, pady=(0, 8), sticky="w"
-        )
-        self.preview_text = ctk.CTkTextbox(preview_frame, fg_color="#0c131b", wrap="word")
-        self.preview_text.grid(row=2, column=0, padx=18, pady=(0, 18), sticky="nsew")
+        preview_chips.grid(row=0, column=0, padx=16, pady=(14, 8), sticky="e")
+        ctk.CTkLabel(preview_chips, text="Live render", fg_color=T.BADGE_BG,
+                     corner_radius=999, padx=10, pady=4,
+                     text_color=T.ACCENT, font=ctk.CTkFont(size=11)).grid(row=0, column=0, padx=4)
+        ctk.CTkLabel(preview_chips, text="First 3 contacts", fg_color=T.BADGE_BG,
+                     corner_radius=999, padx=10, pady=4,
+                     text_color=T.ACCENT, font=ctk.CTkFont(size=11)).grid(row=0, column=1, padx=4)
+        ctk.CTkLabel(preview_frame, text="Preview for the first 3 selected contacts",
+                     text_color=T.TEXT_MUTED, font=ctk.CTkFont(size=11)).grid(
+            row=1, column=0, padx=16, pady=(0, 8), sticky="w")
+        self.preview_text = ctk.CTkTextbox(preview_frame, fg_color=T.BG_INNER,
+                                           text_color=T.TEXT_HEAD,
+                                           border_width=1, border_color=T.BG_BORDER,
+                                           wrap="word")
+        self.preview_text.grid(row=2, column=0, padx=16, pady=(0, 16), sticky="nsew")
 
-        controls = ctk.CTkFrame(frame, fg_color="#101a24", corner_radius=20, border_width=1, border_color="#173041")
-        controls.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(12, 0))
+        # ── Row 1b: Email panel (hidden initially) ─────────────────────────────
+        self._em_compose_frame = ctk.CTkFrame(frame, fg_color="transparent", corner_radius=0)
+        self._em_compose_frame.grid(row=1, column=0, sticky="nsew")
+        self._em_compose_frame.grid_remove()
+        self._em_compose_frame.grid_columnconfigure(0, weight=3)
+        self._em_compose_frame.grid_columnconfigure(1, weight=2)
+        self._em_compose_frame.grid_rowconfigure(1, weight=1)
+
+        # Email left column — compose area
+        em_left = ctk.CTkFrame(self._em_compose_frame, fg_color=T.BG_SURFACE, corner_radius=14,
+                               border_width=1, border_color=T.BG_BORDER)
+        em_left.grid(row=0, column=0, rowspan=2, sticky="nsew", padx=(0, 8))
+        em_left.grid_columnconfigure(0, weight=1)
+        em_left.grid_rowconfigure(3, weight=1)
+
+        ctk.CTkLabel(em_left, text="Email compose",
+                     font=ctk.CTkFont(size=15, weight="bold"),
+                     text_color=T.TEXT_HEAD).grid(row=0, column=0, padx=16, pady=(16, 8), sticky="w")
+
+        em_fields = ctk.CTkFrame(em_left, fg_color="transparent")
+        em_fields.grid(row=1, column=0, padx=16, pady=(0, 8), sticky="ew")
+        em_fields.grid_columnconfigure(1, weight=1)
+
+        ctk.CTkLabel(em_fields, text="Template", text_color=T.TEXT_MUTED,
+                     font=ctk.CTkFont(size=11)).grid(row=0, column=0, padx=(0, 8), pady=(0, 6), sticky="w")
+
+        def _on_em_tpl(val):
+            subj, html = EMAIL_TEMPLATES.get(val, ("", ""))
+            if subj:
+                self._em_subj_var.set(subj)
+            if html and hasattr(self, "_compose_em_body"):
+                self._compose_em_body.delete("1.0", "end")
+                self._compose_em_body.insert("1.0", html)
+
+        ctk.CTkOptionMenu(em_fields, values=list(EMAIL_TEMPLATES.keys()),
+                          variable=self._em_tpl_var, command=_on_em_tpl,
+                          fg_color=T.BG_SURFACE, button_color=T.BG_SURFACE,
+                          button_hover_color=T.BG_BORDER, text_color=T.TEXT_HEAD,
+                          dropdown_fg_color=T.BG_SURFACE, dropdown_hover_color=T.BG_BORDER,
+                          dropdown_text_color=T.TEXT_HEAD).grid(
+            row=0, column=1, pady=(0, 6), sticky="ew")
+
+        ctk.CTkLabel(em_fields, text="Subject", text_color=T.TEXT_MUTED,
+                     font=ctk.CTkFont(size=11)).grid(row=1, column=0, padx=(0, 8), sticky="w")
+        ctk.CTkEntry(em_fields, textvariable=self._em_subj_var,
+                     fg_color=T.BG_INNER, border_color=T.BG_BORDER,
+                     text_color=T.TEXT_HEAD).grid(row=1, column=1, sticky="ew")
+
+        em_chips = ctk.CTkFrame(em_left, fg_color="transparent")
+        em_chips.grid(row=2, column=0, padx=16, pady=(6, 8), sticky="w")
+        ctk.CTkLabel(em_chips, text="Variables:", text_color=T.TEXT_MUTED,
+                     font=ctk.CTkFont(size=11)).grid(row=0, column=0, padx=(0, 8))
+        for i, v in enumerate(["{name}", "{email}", "{amount}", "{date}"]):
+            ctk.CTkLabel(em_chips, text=v, fg_color=T.BG_SURFACE, corner_radius=999,
+                         padx=10, pady=4, text_color=T.TEXT_MUTED,
+                         font=ctk.CTkFont(size=11)).grid(row=0, column=i + 1, padx=4)
+
+        self._compose_em_body = tk.Text(
+            em_left, wrap="word", bg=T.BG_INNER, fg=T.TEXT_HEAD,
+            insertbackground=T.TEXT_HEAD, font=("Courier New", 10),
+            borderwidth=0, highlightthickness=0, relief="flat")
+        self._compose_em_body.insert("1.0",
+            "<p>Dear <strong>{name}</strong>,</p>\n<p>Your message here.</p>")
+        self._compose_em_body.grid(row=3, column=0, padx=16, pady=(0, 16), sticky="nsew")
+
+        # Email right column — SMTP status + recipients
+        em_smtp_card = ctk.CTkFrame(self._em_compose_frame, fg_color=T.BG_SURFACE, corner_radius=14,
+                                    border_width=1, border_color=T.BG_BORDER)
+        em_smtp_card.grid(row=0, column=1, sticky="ew", pady=(0, 8))
+        em_smtp_card.grid_columnconfigure(0, weight=1)
+
+        ctk.CTkLabel(em_smtp_card, text="SMTP connection",
+                     font=ctk.CTkFont(size=13, weight="bold"),
+                     text_color=T.TEXT_HEAD).grid(row=0, column=0, padx=16, pady=(14, 4), sticky="w")
+        self._em_smtp_status_var = StringVar(value="Not configured")
+        self._em_smtp_chip = ctk.CTkLabel(
+            em_smtp_card, textvariable=self._em_smtp_status_var,
+            fg_color=T.BADGE_BG, corner_radius=999, padx=10, pady=4,
+            text_color=T.DANGER, font=ctk.CTkFont(size=11))
+        self._em_smtp_chip.grid(row=0, column=1, padx=16, pady=(14, 4), sticky="e")
+        self._em_validation_label = ctk.CTkLabel(
+            em_smtp_card, text="", text_color=T.DANGER,
+            font=ctk.CTkFont(size=11), wraplength=240, justify="left")
+        self._em_validation_label.grid(row=1, column=0, columnspan=2, padx=16, pady=(0, 4), sticky="w")
+        ctk.CTkButton(em_smtp_card, text="Configure in Settings →", height=30, corner_radius=6,
+                      fg_color=T.BADGE_BG, hover_color=T.BG_BORDER, text_color=T.ACCENT,
+                      font=ctk.CTkFont(size=11),
+                      command=lambda: self._show_view("Settings")).grid(
+            row=2, column=0, columnspan=2, padx=16, pady=(0, 14), sticky="w")
+
+        em_recip_card = ctk.CTkFrame(self._em_compose_frame, fg_color=T.BG_SURFACE, corner_radius=14,
+                                     border_width=1, border_color=T.BG_BORDER)
+        em_recip_card.grid(row=1, column=1, sticky="nsew")
+        em_recip_card.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(em_recip_card, text="Recipients",
+                     font=ctk.CTkFont(size=13, weight="bold"),
+                     text_color=T.TEXT_HEAD).grid(row=0, column=0, padx=16, pady=(14, 4), sticky="w")
+        ctk.CTkLabel(em_recip_card, textvariable=self._em_compose_count_var,
+                     text_color=T.ACCENT, font=ctk.CTkFont(size=13, weight="bold")).grid(
+            row=1, column=0, padx=16, pady=(0, 4), sticky="w")
+        ctk.CTkLabel(em_recip_card,
+                     text="Sends to all contacts with an email address.\nManage contacts in the Contacts tab.",
+                     text_color=T.TEXT_MUTED, font=ctk.CTkFont(size=11), justify="left").grid(
+            row=2, column=0, padx=16, pady=(0, 14), sticky="w")
+
+        def _smtp_changed(*_):
+            if not hasattr(self, "_em_smtp_chip"):
+                return
+            if self._em_user.get():
+                self._em_smtp_status_var.set(f"{self._em_provider.get()} · {self._em_user.get()}")
+                self._em_smtp_chip.configure(text_color=T.SUCCESS)
+            else:
+                self._em_smtp_status_var.set("Not configured")
+                self._em_smtp_chip.configure(text_color=T.DANGER)
+
+        self._em_user.trace_add("write", _smtp_changed)
+        self._em_provider.trace_add("write", _smtp_changed)
+
+        # ── Row 2: Shared send controls ────────────────────────────────────────
+        controls = ctk.CTkFrame(frame, fg_color=T.BG_SURFACE, corner_radius=14,
+                                border_width=1, border_color=T.BG_BORDER)
+        controls.grid(row=2, column=0, sticky="ew", pady=(10, 0))
         controls.grid_columnconfigure(3, weight=1)
 
-        ctk.CTkButton(controls, text="Start", fg_color="#1c6b4d", hover_color="#24895f", command=self._start_sending).grid(
-            row=0, column=0, padx=(16, 8), pady=14
-        )
-        ctk.CTkButton(controls, text="Pause / Resume", fg_color="#7a5825", hover_color="#9a6f30", command=self._toggle_pause).grid(
-            row=0, column=1, padx=8, pady=14
-        )
-        ctk.CTkButton(controls, text="Stop", fg_color="#7d3037", hover_color="#a23e46", command=self._stop_sending).grid(
-            row=0, column=2, padx=8, pady=14
-        )
-        self.compose_progress = ctk.CTkProgressBar(controls)
-        self.compose_progress.grid(row=0, column=3, padx=(12, 12), pady=14, sticky="ew")
+        ctk.CTkButton(controls, text="Start", width=90,
+                      fg_color=T.ACCENT, hover_color=T.ACCENT_HOVER,
+                      text_color=T.TEXT_HEAD,
+                      corner_radius=8, font=ctk.CTkFont(size=13, weight="bold"),
+                      command=self._dispatch_send).grid(
+            row=0, column=0, padx=(16, 8), pady=(14, 8))
+        self._compose_pause_btn = ctk.CTkButton(
+            controls, text="Pause / Resume", width=120,
+            fg_color="transparent", hover_color=T.BG_SURFACE,
+            border_width=1, border_color=T.ACCENT,
+            text_color=T.ACCENT, corner_radius=8,
+            command=self._toggle_pause)
+        self._compose_pause_btn.grid(row=0, column=1, padx=8, pady=(14, 8))
+        ctk.CTkButton(controls, text="Stop", width=80,
+                      fg_color=T.DANGER, hover_color=T.DANGER_HOVER,
+                      text_color=T.TEXT_HEAD,
+                      corner_radius=8, command=self._dispatch_stop).grid(
+            row=0, column=2, padx=8, pady=(14, 8))
+
+        prog_row = ctk.CTkFrame(controls, fg_color="transparent")
+        prog_row.grid(row=1, column=0, columnspan=4, padx=16, pady=(0, 12), sticky="ew")
+        prog_row.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(prog_row, textvariable=self.progress_status_var,
+                     text_color=T.TEXT_MUTED, font=ctk.CTkFont(size=11), anchor="w").grid(
+            row=0, column=0, sticky="w")
+        self.compose_progress = ctk.CTkProgressBar(prog_row, height=8, corner_radius=4,
+                                                    progress_color=T.ACCENT, fg_color=T.BG_SURFACE)
+        self.compose_progress.grid(row=1, column=0, sticky="ew", pady=(4, 0))
         self.compose_progress.set(0)
-        self.compose_progress.configure(progress_color="#39b37a")
-        ctk.CTkLabel(controls, textvariable=self.progress_status_var).grid(row=0, column=4, padx=(0, 16), pady=14, sticky="e")
+
+    def _on_channel_switch(self, channel: str) -> None:
+        if channel == "WhatsApp":
+            self._wa_compose_frame.grid()
+            self._em_compose_frame.grid_remove()
+            self._compose_pause_btn.configure(state="normal")
+        else:
+            self._wa_compose_frame.grid_remove()
+            self._em_compose_frame.grid()
+            self._compose_pause_btn.configure(state="disabled")
+            self._refresh_compose_email_recipients()
+
+    def _dispatch_send(self) -> None:
+        if self._compose_channel_var.get() == "Email":
+            self._start_email_from_compose()
+        else:
+            self._start_sending()
+
+    def _dispatch_stop(self) -> None:
+        if self._compose_channel_var.get() == "Email":
+            self._em_stop_flag.set()
+            self.progress_status_var.set("Stopping…")
+        else:
+            self._stop_sending()
+
+    def _refresh_compose_email_recipients(self) -> None:
+        if not hasattr(self, "_em_compose_count_var"):
+            return
+        count = sum(1 for c in self.contacts if c.email)
+        self._em_compose_count_var.set(
+            f"{count} contact{'s' if count != 1 else ''} with email")
+
+    def _start_email_from_compose(self) -> None:
+        if self._em_send_thread and self._em_send_thread.is_alive():
+            messagebox.showinfo("Campaign Running", "An email campaign is already in progress.")
+            return
+
+        contacts = [c for c in self.contacts if c.email]
+        if not contacts:
+            self.progress_status_var.set(
+                "⚠ No contacts with email. Import contacts in the Contacts tab first.")
+            return
+        if not self._em_user.get() or not self._em_pass.get():
+            self.progress_status_var.set(
+                "⚠ SMTP not configured. Add credentials in Settings → Email.")
+            if hasattr(self, "_em_validation_label"):
+                self._em_validation_label.configure(
+                    text="Configure SMTP in Settings before sending.")
+            return
+        if hasattr(self, "_em_validation_label"):
+            self._em_validation_label.configure(text="")
+        html_template = self._compose_em_body.get("1.0", "end") if hasattr(
+            self, "_compose_em_body") else ""
+        if not html_template.strip():
+            self.progress_status_var.set("⚠ Email body is empty.")
+            return
+        if not messagebox.askyesno("Confirm send",
+                f"Send email to {len(contacts)} contacts?\n\n"
+                "Make sure you have their consent (legal requirement)."):
+            return
+
+        self._em_stop_flag.clear()
+        self.compose_progress.set(0)
+        self.progress_status_var.set("Connecting to SMTP…")
+
+        def worker():
+            try:
+                ctx = ssl.create_default_context()
+                conn = smtplib.SMTP(
+                    self._em_host.get(), int(self._em_port.get() or 587), timeout=10)
+                conn.starttls(context=ctx)
+                conn.login(self._em_user.get(), self._em_pass.get())
+            except Exception as ex:
+                self.after(0, lambda: self.progress_status_var.set(f"⚠ SMTP error: {ex}"))
+                return
+
+            db = DatabaseManager()
+            total = len(contacts)
+            campaign_record = Campaign(
+                name=f"Email {datetime.now().strftime('%Y-%m-%d %H:%M')}",
+                message_template=self._em_subj_var.get(),
+                total_contacts=total,
+                message_delay=int(float(self._em_delay.get() or 5)),
+                use_jitter=False,
+            )
+            campaign_id = db.add_campaign(campaign_record)
+            sent = 0
+
+            for contact in contacts:
+                if self._em_stop_flag.is_set():
+                    break
+                to_addr = contact.email.strip()
+                vars_map = {
+                    "name": contact.name, "email": contact.email,
+                    "phone": contact.phone, "sender": self._em_from_name.get(),
+                }
+                vars_map.update(contact.custom_fields)
+
+                def sub(text, m=vars_map):
+                    for k, v in m.items():
+                        text = text.replace(f"{{{k}}}", str(v))
+                    return text
+
+                html = sub(html_template)
+                try:
+                    msg = MIMEMultipart("alternative")
+                    msg["Subject"] = sub(self._em_subj_var.get())
+                    msg["From"] = f"{self._em_from_name.get()} <{self._em_from_addr.get()}>"
+                    msg["To"] = to_addr
+                    msg.attach(MIMEText(html, "html", "utf-8"))
+                    conn.sendmail(self._em_from_addr.get(), to_addr, msg.as_string())
+                    sent += 1
+                    db.add_message_log(MessageLog(
+                        campaign_id=campaign_id, contact_email=to_addr,
+                        contact_name=contact.name, subject=msg["Subject"],
+                        message_text=html, status=MessageStatus.SENT,
+                        sent_at=datetime.now(),
+                    ))
+                    progress = sent / total
+
+                    def _upd(s=sent, p=progress, e=to_addr):
+                        self.progress_status_var.set(f"Sent: {s} / {total} — {e}")
+                        self.compose_progress.set(p)
+
+                    self.after(0, _upd)
+                except Exception as ex:
+                    db.add_message_log(MessageLog(
+                        campaign_id=campaign_id, contact_email=to_addr,
+                        contact_name=contact.name, subject=self._em_subj_var.get(),
+                        message_text=html, status=MessageStatus.FAILED,
+                        error_message=str(ex),
+                    ))
+
+                time.sleep(float(self._em_delay.get() or 5))
+
+            try:
+                conn.quit()
+            except Exception:
+                pass
+
+            if campaign_id:
+                db.update_campaign(campaign_id, sent, total - sent)
+
+            failed = total - sent
+
+            def finish():
+                self.compose_progress.set(1)
+                self.progress_status_var.set(f"Done — ✅ {sent} sent  ❌ {failed} failed")
+                messagebox.showinfo("Email campaign complete",
+                                    f"Sent: {sent}\nFailed: {failed}")
+
+            self.after(0, finish)
+
+        self._em_send_thread = threading.Thread(target=worker, daemon=True)
+        self._em_send_thread.start()
 
     def _build_reports_view(self) -> None:
         frame = self._new_view_frame("Reports")
         frame.grid_rowconfigure(3, weight=1)
         frame.grid_columnconfigure(0, weight=1)
 
-        hero = ctk.CTkFrame(frame, fg_color="#101a24", corner_radius=20, border_width=1, border_color="#183144")
+        hero = ctk.CTkFrame(frame, fg_color=T.BG_SURFACE, corner_radius=14,
+                            border_width=1, border_color=T.BG_BORDER)
         hero.grid(row=0, column=0, sticky="ew", pady=(0, 12))
         hero.grid_columnconfigure(1, weight=1)
-        ctk.CTkLabel(hero, text="Reports Intelligence Deck", font=ctk.CTkFont(size=22, weight="bold")).grid(
-            row=0, column=0, padx=18, pady=(16, 4), sticky="w"
-        )
-        ctk.CTkLabel(
-            hero,
-            textvariable=self.reports_feed_var,
-            text_color="#90aab6",
-        ).grid(row=1, column=0, padx=18, pady=(0, 16), sticky="w")
-        ctk.CTkLabel(
-            hero,
-            text="Live Monitoring",
-            fg_color="#173245",
-            corner_radius=999,
-            padx=12,
-            pady=6,
-            text_color="#d8ebf6",
-        ).grid(row=0, column=1, rowspan=2, padx=18, pady=16, sticky="e")
+        ctk.CTkLabel(hero, text="Reports & Analytics",
+                     font=ctk.CTkFont(size=15, weight="bold"),
+                     text_color=T.TEXT_HEAD).grid(
+            row=0, column=0, padx=16, pady=(14, 4), sticky="w")
+        ctk.CTkLabel(hero, textvariable=self.reports_feed_var,
+                     text_color=T.TEXT_MUTED, font=ctk.CTkFont(size=12)).grid(
+            row=1, column=0, padx=16, pady=(0, 14), sticky="w")
+        ctk.CTkLabel(hero, text="Live Monitoring", fg_color=T.BADGE_BG,
+                     corner_radius=999, padx=12, pady=6,
+                     text_color=T.ACCENT, font=ctk.CTkFont(size=11, weight="bold"),
+                     ).grid(row=0, column=1, rowspan=2, padx=16, pady=14, sticky="e")
 
-        stats_strip = ctk.CTkFrame(frame, fg_color="#101a24", corner_radius=20, border_width=1, border_color="#183144")
+        stats_strip = ctk.CTkFrame(frame, fg_color=T.BG_SURFACE, corner_radius=14,
+                                   border_width=1, border_color=T.BG_BORDER)
         stats_strip.grid(row=1, column=0, sticky="ew", pady=(0, 12))
+        stat_fg_colors = [T.ACCENT, T.SUCCESS, T.ACCENT, T.DANGER]
         blocks = [
-            ("Sent", self.sent_count_var),
+            ("Sent",      self.sent_count_var),
             ("Delivered", self.delivered_count_var),
-            ("Read", self.read_count_var),
-            ("Failed", self.failed_count_var),
+            ("Read",      self.read_count_var),
+            ("Failed",    self.failed_count_var),
         ]
-        for index, (title, variable) in enumerate(blocks):
+        for index, ((title, variable), fg) in enumerate(zip(blocks, stat_fg_colors)):
             stats_strip.grid_columnconfigure(index, weight=1)
-            block = ctk.CTkFrame(stats_strip, fg_color="#0c131b", corner_radius=16, border_width=1, border_color="#163144")
-            block.grid(row=0, column=index, padx=10, pady=12, sticky="nsew")
-            ctk.CTkLabel(block, text=title, text_color="#8ea5af").pack(anchor="w", padx=12, pady=(10, 2))
-            ctk.CTkLabel(block, textvariable=variable, font=ctk.CTkFont(size=22, weight="bold")).pack(anchor="w", padx=12, pady=(0, 10))
-            ctk.CTkLabel(block, text="Live", text_color="#6faed2", font=ctk.CTkFont(size=11, weight="bold")).pack(
-                anchor="w", padx=12, pady=(0, 10)
-            )
+            block = ctk.CTkFrame(stats_strip, fg_color=T.BADGE_BG, corner_radius=12)
+            block.grid(row=0, column=index, padx=8, pady=10, sticky="nsew")
+            ctk.CTkLabel(block, text=title, text_color=T.TEXT_MUTED,
+                         font=ctk.CTkFont(size=12)).pack(anchor="w", padx=14, pady=(12, 2))
+            ctk.CTkLabel(block, textvariable=variable,
+                         font=ctk.CTkFont(size=24, weight="bold"),
+                         text_color=fg).pack(anchor="w", padx=14, pady=(0, 4))
+            ctk.CTkLabel(block, text="Live", fg_color=T.BG_INNER,
+                         corner_radius=999, padx=8, pady=3,
+                         text_color=fg, font=ctk.CTkFont(size=10, weight="bold"),
+                         ).pack(anchor="w", padx=14, pady=(0, 12))
 
-        rate_frame = ctk.CTkFrame(frame, fg_color="#101a24", corner_radius=20, border_width=1, border_color="#183144")
+        rate_frame = ctk.CTkFrame(frame, fg_color=T.BG_SURFACE, corner_radius=14,
+                                  border_width=1, border_color=T.BG_BORDER)
         rate_frame.grid(row=2, column=0, sticky="ew", pady=(0, 12))
         rate_frame.grid_columnconfigure(1, weight=1)
-        ctk.CTkLabel(rate_frame, text="Delivery Rate", font=ctk.CTkFont(size=18, weight="bold")).grid(
-            row=0, column=0, padx=16, pady=16, sticky="w"
-        )
-        ctk.CTkLabel(
-            rate_frame,
-            text="Analytics Stream",
-            fg_color="#173245",
-            corner_radius=999,
-            padx=12,
-            pady=6,
-            text_color="#d8ebf6",
-        ).grid(row=0, column=2, padx=(0, 12), pady=16, sticky="e")
-        self.delivery_progress = ctk.CTkProgressBar(rate_frame)
-        self.delivery_progress.grid(row=0, column=1, padx=10, pady=16, sticky="ew")
+        ctk.CTkLabel(rate_frame, text="Delivery Rate",
+                     font=ctk.CTkFont(size=14, weight="bold"),
+                     text_color=T.TEXT_HEAD).grid(
+            row=0, column=0, padx=16, pady=14, sticky="w")
+        ctk.CTkLabel(rate_frame, text="Analytics Stream", fg_color=T.BADGE_BG,
+                     corner_radius=999, padx=10, pady=5,
+                     text_color=T.ACCENT, font=ctk.CTkFont(size=11),
+                     ).grid(row=0, column=2, padx=(0, 10), pady=14, sticky="e")
+        self.delivery_progress = ctk.CTkProgressBar(rate_frame, corner_radius=4)
+        self.delivery_progress.grid(row=0, column=1, padx=10, pady=14, sticky="ew")
         self.delivery_progress.set(0)
-        self.delivery_progress.configure(progress_color="#39b37a")
-        ctk.CTkLabel(rate_frame, textvariable=self.delivery_rate_var).grid(row=0, column=3, padx=16, pady=16, sticky="e")
+        self.delivery_progress.configure(progress_color=T.ACCENT)
+        ctk.CTkLabel(rate_frame, textvariable=self.delivery_rate_var,
+                     text_color=T.TEXT_HEAD).grid(row=0, column=3, padx=14, pady=14, sticky="e")
 
-        body = ctk.CTkFrame(frame, fg_color="#101a24", corner_radius=20, border_width=1, border_color="#183144")
+        body = ctk.CTkFrame(frame, fg_color=T.BG_SURFACE, corner_radius=14,
+                            border_width=1, border_color=T.BG_BORDER)
         body.grid(row=3, column=0, sticky="nsew")
         body.grid_rowconfigure(4, weight=1)
         body.grid_columnconfigure(0, weight=1)
@@ -1227,232 +1633,430 @@ class MainWindow(ctk.CTk):
         actions = ctk.CTkFrame(body, fg_color="transparent")
         actions.grid(row=0, column=0, sticky="ew", padx=14, pady=(14, 8))
         actions.grid_columnconfigure(5, weight=1)
-        ctk.CTkLabel(actions, text="Period").grid(row=0, column=0, padx=(0, 8), pady=8)
+        ctk.CTkLabel(actions, text="Period", text_color=T.TEXT_HEAD).grid(
+            row=0, column=0, padx=(0, 8), pady=8)
         ctk.CTkOptionMenu(
             actions,
             values=["today", "week", "month", "all"],
             variable=self.report_period_var,
             command=lambda _value: self._refresh_stats(
-                update_chart=True,
-                update_text_feeds=True,
-                update_dashboard_periods=True,
-            ),
-            fg_color="#173245",
-            button_color="#1d3545",
-            button_hover_color="#203243",
-            text_color="#d8ebf6",
-            dropdown_fg_color="#101a24",
-            dropdown_hover_color="#203243",
-            dropdown_text_color="#dbe8f0",
+                update_chart=True, update_text_feeds=True, update_dashboard_periods=True),
+            fg_color=T.BG_SURFACE, button_color=T.BG_SURFACE,
+            button_hover_color=T.BG_BORDER, text_color=T.TEXT_HEAD,
+            dropdown_fg_color=T.BG_SURFACE, dropdown_hover_color=T.BG_BORDER,
+            dropdown_text_color=T.TEXT_HEAD,
         ).grid(row=0, column=1, padx=(0, 12), pady=8)
-        ctk.CTkLabel(actions, text="Export Format").grid(row=0, column=2, padx=(0, 8), pady=8)
+        ctk.CTkLabel(actions, text="Export Format", text_color=T.TEXT_HEAD).grid(
+            row=0, column=2, padx=(0, 8), pady=8)
         ctk.CTkOptionMenu(
             actions,
             values=["csv", "pdf"],
             variable=self.report_format_var,
             command=lambda _value: self._update_report_summary(),
-            fg_color="#173245",
-            button_color="#1d3545",
-            button_hover_color="#203243",
-            text_color="#d8ebf6",
-            dropdown_fg_color="#101a24",
-            dropdown_hover_color="#203243",
-            dropdown_text_color="#dbe8f0",
+            fg_color=T.BG_SURFACE, button_color=T.BG_SURFACE,
+            button_hover_color=T.BG_BORDER, text_color=T.TEXT_HEAD,
+            dropdown_fg_color=T.BG_SURFACE, dropdown_hover_color=T.BG_BORDER,
+            dropdown_text_color=T.TEXT_HEAD,
         ).grid(row=0, column=3, padx=(0, 12), pady=8)
-        ctk.CTkButton(actions, text="Export Report", command=self._export_report).grid(row=0, column=4, pady=8)
-        ctk.CTkLabel(
-            actions,
-            textvariable=self.report_export_status_var,
-            fg_color="#122331",
-            corner_radius=999,
-            padx=12,
-            pady=6,
-            text_color="#d8ebf6",
-        ).grid(row=0, column=5, padx=(14, 0), pady=8, sticky="e")
+        ctk.CTkButton(actions, text="Export Report", corner_radius=8,
+                      fg_color=T.ACCENT, hover_color=T.ACCENT_HOVER,
+                      text_color=T.TEXT_HEAD,
+                      command=self._export_report).grid(row=0, column=4, pady=8)
+        ctk.CTkLabel(actions, textvariable=self.report_export_status_var,
+                     fg_color=T.BADGE_BG, corner_radius=999, padx=12, pady=5,
+                     text_color=T.ACCENT, font=ctk.CTkFont(size=11),
+                     ).grid(row=0, column=5, padx=(12, 0), pady=8, sticky="e")
 
-        chart_frame = ctk.CTkFrame(body, fg_color="#0c131b", corner_radius=18, border_width=1, border_color="#163144")
-        chart_frame.grid(row=2, column=0, padx=18, pady=(0, 12), sticky="ew")
-        ctk.CTkLabel(chart_frame, text="Read vs Unread", font=ctk.CTkFont(size=14, weight="bold")).pack(
-            anchor="w", padx=14, pady=(10, 4)
-        )
-        self._reports_chart_host = tk.Frame(chart_frame, bg="#0c131b", height=180)
-        self._reports_chart_host.pack(fill="x", padx=8, pady=(0, 10))
+        chart_frame = ctk.CTkFrame(body, fg_color=T.BG_INNER, corner_radius=12,
+                                   border_width=1, border_color=T.BG_BORDER)
+        chart_frame.grid(row=2, column=0, padx=16, pady=(0, 12), sticky="ew")
+        ctk.CTkLabel(chart_frame, text="Read vs Unread",
+                     font=ctk.CTkFont(size=13, weight="bold"),
+                     text_color=T.TEXT_HEAD).pack(anchor="w", padx=14, pady=(10, 4))
+        self._reports_chart_host = tk.Frame(chart_frame, bg=T.BG_INNER, height=180)
+        self._reports_chart_host.pack(fill="x", padx=8, pady=(0, 12))
         self._reports_chart = ReportsChart(self._reports_chart_host)
 
-        ctk.CTkLabel(body, text="Recent Delivery Activity", font=ctk.CTkFont(size=18, weight="bold")).grid(
-            row=3, column=0, padx=18, pady=(4, 8), sticky="w"
-        )
+        ctk.CTkLabel(body, text="Recent Delivery Activity",
+                     font=ctk.CTkFont(size=14, weight="bold"),
+                     text_color=T.TEXT_HEAD).grid(
+            row=3, column=0, padx=16, pady=(4, 8), sticky="w")
         self.reports_text = ctk.CTkTextbox(
-            body,
-            fg_color="#0c131b",
-            border_width=1,
-            border_color="#163144",
-            font=ctk.CTkFont(family="Courier New", size=12),
-        )
-        self.reports_text.grid(row=4, column=0, padx=18, pady=(0, 18), sticky="nsew")
+            body, fg_color=T.BG_INNER, border_width=1, border_color=T.BG_BORDER,
+            text_color=T.TEXT_MUTED, font=ctk.CTkFont(size=12))
+        self.reports_text.grid(row=4, column=0, padx=16, pady=(0, 16), sticky="nsew")
         self._replace_text(self.reports_text, "No tracked messages yet.")
+
+    def _build_campaign_history_view(self) -> None:
+        frame = self._new_view_container("History", scrollable=True)
+        frame.grid_columnconfigure(0, weight=1)
+
+        hero = ctk.CTkFrame(frame, fg_color=T.BG_SURFACE, corner_radius=14,
+                            border_width=1, border_color=T.BG_BORDER)
+        hero.grid(row=0, column=0, sticky="ew", pady=(0, 10))
+        hero.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(hero, text="Campaign history",
+                     font=ctk.CTkFont(size=15, weight="bold"),
+                     text_color=T.TEXT_HEAD).grid(
+            row=0, column=0, padx=18, pady=(14, 4), sticky="w")
+        ctk.CTkLabel(hero, text="Full log of all email campaigns. Use Duplicate to re-use a campaign.",
+                     text_color=T.TEXT_MUTED, font=ctk.CTkFont(size=12),
+                     ).grid(row=1, column=0, padx=18, pady=(0, 14), sticky="w")
+        ctk.CTkButton(hero, text="Export CSV", width=100, height=30, corner_radius=6,
+                      fg_color=T.ACCENT, hover_color=T.ACCENT_HOVER, text_color=T.TEXT_HEAD,
+                      font=ctk.CTkFont(size=11), command=self._export_campaigns_csv,
+                      ).grid(row=0, column=1, rowspan=2, padx=18, pady=14, sticky="e")
+
+        list_frame = ctk.CTkFrame(frame, fg_color=T.BG_SURFACE, corner_radius=14,
+                                  border_width=1, border_color=T.BG_BORDER)
+        list_frame.grid(row=1, column=0, sticky="nsew")
+        list_frame.grid_columnconfigure(0, weight=1)
+        list_frame.grid_rowconfigure(0, weight=1)
+        frame.grid_rowconfigure(1, weight=1)
+
+        scroll = ctk.CTkScrollableFrame(list_frame, fg_color="transparent")
+        scroll.grid(row=0, column=0, sticky="nsew", padx=12, pady=12)
+        scroll.grid_columnconfigure(0, weight=1)
+        self._bind_scrollable_frame_mousewheel(scroll)
+
+        self._history_scroll = scroll
+        self._history_campaigns = self.db.get_recent_campaigns_summary(limit=100)
+        self._render_history_rows()
+
+    def _render_history_rows(self, query: str = "") -> None:
+        if not hasattr(self, "_history_scroll"):
+            return
+        for child in self._history_scroll.winfo_children():
+            child.destroy()
+
+        q = query.strip().lower()
+        campaigns = [c for c in self._history_campaigns
+                     if not q or q in (c.get("name") or "").lower()]
+
+        if not campaigns:
+            empty_text = ("No campaigns match that search."
+                          if q else
+                          "No campaigns yet. Start an email campaign to see history here.")
+            ctk.CTkLabel(self._history_scroll, text=empty_text,
+                         text_color=T.TEXT_MUTED, font=ctk.CTkFont(size=13),
+                         ).grid(row=0, column=0, pady=40)
+            return
+
+        STATUS_COLORS = {"sent": T.SUCCESS, "failed": T.DANGER_ON_BADGE, "draft": T.TEXT_MUTED}
+        for index, camp in enumerate(campaigns):
+            row_frame = ctk.CTkFrame(self._history_scroll, fg_color=T.BG_INNER, corner_radius=10,
+                                     border_width=1, border_color=T.BG_BORDER)
+            row_frame.grid(row=index, column=0, sticky="ew", pady=4)
+            row_frame.grid_columnconfigure(1, weight=1)
+
+            name = camp.get("name", "Untitled")
+            created = camp.get("created_at", "")
+            sent = camp.get("sent_count", 0)
+            failed = camp.get("failed_count", 0)
+            status = "sent" if sent > 0 else "failed" if failed > 0 else "draft"
+
+            ctk.CTkLabel(row_frame, text=name,
+                         font=ctk.CTkFont(size=13, weight="bold"),
+                         text_color=T.TEXT_HEAD).grid(
+                row=0, column=0, padx=14, pady=(10, 2), sticky="w")
+            ctk.CTkLabel(row_frame,
+                         text=f"📅 {created}  ·  ✅ {sent} sent  ·  ❌ {failed} failed",
+                         text_color=T.TEXT_MUTED, font=ctk.CTkFont(size=11),
+                         ).grid(row=1, column=0, padx=14, pady=(0, 10), sticky="w")
+            ctk.CTkLabel(row_frame, text=status, fg_color=T.BADGE_BG, corner_radius=999,
+                         padx=10, pady=4,
+                         text_color=STATUS_COLORS.get(status, T.TEXT_MUTED),
+                         font=ctk.CTkFont(size=10),
+                         ).grid(row=0, column=1, padx=14, pady=(10, 2), sticky="e")
+
+            actions = ctk.CTkFrame(row_frame, fg_color="transparent")
+            actions.grid(row=1, column=1, padx=14, pady=(0, 10), sticky="e")
+
+            def duplicate(c=camp):
+                self._em_subj_var.set(c.get("message_template", ""))
+                self._compose_channel_var.set("Email")
+                self._on_channel_switch("Email")
+                self._show_view("Compose")
+
+            ctk.CTkButton(actions, text="Duplicate", width=80, corner_radius=6,
+                          fg_color=T.BADGE_BG, hover_color=T.BG_BORDER,
+                          text_color=T.TEXT_HEAD, command=duplicate).pack(side="left", padx=4)
+
+    def _export_campaigns_csv(self) -> None:
+        import csv
+        from tkinter import filedialog
+        campaigns = self.db.get_recent_campaigns_summary(limit=9999)
+        if not campaigns:
+            messagebox.showinfo("No data", "No campaigns to export.")
+            return
+        path = filedialog.asksaveasfilename(
+            defaultextension=".csv",
+            filetypes=[("CSV files", "*.csv")],
+            initialfile="campaigns.csv",
+            title="Save campaign history as CSV",
+        )
+        if not path:
+            return
+        try:
+            with open(path, "w", newline="", encoding="utf-8") as f:
+                writer = csv.DictWriter(
+                    f, fieldnames=["id", "name", "created_at", "sent_count", "failed_count"])
+                writer.writeheader()
+                for camp in campaigns:
+                    writer.writerow({k: camp.get(k, "") for k in writer.fieldnames})
+            self._log_activity(f"Campaign history exported to CSV ({len(campaigns)} rows)")
+            messagebox.showinfo("Exported", f"Saved {len(campaigns)} campaigns to:\n{path}")
+        except Exception as exc:
+            messagebox.showerror("Export failed", str(exc))
 
     def _build_settings_view(self) -> None:
         frame = self._new_view_container("Settings", scrollable=True)
         frame.grid_columnconfigure((0, 1), weight=1, uniform="settings")
 
-        hero = ctk.CTkFrame(frame, fg_color="#101a24", corner_radius=20, border_width=1, border_color="#183144")
+        hero = ctk.CTkFrame(frame, fg_color=T.BG_SURFACE, corner_radius=14,
+                            border_width=1, border_color=T.BG_BORDER)
         hero.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 12))
         hero.grid_columnconfigure(1, weight=1)
-        ctk.CTkLabel(hero, text="Settings Control Center", font=ctk.CTkFont(size=22, weight="bold")).grid(
-            row=0, column=0, padx=18, pady=(16, 4), sticky="w"
-        )
-        ctk.CTkLabel(
-            hero,
-            text="Tune cadence, session safety, appearance, and device activation from one place.",
-            text_color="#90aab6",
-        ).grid(row=1, column=0, padx=18, pady=(0, 16), sticky="w")
+        ctk.CTkLabel(hero, text="Settings",
+                     font=ctk.CTkFont(size=15, weight="bold"),
+                     text_color=T.TEXT_HEAD).grid(
+            row=0, column=0, padx=16, pady=(14, 4), sticky="w")
+        ctk.CTkLabel(hero, text="Tune cadence, safety guardrails, appearance, and activation.",
+                     text_color=T.TEXT_MUTED, font=ctk.CTkFont(size=12)).grid(
+            row=1, column=0, padx=16, pady=(0, 14), sticky="w")
         hero_chips = ctk.CTkFrame(hero, fg_color="transparent")
-        hero_chips.grid(row=0, column=1, rowspan=2, padx=18, pady=16, sticky="e")
-        for index, variable in enumerate([self.settings_delay_chip_var, self.settings_theme_chip_var, self.settings_guard_chip_var]):
-            ctk.CTkLabel(
-                hero_chips,
-                textvariable=variable,
-                fg_color="#173245" if index == 0 else "#244329" if index == 1 else "#4a3318",
-                corner_radius=999,
-                padx=12,
-                pady=6,
-                text_color="#e0eef5",
-            ).grid(row=0, column=index, padx=6)
+        hero_chips.grid(row=0, column=1, rowspan=2, padx=16, pady=14, sticky="e")
+        for index, variable in enumerate(
+                [self.settings_delay_chip_var, self.settings_theme_chip_var,
+                 self.settings_guard_chip_var]):
+            ctk.CTkLabel(hero_chips, textvariable=variable, fg_color=T.BADGE_BG,
+                         corner_radius=999, padx=12, pady=5,
+                         text_color=T.ACCENT, font=ctk.CTkFont(size=11),
+                         ).grid(row=0, column=index, padx=5)
 
-        card = ctk.CTkFrame(frame, fg_color="#101a24", corner_radius=20, border_width=1, border_color="#183144")
+        card = ctk.CTkFrame(frame, fg_color=T.BG_SURFACE, corner_radius=14,
+                            border_width=1, border_color=T.BG_BORDER)
         card.grid(row=1, column=0, sticky="nsew", padx=(0, 8))
         card.grid_columnconfigure(1, weight=1)
 
-        ctk.CTkLabel(card, text="Campaign Safety", font=ctk.CTkFont(size=18, weight="bold")).grid(
-            row=0, column=0, columnspan=3, padx=18, pady=(18, 6), sticky="w"
-        )
-        ctk.CTkLabel(card, text="Rate limits and guardrails for stable sending.", text_color="#8ea5af").grid(
-            row=1, column=0, columnspan=3, padx=18, pady=(0, 16), sticky="w"
-        )
+        ctk.CTkLabel(card, text="Campaign Safety",
+                     font=ctk.CTkFont(size=15, weight="bold"),
+                     text_color=T.TEXT_HEAD).grid(
+            row=0, column=0, columnspan=3, padx=16, pady=(16, 4), sticky="w")
+        ctk.CTkLabel(card, text="Rate limits and guardrails for stable sending.",
+                     text_color=T.TEXT_MUTED, font=ctk.CTkFont(size=12)).grid(
+            row=1, column=0, columnspan=3, padx=16, pady=(0, 14), sticky="w")
 
-        ctk.CTkLabel(card, text="Delay between messages").grid(row=2, column=0, padx=18, pady=10, sticky="w")
+        ctk.CTkLabel(card, text="Delay between messages",
+                     text_color=T.TEXT_HEAD).grid(row=2, column=0, padx=16, pady=10, sticky="w")
         self.delay_slider = ctk.CTkSlider(card, from_=10, to=120, number_of_steps=110, command=self._on_delay_change)
-        self.delay_slider.grid(row=2, column=1, padx=18, pady=10, sticky="ew")
+        self.delay_slider.grid(row=2, column=1, padx=16, pady=10, sticky="ew")
         self.delay_slider.set(self.delay_var.get())
-        self.delay_label = ctk.CTkLabel(card, text=f"{self.delay_var.get()} sec")
-        self.delay_label.grid(row=2, column=2, padx=(0, 18), pady=10, sticky="e")
+        self.delay_label = ctk.CTkLabel(card, text=f"{self.delay_var.get()} sec",
+                                        text_color=T.TEXT_MUTED)
+        self.delay_label.grid(row=2, column=2, padx=(0, 16), pady=10, sticky="e")
 
-        ctk.CTkLabel(card, text="Daily limit").grid(row=3, column=0, padx=18, pady=10, sticky="w")
+        ctk.CTkLabel(card, text="Daily limit",
+                     text_color=T.TEXT_HEAD).grid(row=3, column=0, padx=16, pady=10, sticky="w")
         self.limit_slider = ctk.CTkSlider(card, from_=10, to=500, number_of_steps=98, command=self._on_daily_limit_change)
-        self.limit_slider.grid(row=3, column=1, padx=18, pady=10, sticky="ew")
+        self.limit_slider.grid(row=3, column=1, padx=16, pady=10, sticky="ew")
         self.limit_slider.set(self.daily_limit_var.get())
-        self.limit_label = ctk.CTkLabel(card, text=str(self.daily_limit_var.get()))
-        self.limit_label.grid(row=3, column=2, padx=(0, 18), pady=10, sticky="e")
+        self.limit_label = ctk.CTkLabel(card, text=str(self.daily_limit_var.get()),
+                                        text_color=T.TEXT_MUTED)
+        self.limit_label.grid(row=3, column=2, padx=(0, 16), pady=10, sticky="e")
 
-        self.limit_warning_label = ctk.CTkLabel(card, text="", text_color="#e5c07b")
-        self.limit_warning_label.grid(row=4, column=1, padx=18, pady=(0, 10), sticky="w")
+        self.limit_warning_label = ctk.CTkLabel(card, text="", text_color=T.DANGER)
+        self.limit_warning_label.grid(row=4, column=1, padx=16, pady=(0, 12), sticky="w")
 
-        ctk.CTkSwitch(card, text="Random jitter", variable=self.jitter_var, command=self._save_settings).grid(
-            row=5, column=0, padx=18, pady=10, sticky="w"
+        ctk.CTkSwitch(card, text="Random jitter", variable=self.jitter_var,
+                      text_color=T.TEXT_HEAD, command=self._save_settings).grid(
+            row=5, column=0, padx=16, pady=10, sticky="w"
         )
-        ctk.CTkSwitch(card, text="Consent required", variable=self.consent_required_var, command=self._save_settings).grid(
-            row=5, column=1, padx=18, pady=10, sticky="w"
+        ctk.CTkSwitch(card, text="Consent required", variable=self.consent_required_var,
+                      text_color=T.TEXT_HEAD, command=self._save_settings).grid(
+            row=5, column=1, padx=16, pady=10, sticky="w"
         )
 
-        system_card = ctk.CTkFrame(frame, fg_color="#101a24", corner_radius=20, border_width=1, border_color="#183144")
+        system_card = ctk.CTkFrame(frame, fg_color=T.BG_SURFACE, corner_radius=14,
+                                   border_width=1, border_color=T.BG_BORDER)
         system_card.grid(row=1, column=1, sticky="nsew", padx=(8, 0))
         system_card.grid_columnconfigure(0, weight=1)
-        ctk.CTkLabel(system_card, text="System Experience", font=ctk.CTkFont(size=18, weight="bold")).grid(
-            row=0, column=0, padx=18, pady=(18, 6), sticky="w"
-        )
-        ctk.CTkLabel(system_card, text="Theme, session state, and workspace recovery controls.", text_color="#8ea5af").grid(
-            row=1, column=0, padx=18, pady=(0, 16), sticky="w"
-        )
-        ctk.CTkLabel(system_card, text="Theme selector").grid(row=2, column=0, padx=18, pady=(0, 8), sticky="w")
+        ctk.CTkLabel(system_card, text="System Experience",
+                     font=ctk.CTkFont(size=15, weight="bold"),
+                     text_color=T.TEXT_HEAD).grid(
+            row=0, column=0, padx=16, pady=(16, 4), sticky="w")
+        ctk.CTkLabel(system_card, text="Theme, session state, and workspace recovery controls.",
+                     text_color=T.TEXT_MUTED, font=ctk.CTkFont(size=12)).grid(
+            row=1, column=0, padx=16, pady=(0, 14), sticky="w")
+        ctk.CTkLabel(system_card, text="Theme selector",
+                     text_color=T.TEXT_HEAD).grid(row=2, column=0, padx=16, pady=(0, 6), sticky="w")
         ctk.CTkOptionMenu(
             system_card,
             values=["Dark", "Light", "System"],
             variable=self.theme_var,
             command=self._on_theme_selected,
-            fg_color="#173245",
-            button_color="#1d3545",
-            button_hover_color="#203243",
-            text_color="#d8ebf6",
-            dropdown_fg_color="#101a24",
-            dropdown_hover_color="#203243",
-            dropdown_text_color="#dbe8f0",
-        ).grid(
-            row=3, column=0, padx=18, pady=(0, 14), sticky="w"
-        )
-        session_strip = ctk.CTkFrame(system_card, fg_color="#0c131b", corner_radius=16, border_width=1, border_color="#163144")
-        session_strip.grid(row=4, column=0, padx=18, pady=(0, 14), sticky="ew")
-        ctk.CTkLabel(session_strip, text="Session Status", font=ctk.CTkFont(size=15, weight="bold")).pack(anchor="w", padx=14, pady=(12, 4))
-        ctk.CTkLabel(session_strip, textvariable=self.session_status_var, text_color="#8ea5af", wraplength=360, justify="left").pack(
-            anchor="w", padx=14, pady=(0, 12)
-        )
-        ctk.CTkButton(system_card, text="Reset Session", fg_color="#7d3037", hover_color="#a23e46", command=self._reset_session).grid(
-            row=5, column=0, padx=18, pady=(0, 18), sticky="w"
-        )
+            fg_color=T.BG_SURFACE, button_color=T.BG_SURFACE,
+            button_hover_color=T.BG_BORDER, text_color=T.TEXT_HEAD,
+            dropdown_fg_color=T.BG_SURFACE, dropdown_hover_color=T.BG_BORDER,
+            dropdown_text_color=T.TEXT_HEAD,
+        ).grid(row=3, column=0, padx=16, pady=(0, 12), sticky="w")
 
-        license_card = ctk.CTkFrame(frame, fg_color="#101a24", corner_radius=20, border_width=1, border_color="#183144")
-        license_card.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(14, 0))
+        session_strip = ctk.CTkFrame(system_card, fg_color=T.BG_INNER, corner_radius=12,
+                                     border_width=1, border_color=T.BG_BORDER)
+        session_strip.grid(row=4, column=0, padx=16, pady=(0, 12), sticky="ew")
+        ctk.CTkLabel(session_strip, text="Session Status",
+                     font=ctk.CTkFont(size=13, weight="bold"),
+                     text_color=T.TEXT_HEAD).pack(anchor="w", padx=14, pady=(12, 4))
+        ctk.CTkLabel(session_strip, textvariable=self.session_status_var,
+                     text_color=T.TEXT_MUTED, wraplength=360, justify="left").pack(
+            anchor="w", padx=14, pady=(0, 12))
+        ctk.CTkButton(system_card, text="Reset Session", corner_radius=8,
+                      fg_color=T.DANGER, hover_color=T.DANGER_HOVER,
+                      text_color=T.TEXT_HEAD,
+                      command=self._reset_session).grid(
+            row=5, column=0, padx=16, pady=(0, 16), sticky="w")
+
+        license_card = ctk.CTkFrame(frame, fg_color=T.BG_SURFACE, corner_radius=14,
+                                    border_width=1, border_color=T.BG_BORDER)
+        license_card.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(10, 0))
         license_card.grid_columnconfigure(0, weight=1)
-        ctk.CTkLabel(
-            license_card,
-            text="License & Activation",
-            font=ctk.CTkFont(size=18, weight="bold"),
-        ).grid(row=0, column=0, padx=18, pady=(18, 8), sticky="w")
+        ctk.CTkLabel(license_card, text="License & Activation",
+                     font=ctk.CTkFont(size=15, weight="bold"),
+                     text_color=T.TEXT_HEAD).grid(
+            row=0, column=0, padx=16, pady=(16, 6), sticky="w")
         self.settings_license_label = ctk.CTkLabel(
-            license_card,
-            textvariable=self.license_status_var,
-            text_color="#9db1bd",
-            justify="left",
-            wraplength=700,
-        )
-        self.settings_license_label.grid(row=1, column=0, padx=18, pady=(0, 14), sticky="w")
+            license_card, textvariable=self.license_status_var,
+            text_color=T.TEXT_MUTED, justify="left", wraplength=700)
+        self.settings_license_label.grid(row=1, column=0, padx=16, pady=(0, 12), sticky="w")
 
-        premium_strip = ctk.CTkFrame(license_card, fg_color="#122331", corner_radius=16)
-        premium_strip.grid(row=2, column=0, padx=18, pady=(0, 14), sticky="ew")
+        premium_strip = ctk.CTkFrame(license_card, fg_color=T.BG_INNER, corner_radius=12)
+        premium_strip.grid(row=2, column=0, padx=16, pady=(0, 12), sticky="ew")
         premium_strip.grid_columnconfigure((0, 1, 2), weight=1)
         for index, (title, value) in enumerate([
             ("Plan", "Premium"),
             ("Session", "Persistent"),
             ("Reports", "Export Ready"),
         ]):
-            tile = ctk.CTkFrame(premium_strip, fg_color="#173245", corner_radius=14)
+            tile = ctk.CTkFrame(premium_strip, fg_color=T.BADGE_BG, corner_radius=10)
             tile.grid(row=0, column=index, padx=8, pady=10, sticky="ew")
-            ctk.CTkLabel(tile, text=title, text_color="#a9c0cd").pack(anchor="w", padx=12, pady=(10, 2))
-            ctk.CTkLabel(tile, text=value, font=ctk.CTkFont(size=16, weight="bold")).pack(anchor="w", padx=12, pady=(0, 10))
+            ctk.CTkLabel(tile, text=title, text_color=T.TEXT_MUTED,
+                         font=ctk.CTkFont(size=11)).pack(anchor="w", padx=12, pady=(10, 2))
+            ctk.CTkLabel(tile, text=value,
+                         font=ctk.CTkFont(size=14, weight="bold"),
+                         text_color=T.ACCENT).pack(anchor="w", padx=12, pady=(0, 12))
 
         license_actions = ctk.CTkFrame(license_card, fg_color="transparent")
-        license_actions.grid(row=3, column=0, padx=18, pady=(0, 18), sticky="ew")
+        license_actions.grid(row=3, column=0, padx=16, pady=(0, 16), sticky="ew")
         license_actions.grid_columnconfigure(1, weight=1)
         self.settings_activate_button = ctk.CTkButton(
             license_actions,
             text="Activate License",
-            fg_color="#1c6b4d",
-            hover_color="#24895f",
-            text_color="#d7f8e3",
-            text_color_disabled="#9fb5c3",
+            fg_color=T.ACCENT,
+            hover_color=T.ACCENT_HOVER,
+            text_color=T.TEXT_HEAD,
+            text_color_disabled=T.TEXT_MUTED,
             command=self._show_license_gate,
         )
         self.settings_activate_button.grid(row=0, column=0, padx=(0, 10), sticky="w")
         self.settings_deactivate_button = ctk.CTkButton(
             license_actions,
             text="Deactivate License",
-            fg_color="#5f2d33",
-            hover_color="#7d3a42",
-            text_color="#ffd3d8",
-            text_color_disabled="#9fb5c3",
+            fg_color=T.DANGER,
+            hover_color=T.DANGER_HOVER,
+            text_color=T.TEXT_HEAD,
+            text_color_disabled=T.TEXT_MUTED,
             command=self._deactivate_license,
         )
         self.settings_deactivate_button.grid(row=0, column=1, padx=(0, 10), sticky="w")
         self.settings_license_chip = ctk.CTkLabel(
             license_actions,
             textvariable=self.license_badge_var,
-            fg_color="#173227",
+            fg_color=T.BADGE_BG,
             corner_radius=999,
             padx=12,
             pady=6,
-            text_color="#d7f8e3",
+            text_color=T.ACCENT,
+            font=ctk.CTkFont(size=11, weight="bold"),
         )
         self.settings_license_chip.grid(row=0, column=2, sticky="e")
+
+        # ── Email — SMTP settings ─────────────────────────────────────────────
+        smtp_card = ctk.CTkFrame(frame, fg_color=T.BG_SURFACE, corner_radius=14,
+                                 border_width=1, border_color=T.BG_BORDER)
+        smtp_card.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(10, 0))
+        smtp_card.grid_columnconfigure(1, weight=1)
+
+        ctk.CTkLabel(smtp_card, text="Email — SMTP",
+                     font=ctk.CTkFont(size=15, weight="bold"),
+                     text_color=T.TEXT_HEAD).grid(
+            row=0, column=0, columnspan=2, padx=16, pady=(16, 4), sticky="w")
+        ctk.CTkLabel(smtp_card,
+                     text="Credentials used when sending email from the Compose screen.",
+                     text_color=T.TEXT_MUTED, font=ctk.CTkFont(size=12)).grid(
+            row=1, column=0, columnspan=2, padx=16, pady=(0, 12), sticky="w")
+
+        SMTP_PRESETS = {
+            "Gmail":   ("smtp.gmail.com", "587"),
+            "Outlook": ("smtp-mail.outlook.com", "587"),
+            "Yahoo":   ("smtp.mail.yahoo.com", "587"),
+            "Custom":  ("", "587"),
+        }
+
+        def _on_preset(val):
+            h, p = SMTP_PRESETS.get(val, ("", "587"))
+            self._em_host.set(h)
+            self._em_port.set(p)
+            self._save_settings()
+
+        ctk.CTkLabel(smtp_card, text="Provider", text_color=T.TEXT_HEAD).grid(
+            row=2, column=0, padx=16, pady=6, sticky="w")
+        ctk.CTkOptionMenu(smtp_card, values=list(SMTP_PRESETS.keys()),
+                          variable=self._em_provider, command=_on_preset,
+                          fg_color=T.BG_SURFACE, button_color=T.BG_SURFACE,
+                          button_hover_color=T.BG_BORDER, text_color=T.TEXT_HEAD,
+                          dropdown_fg_color=T.BG_SURFACE, dropdown_hover_color=T.BG_BORDER,
+                          dropdown_text_color=T.TEXT_HEAD).grid(
+            row=2, column=1, padx=(4, 16), pady=6, sticky="ew")
+
+        for i, (lbl, var, secret) in enumerate([
+            ("Host",         self._em_host,      False),
+            ("Port",         self._em_port,      False),
+            ("Username",     self._em_user,      False),
+            ("Password",     self._em_pass,      True),
+            ("Sender name",  self._em_from_name, False),
+            ("Sender email", self._em_from_addr, False),
+            ("Delay (sec)",  self._em_delay,     False),
+        ], start=3):
+            ctk.CTkLabel(smtp_card, text=lbl, text_color=T.TEXT_HEAD).grid(
+                row=i, column=0, padx=16, pady=5, sticky="w")
+            entry = ctk.CTkEntry(smtp_card, textvariable=var, show="●" if secret else "",
+                                 fg_color=T.BG_INNER, border_color=T.BG_BORDER,
+                                 text_color=T.TEXT_HEAD)
+            entry.grid(row=i, column=1, padx=(4, 16), pady=5, sticky="ew")
+            entry.bind("<FocusOut>", lambda _e: self._save_settings())
+            entry.bind("<Return>",   lambda _e: self._save_settings())
+
+        def _test_smtp():
+            def worker():
+                try:
+                    conn = smtplib.SMTP(
+                        self._em_host.get(), int(self._em_port.get()), timeout=10)
+                    conn.starttls(context=ssl.create_default_context())
+                    conn.login(self._em_user.get(), self._em_pass.get())
+                    conn.quit()
+                    self.after(0, lambda: messagebox.showinfo("SMTP test", "Connection successful ✅"))
+                except smtplib.SMTPAuthenticationError:
+                    self.after(0, lambda: messagebox.showerror(
+                        "Auth failed", "Wrong username/password.\nFor Gmail use an App Password."))
+                except Exception as ex:
+                    self.after(0, lambda: messagebox.showerror("Connection failed", str(ex)))
+            threading.Thread(target=worker, daemon=True).start()
+
+        ctk.CTkButton(smtp_card, text="Test connection",
+                      fg_color=T.ACCENT, hover_color=T.ACCENT_HOVER, corner_radius=8,
+                      text_color=T.TEXT_HEAD,
+                      command=_test_smtp).grid(
+            row=10, column=0, columnspan=2, padx=16, pady=(10, 16), sticky="w")
 
         self._update_settings_summary()
         self._update_daily_limit_warning()
@@ -1462,7 +2066,7 @@ class MainWindow(ctk.CTk):
 
     def _new_view_container(self, name: str, scrollable: bool = False) -> ctk.CTkFrame:
         frame_class = ctk.CTkScrollableFrame if scrollable else ctk.CTkFrame
-        frame = frame_class(self.view_host, fg_color="#0a1118", corner_radius=0)
+        frame = frame_class(self.view_host, fg_color=T.BG_MAIN, corner_radius=0)
         self.view_frames[name] = frame
         container = getattr(frame, "_parent_frame", frame)
         container.grid(row=0, column=0, sticky="nsew")
@@ -1484,12 +2088,21 @@ class MainWindow(ctk.CTk):
         for name, button in self.sidebar_buttons.items():
             is_active = name == view_name
             button.configure(
-                fg_color="#173245" if is_active else "transparent",
-                hover_color="#244329" if is_active else "#203243",
-                border_color="#173245" if is_active else "#183144",
-                text_color="#d8ebf6" if is_active else "#a7bac6",
+                fg_color=T.ACCENT if is_active else T.NAV_INACTIVE,
+                hover_color=T.ACCENT_HOVER if is_active else T.BG_SURFACE,
+                border_width=0,
+                text_color=T.TEXT_HEAD,
+                font=ctk.CTkFont(size=13, weight="bold" if is_active else "normal"),
             )
-        if view_name == "Reports":
+            if name in self.sidebar_accent_bars:
+                self.sidebar_accent_bars[name].configure(
+                    bg=T.ACCENT if is_active else T.BG_MAIN
+                )
+        if view_name == "Campaigns":
+            self._refresh_campaigns_home()
+        elif view_name in ("Contacts", "History"):
+            self._on_header_search()
+        elif view_name == "Reports":
             self._refresh_stats(update_chart=True, update_text_feeds=True, update_dashboard_periods=True)
         elif view_name in {"Compose", "Dashboard"}:
             self._refresh_stats(
@@ -1501,36 +2114,44 @@ class MainWindow(ctk.CTk):
 
     def _apply_view_chrome(self, view_name: str) -> None:
         view_meta = {
+            "Campaigns": (
+                "Your campaign workspace — start a new send or review recent activity.",
+                "Campaign home",
+            ),
+            "History": (
+                "Full log of every campaign — duplicate, re-schedule, or export any entry.",
+                "Campaign history",
+            ),
             "Dashboard": (
                 "Persistent WhatsApp sessions, delivery analytics, and safer campaigns.",
-                "Enterprise Messaging Suite",
+                "Campaign home",
             ),
             "Contacts": (
                 "Organize your outreach directory with searchable, campaign-ready contact records.",
-                "Contacts Command Deck",
+                "Contacts",
             ),
             "Compose": (
-                "Build personalized campaigns with live preview, pacing controls, and contact-aware messaging.",
-                "Campaign Console",
+                "Write a message, pick your channel and recipients, then send.",
+                "Compose",
             ),
             "Reports": (
-                "Track sent, delivered, and read performance from a live executive monitoring workspace.",
-                "Reports Intelligence",
+                "Track sent, delivered, and read performance from a live monitoring workspace.",
+                "Reports",
             ),
             "Email": (
-            "Send HTML email campaigns with templates and variable substitution.",
-            "Email Campaign Center",
-        ),
-        "Cards": (
-            "Build beautiful marketing cards for any app — WhatsApp, email, social.",
-            "Card Creator Studio",
-        ),
-        "Settings": (          
-                "Tune cadence, safety guardrails, themes, sessions, and device activation from one premium control center.",
-                "Control Center Settings",
+                "Send HTML email campaigns with templates and variable substitution.",
+                "Email",
+            ),
+            "Cards": (
+                "Build marketing cards for any app — WhatsApp, email, social.",
+                "Card creator",
+            ),
+            "Settings": (
+                "Tune cadence, safety guardrails, SMTP, sessions, and activation.",
+                "Settings",
             ),
         }
-        subtitle, badge = view_meta.get(view_name, view_meta["Dashboard"])
+        subtitle, badge = view_meta.get(view_name, view_meta["Campaigns"])
         self.header_context_var.set(subtitle)
         self.header_badge_var.set(badge)
 
@@ -1545,6 +2166,16 @@ class MainWindow(ctk.CTk):
         self.jitter_var.set(bool(settings.get("jitter", True)))
         self.consent_required_var.set(bool(settings.get("consent_required", True)))
 
+        # SMTP — stored in same JSON blob (plaintext in local SQLite, AppData only)
+        self._em_provider.set(str(settings.get("smtp_provider", "Gmail")))
+        self._em_host.set(str(settings.get("smtp_host", "smtp.gmail.com")))
+        self._em_port.set(str(settings.get("smtp_port", "587")))
+        self._em_user.set(str(settings.get("smtp_user", "")))
+        self._em_pass.set(str(settings.get("smtp_pass", "")))
+        self._em_from_name.set(str(settings.get("smtp_from_name", "My Business")))
+        self._em_from_addr.set(str(settings.get("smtp_from_addr", "")))
+        self._em_delay.set(str(settings.get("smtp_delay", "5")))
+
     def _save_settings(self) -> None:
         self.db.set_setting_json(
             self.SETTINGS_KEY,
@@ -1554,6 +2185,15 @@ class MainWindow(ctk.CTk):
                 "daily_limit": self.daily_limit_var.get(),
                 "jitter": self.jitter_var.get(),
                 "consent_required": self.consent_required_var.get(),
+                # SMTP
+                "smtp_provider":   self._em_provider.get(),
+                "smtp_host":       self._em_host.get(),
+                "smtp_port":       self._em_port.get(),
+                "smtp_user":       self._em_user.get(),
+                "smtp_pass":       self._em_pass.get(),
+                "smtp_from_name":  self._em_from_name.get(),
+                "smtp_from_addr":  self._em_from_addr.get(),
+                "smtp_delay":      self._em_delay.get(),
             },
         )
         self._update_settings_summary()
@@ -1561,9 +2201,7 @@ class MainWindow(ctk.CTk):
 
     def _apply_theme(self, selected_theme: str) -> None:
         ctk.set_appearance_mode(selected_theme)
-        ctk.set_default_color_theme("green")
         if hasattr(self, "view_host"):
-            self._sync_theme_overrides()
             self.after_idle(self._sync_theme_overrides)
 
     def _on_theme_selected(self, selected_theme: str) -> None:
@@ -1585,22 +2223,22 @@ class MainWindow(ctk.CTk):
         info = getattr(self, "license_info", {}) or {}
         if info.get("is_valid") and info.get("is_trial"):
             badge_text = f"Trial: {info.get('days_remaining', 0)}d left"
-            badge_color = "#6b5420"
-            badge_text_color = "#ffe7b3"
+            badge_color = T.BADGE_BG
+            badge_text_color = T.TEXT_MUTED
             activate_state = "normal"
             deactivate_state = "disabled"
             card_value = badge_text
         elif info.get("is_valid"):
             badge_text = "Licensed"
-            badge_color = "#173227"
-            badge_text_color = "#d7f8e3"
+            badge_color = T.BADGE_BG
+            badge_text_color = T.SUCCESS
             activate_state = "disabled"
             deactivate_state = "normal"
             card_value = "Paid"
         else:
             badge_text = "Activation Required"
-            badge_color = "#5f2d33"
-            badge_text_color = "#ffd3d8"
+            badge_color = T.BG_SURFACE
+            badge_text_color = T.DANGER
             activate_state = "normal"
             deactivate_state = "disabled"
             card_value = "Locked"
@@ -1725,6 +2363,7 @@ class MainWindow(ctk.CTk):
         self._update_compose_summary()
         self._refresh_preview()
         self._refresh_stats(update_text_feeds=True, update_dashboard_periods=True)
+        self._refresh_compose_email_recipients()
 
     def _sync_contact_selection(self) -> None:
         valid_keys = set()
@@ -1736,6 +2375,14 @@ class MainWindow(ctk.CTk):
         for key in list(self.contact_selection_vars.keys()):
             if key not in valid_keys:
                 del self.contact_selection_vars[key]
+
+    def _on_header_search(self, *_) -> None:
+        query = self._header_search_var.get()
+        if self._active_view == "Contacts":
+            self.search_var.set(query)
+            self._schedule_contact_search()
+        elif self._active_view == "History":
+            self._render_history_rows(query)
 
     def _schedule_contact_search(self) -> None:
         if self._search_job is not None:
@@ -1750,63 +2397,61 @@ class MainWindow(ctk.CTk):
         query = self.search_var.get().strip().lower()
         results = [
             contact for contact in self.contacts
-            if not query or query in contact.phone.lower() or query in (contact.name or "").lower()
+            if not query
+            or query in contact.phone.lower()
+            or query in (contact.name or "").lower()
+            or query in (contact.email or "").lower()
         ]
         self._update_contacts_summary(len(results), query)
         if not results:
-            empty = ctk.CTkFrame(self.contacts_directory, fg_color="#0c131b", corner_radius=18, border_width=1, border_color="#183144")
-            empty.pack(fill="x", padx=8, pady=8)
-            ctk.CTkLabel(empty, text="No contacts found", font=ctk.CTkFont(size=17, weight="bold")).pack(padx=18, pady=(18, 4), anchor="w")
-            ctk.CTkLabel(
-                empty,
-                text="Adjust your search or import a fresh CSV/Excel list to continue.",
-                text_color="#8ea5af",
-            ).pack(padx=18, pady=(0, 18), anchor="w")
+            empty = ctk.CTkFrame(self.contacts_directory, fg_color=T.BG_INNER,
+                                 corner_radius=12, border_width=1, border_color=T.BG_BORDER)
+            empty.pack(fill="x", padx=6, pady=6)
+            ctk.CTkLabel(empty, text="No contacts found",
+                         font=ctk.CTkFont(size=14, weight="bold"),
+                         text_color=T.TEXT_HEAD).pack(padx=16, pady=(16, 4), anchor="w")
+            ctk.CTkLabel(empty,
+                         text="Adjust your search or import a CSV/Excel list to continue.",
+                         text_color=T.TEXT_MUTED).pack(padx=16, pady=(0, 16), anchor="w")
             self._bind_scrollable_frame_mousewheel(self.contacts_directory)
             return
 
         display_limit = 200
         visible = results[:display_limit]
         if len(results) > display_limit:
-            notice = ctk.CTkFrame(self.contacts_directory, fg_color="#122331", corner_radius=12)
-            notice.pack(fill="x", padx=6, pady=(6, 2))
+            notice = ctk.CTkFrame(self.contacts_directory, fg_color=T.BADGE_BG, corner_radius=8)
+            notice.pack(fill="x", padx=4, pady=(4, 2))
             ctk.CTkLabel(
                 notice,
-                text=f"Showing first {display_limit} of {len(results)} matches — refine your search to narrow results.",
-                text_color="#8ea5af",
-                font=ctk.CTkFont(size=12),
-            ).pack(padx=12, pady=8, anchor="w")
+                text=f"Showing first {display_limit} of {len(results)} matches — refine your search.",
+                text_color=T.ACCENT, font=ctk.CTkFont(size=11),
+            ).pack(padx=10, pady=6, anchor="w")
 
-        for contact in visible:
-            card = ctk.CTkFrame(self.contacts_directory, fg_color="#0c131b", corner_radius=18, border_width=1, border_color="#163144")
-            card.pack(fill="x", padx=6, pady=6)
+        for idx, contact in enumerate(visible):
+            card = ctk.CTkFrame(self.contacts_directory, fg_color=T.BG_SURFACE,
+                                corner_radius=10, border_width=1, border_color=T.BG_BORDER)
+            card.pack(fill="x", padx=6, pady=3)
             top = ctk.CTkFrame(card, fg_color="transparent")
-            top.pack(fill="x", padx=14, pady=(12, 4))
-            ctk.CTkLabel(top, text=contact.name or "Unnamed Contact", font=ctk.CTkFont(size=16, weight="bold")).pack(anchor="w", side="left")
-            ctk.CTkLabel(
-                top,
-                text="Directory",
-                fg_color="#173245",
-                corner_radius=999,
-                padx=10,
-                pady=5,
-                text_color="#d8ebf6",
-                font=ctk.CTkFont(size=11, weight="bold"),
-            ).pack(anchor="e", side="right")
-            ctk.CTkLabel(card, text=contact.phone, text_color="#8ea5af").pack(anchor="w", padx=14, pady=(0, 4))
+            top.pack(fill="x", padx=16, pady=(12, 3))
+            ctk.CTkLabel(top, text=contact.name or "Unnamed Contact",
+                         font=ctk.CTkFont(size=13, weight="bold"),
+                         text_color=T.TEXT_HEAD).pack(anchor="w", side="left")
+            ctk.CTkLabel(top, text="Active",
+                         fg_color=T.BADGE_BG, corner_radius=999,
+                         padx=8, pady=3,
+                         text_color=T.ACCENT, font=ctk.CTkFont(size=10, weight="bold"),
+                         ).pack(anchor="e", side="right")
+            ctk.CTkLabel(card, text=contact.phone, text_color=T.TEXT_MUTED,
+                         font=ctk.CTkFont(size=12)).pack(anchor="w", padx=16, pady=(0, 3))
             footer = ctk.CTkFrame(card, fg_color="transparent")
-            footer.pack(fill="x", padx=14, pady=(0, 12))
-            ctk.CTkLabel(
-                footer,
-                text=f"Contact ID {contact.id if contact.id is not None else 'Pending'}",
-                text_color="#6f8796",
-            ).pack(side="left")
-            ctk.CTkLabel(
-                footer,
-                text="Ready for campaign",
-                text_color="#7dc59b",
-                font=ctk.CTkFont(size=11, weight="bold"),
-            ).pack(side="right")
+            footer.pack(fill="x", padx=16, pady=(0, 12))
+            ctk.CTkLabel(footer,
+                         text=f"ID {contact.id if contact.id is not None else '—'}",
+                         text_color=T.TEXT_MUTED, font=ctk.CTkFont(size=11),
+                         ).pack(side="left")
+            ctk.CTkLabel(footer, text="Ready for campaign",
+                         text_color=T.SUCCESS, font=ctk.CTkFont(size=10, weight="bold"),
+                         ).pack(side="right")
 
         self._bind_scrollable_frame_mousewheel(self.contacts_directory)
 
@@ -1815,7 +2460,7 @@ class MainWindow(ctk.CTk):
             child.destroy()
 
         if not self.contacts:
-            ctk.CTkLabel(self.compose_contacts_frame, text="Import contacts to start composing.", text_color="#8ea5af").pack(
+            ctk.CTkLabel(self.compose_contacts_frame, text="Import contacts to start composing.", text_color=T.TEXT_MUTED).pack(
                 padx=14, pady=14, anchor="w"
             )
             self._bind_scrollable_frame_mousewheel(self.compose_contacts_frame)
@@ -1829,6 +2474,9 @@ class MainWindow(ctk.CTk):
                 text=f"{contact.name or 'Unnamed'}  |  {contact.phone}",
                 variable=self.contact_selection_vars[key],
                 command=self._refresh_preview,
+                fg_color=T.ACCENT, border_color=T.ACCENT,
+                hover_color=T.ACCENT_HOVER, checkmark_color=T.TEXT_HEAD,
+                corner_radius=4, text_color=T.TEXT_HEAD,
             ).pack(fill="x", padx=10, pady=6, anchor="w")
 
         self._bind_scrollable_frame_mousewheel(self.compose_contacts_frame)
@@ -2095,7 +2743,8 @@ class MainWindow(ctk.CTk):
         self.read_count_var.set(str(read_count))
         self.failed_count_var.set(str(failed_count))
         self.delivery_rate_var.set(f"{delivery_rate:.1f}%")
-        self.delivery_progress.set(min(max(delivery_rate / 100.0, 0.0), 1.0))
+        if hasattr(self, "delivery_progress"):
+            self.delivery_progress.set(min(max(delivery_rate / 100.0, 0.0), 1.0))
         self.reports_feed_var.set(
             f"{sent_count} sent, {delivered_count} delivered, {read_count} read, {failed_count} failed"
         )
@@ -2108,12 +2757,14 @@ class MainWindow(ctk.CTk):
             month_stats = self.db.get_message_stats_for_period("month")
 
             self.dashboard_cards["Sent Today"].configure(text=str(today_stats.get("sent_count", 0)))
-            self.dashboard_cards["Delivery Rate"].configure(text=f"{delivery_rate:.1f}%")
+            self.dashboard_cards["Delivery Rate"].configure(text=str(delivered_count))
             self.dashboard_cards["Active Session"].configure(text="Active" if session_state.is_active else "Scan QR")
             self.dashboard_card_meta["Sent Today"].configure(
-                text=f"This week: {week_stats.get('sent_count', 0)} · Month: {month_stats.get('sent_count', 0)}"
+                text=f"Today: {today_stats.get('sent_count', 0)} · Month: {month_stats.get('sent_count', 0)}"
             )
-            self.dashboard_card_meta["Delivery Rate"].configure(text=f"Delivered {delivered_count} | Read {read_count}")
+            self.dashboard_card_meta["Delivery Rate"].configure(
+                text=f"Rate {delivery_rate:.1f}% · Read {read_count}"
+            )
             self.dashboard_card_meta["Active Session"].configure(text=session_state.status_text)
             self._update_license_ui()
             self._set_session_status(session_state.status_text)
@@ -2125,7 +2776,8 @@ class MainWindow(ctk.CTk):
                 f"[{str(row.get('status', 'unknown')).upper():<10}] {row.get('phone')}   #{row.get('id')}   {row.get('sent_at') or row.get('created_at')}"
                 for row in recent_messages
             ]
-            self._replace_text(self.reports_text, "\n".join(rows) if rows else "No tracked messages yet.")
+            if hasattr(self, "reports_text"):
+                self._replace_text(self.reports_text, "\n".join(rows) if rows else "No tracked messages yet.")
             self._replace_text(self.activity_text, "\n".join(self.activity_items[:20]) if self.activity_items else "No activity yet.")
 
         if update_chart and self._active_view == "Reports" and self._reports_chart is not None:
@@ -2186,409 +2838,6 @@ class MainWindow(ctk.CTk):
             Logger.warning(f"UI heartbeat delay detected: {elapsed:.1f}s since last tick")
         self._last_heartbeat = now
         self.after(2000, self._heartbeat_check)
-
-    def _build_email_view(self) -> None:
-        """Bulk Email Campaign view — full CustomTkinter UI matching app style."""
-
-        frame = self._new_view_container("Email", scrollable=False)
-        frame.grid_columnconfigure(0, weight=1)
-        frame.grid_columnconfigure(1, weight=2)
-        frame.grid_rowconfigure(1, weight=1)
-
-        # ── Header bar ────────────────────────────────────────────────────────────
-        hero = ctk.CTkFrame(frame, fg_color="#101a24", corner_radius=20,
-                            border_width=1, border_color="#183144")
-        hero.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 12))
-        hero.grid_columnconfigure(1, weight=1)
-
-        ctk.CTkLabel(hero, text="Email Campaign Center",
-                     font=ctk.CTkFont(size=22, weight="bold")).grid(
-            row=0, column=0, padx=18, pady=(16, 4), sticky="w")
-        ctk.CTkLabel(hero,
-                     text="Send personalized HTML email campaigns — Gmail, Outlook, or any SMTP server",
-                     text_color="#90aab6").grid(
-            row=1, column=0, padx=18, pady=(0, 16), sticky="w")
-
-        badge_frame = ctk.CTkFrame(hero, fg_color="transparent")
-        badge_frame.grid(row=0, column=1, rowspan=2, padx=18, pady=16, sticky="e")
-        for i, (txt, col) in enumerate([("SMTP Ready", "#173245"),
-                                         ("HTML Templates", "#244329"),
-                                         ("Variable Support", "#4a3318")]):
-            ctk.CTkLabel(badge_frame, text=txt, fg_color=col, corner_radius=999,
-                         padx=12, pady=6, text_color="#e0eef5").grid(
-                row=0, column=i, padx=5)
-
-        # ── LEFT panel ────────────────────────────────────────────────────────────
-        left_scroll = ctk.CTkScrollableFrame(frame, fg_color="#0a1118", corner_radius=0)
-        left_scroll.grid(row=1, column=0, sticky="nsew", padx=(0, 8))
-        left_scroll.grid_columnconfigure(0, weight=1)
-
-        # SMTP Settings card
-        smtp_card = ctk.CTkFrame(left_scroll, fg_color="#101a24", corner_radius=20,
-                                  border_width=1, border_color="#173041")
-        smtp_card.grid(row=0, column=0, sticky="ew", pady=(0, 10))
-        smtp_card.grid_columnconfigure(1, weight=1)
-
-        ctk.CTkLabel(smtp_card, text="📮  SMTP Settings",
-                     font=ctk.CTkFont(size=18, weight="bold")).grid(
-            row=0, column=0, columnspan=2, padx=18, pady=(16, 8), sticky="w")
-
-        PRESETS = {
-            "Gmail":   ("smtp.gmail.com", "587"),
-            "Outlook": ("smtp-mail.outlook.com", "587"),
-            "Yahoo":   ("smtp.mail.yahoo.com", "587"),
-            "Custom":  ("", "587"),
-        }
-
-        self._em_provider  = ctk.StringVar(value="Gmail")
-        self._em_host      = ctk.StringVar(value="smtp.gmail.com")
-        self._em_port      = ctk.StringVar(value="587")
-        self._em_user      = ctk.StringVar()
-        self._em_pass      = ctk.StringVar()
-        self._em_from_name = ctk.StringVar(value="My Business")
-        self._em_from_addr = ctk.StringVar()
-        self._em_delay     = ctk.StringVar(value="5")
-
-        def on_preset(val):
-            h, p = PRESETS.get(val, ("", "587"))
-            self._em_host.set(h)
-            self._em_port.set(p)
-
-        ctk.CTkLabel(smtp_card, text="Provider").grid(
-            row=1, column=0, padx=18, pady=5, sticky="w")
-        ctk.CTkOptionMenu(smtp_card, values=list(PRESETS.keys()),
-                          variable=self._em_provider, command=on_preset,
-                          fg_color="#173245", button_color="#1d3545",
-                          button_hover_color="#203243", text_color="#d8ebf6",
-                          dropdown_fg_color="#101a24",
-                          dropdown_hover_color="#203243",
-                          dropdown_text_color="#dbe8f0").grid(
-            row=1, column=1, padx=(4, 18), pady=5, sticky="ew")
-
-        for i, (lbl, var, secret) in enumerate([
-            ("Host",         self._em_host,      False),
-            ("Port",         self._em_port,      False),
-            ("Username",     self._em_user,      False),
-            ("Password",     self._em_pass,      True),
-            ("Sender Name",  self._em_from_name, False),
-            ("Sender Email", self._em_from_addr, False),
-            ("Delay (sec)",  self._em_delay,     False),
-        ], start=2):
-            ctk.CTkLabel(smtp_card, text=lbl).grid(
-                row=i, column=0, padx=18, pady=5, sticky="w")
-            ctk.CTkEntry(smtp_card, textvariable=var,
-                         show="●" if secret else "",
-                         fg_color="#0c131b", border_color="#173041").grid(
-                row=i, column=1, padx=(4, 18), pady=5, sticky="ew")
-
-        def test_connection():
-            def worker() -> None:
-                try:
-                    conn = smtplib.SMTP(
-                        self._em_host.get(), int(self._em_port.get()), timeout=10,
-                    )
-                    conn.starttls(context=ssl.create_default_context())
-                    conn.login(self._em_user.get(), self._em_pass.get())
-                    conn.quit()
-                    self.after(0, lambda: messagebox.showinfo("Success ✅", "SMTP connection successful!"))
-                except smtplib.SMTPAuthenticationError:
-                    self.after(0, lambda: messagebox.showerror(
-                        "Auth Failed",
-                        "Wrong username/password.\nFor Gmail use an App Password.",
-                    ))
-                except Exception as ex:
-                    self.after(0, lambda: messagebox.showerror("Connection Failed", str(ex)))
-
-            threading.Thread(target=worker, daemon=True).start()
-
-        ctk.CTkButton(smtp_card, text="🔌  Test Connection",
-                      fg_color="#1c6b4d", hover_color="#24895f",
-                      command=test_connection).grid(
-            row=9, column=0, columnspan=2, padx=18, pady=(10, 16), sticky="ew")
-
-        # Contacts card
-        contacts_card = ctk.CTkFrame(left_scroll, fg_color="#101a24", corner_radius=20,
-                                      border_width=1, border_color="#173041")
-        contacts_card.grid(row=1, column=0, sticky="ew", pady=(0, 10))
-        contacts_card.grid_columnconfigure(0, weight=1)
-
-        ctk.CTkLabel(contacts_card, text="👥  Contacts",
-                     font=ctk.CTkFont(size=18, weight="bold")).grid(
-            row=0, column=0, padx=18, pady=(16, 8), sticky="w")
-
-        self._em_contacts_list = []
-        self._em_count_var = ctk.StringVar(value="No contacts imported yet")
-        ctk.CTkLabel(contacts_card, textvariable=self._em_count_var,
-                     text_color="#8ea5af").grid(
-            row=1, column=0, padx=18, pady=(0, 6), sticky="w")
-
-        self._em_listbox = tk.Listbox(
-            contacts_card, height=8, bg="#0c131b", fg="#d8ebf6",
-            selectbackground="#173245", font=("Courier New", 9),
-            borderwidth=0, highlightthickness=0)
-        self._em_listbox.grid(row=3, column=0, padx=18, pady=(0, 16), sticky="ew")
-
-        def import_contacts():
-            path = filedialog.askopenfilename(
-                title="Import Contacts",
-                filetypes=[
-                    ("All supported", "*.csv *.xls *.xlsx *.xlsm *.html *.htm *.json *.vcf"),
-                    ("CSV files", "*.csv"),
-                    ("Excel files", "*.xls *.xlsx *.xlsm"),
-                    ("HTML files", "*.html *.htm"),
-                    ("JSON files", "*.json"),
-                    ("vCard files", "*.vcf"),
-                ])
-            if not path:
-                return
-            try:
-                from ..modules.data_importer import UniversalDataImporter
-                result = UniversalDataImporter().import_file(path)
-                self._em_contacts_list = result.contacts
-                self._em_count_var.set(
-                    f"✅  {result.total} contacts  •  {result.skipped} skipped")
-                self._em_listbox.delete(0, "end")
-                for c in result.contacts:
-                    self._em_listbox.insert(
-                        "end",
-                        f"{c.get('name','?'):<20}  {c.get('email','(no email)')}")
-                if result.errors:
-                    messagebox.showwarning("Import Warnings",
-                                           "\n".join(result.errors[:5]))
-            except Exception as ex:
-                messagebox.showerror("Import Error", str(ex))
-
-        ctk.CTkButton(contacts_card, text="📂  Import CSV / Excel / HTML",
-                      command=import_contacts).grid(
-            row=2, column=0, padx=18, pady=(0, 6), sticky="ew")
-
-        # ── RIGHT panel ───────────────────────────────────────────────────────────
-        right = ctk.CTkFrame(frame, fg_color="#0a1118", corner_radius=0)
-        right.grid(row=1, column=1, sticky="nsew")
-        right.grid_columnconfigure(0, weight=1)
-        right.grid_rowconfigure(1, weight=1)
-
-        # Template + Subject
-        compose_hdr = ctk.CTkFrame(right, fg_color="#101a24", corner_radius=20,
-                                    border_width=1, border_color="#173041")
-        compose_hdr.grid(row=0, column=0, sticky="ew", pady=(0, 8))
-        compose_hdr.grid_columnconfigure(1, weight=1)
-
-        self._em_tpl_var  = ctk.StringVar(value="(none)")
-        self._em_subj_var = ctk.StringVar(value="Hello {name}!")
-
-        def on_template(val):
-            subj, html = EMAIL_TEMPLATES.get(val, ("", ""))
-            if subj:
-                self._em_subj_var.set(subj)
-            if html:
-                self._em_body.delete("1.0", "end")
-                self._em_body.insert("1.0", html)
-
-        ctk.CTkLabel(compose_hdr, text="Template").grid(
-            row=0, column=0, padx=18, pady=10, sticky="w")
-        ctk.CTkOptionMenu(compose_hdr, values=list(EMAIL_TEMPLATES.keys()),
-                          variable=self._em_tpl_var, command=on_template,
-                          fg_color="#173245", button_color="#1d3545",
-                          button_hover_color="#203243", text_color="#d8ebf6",
-                          dropdown_fg_color="#101a24",
-                          dropdown_hover_color="#203243",
-                          dropdown_text_color="#dbe8f0").grid(
-            row=0, column=1, padx=(4, 18), pady=10, sticky="ew")
-
-        ctk.CTkLabel(compose_hdr, text="Subject").grid(
-            row=1, column=0, padx=18, pady=(0, 10), sticky="w")
-        ctk.CTkEntry(compose_hdr, textvariable=self._em_subj_var,
-                     fg_color="#0c131b", border_color="#173041").grid(
-            row=1, column=1, padx=(4, 18), pady=(0, 10), sticky="ew")
-
-        # Variable chips
-        chips = ctk.CTkFrame(compose_hdr, fg_color="transparent")
-        chips.grid(row=2, column=0, columnspan=2, padx=14, pady=(0, 12), sticky="w")
-        ctk.CTkLabel(chips, text="Variables:", text_color="#8ea5af").grid(
-            row=0, column=0, padx=(0, 8))
-        for i, v in enumerate(["{name}", "{email}", "{amount}", "{date}", "{invoice_no}"]):
-            ctk.CTkLabel(chips, text=v, fg_color="#1d3545", corner_radius=999,
-                         padx=10, pady=4, text_color="#d8ebf6").grid(
-                row=0, column=i + 1, padx=4)
-
-        # HTML Body editor
-        body_card = ctk.CTkFrame(right, fg_color="#101a24", corner_radius=20,
-                                  border_width=1, border_color="#173041")
-        body_card.grid(row=1, column=0, sticky="nsew", pady=(0, 8))
-        body_card.grid_columnconfigure(0, weight=1)
-        body_card.grid_rowconfigure(1, weight=1)
-
-        ctk.CTkLabel(body_card,
-                     text="📝  HTML Body  —  use {name} {email} {amount} {date} etc.",
-                     font=ctk.CTkFont(size=14, weight="bold")).grid(
-            row=0, column=0, padx=18, pady=(14, 6), sticky="w")
-
-        self._em_body = tk.Text(
-            body_card, wrap="word",
-            bg="#0c131b", fg="#d8ebf6",
-            insertbackground="#d8ebf6",
-            font=("Courier New", 10),
-            borderwidth=0, highlightthickness=0, relief="flat")
-        self._em_body.insert("1.0",
-            "<p>Dear <strong>{name}</strong>,</p>\n<p>Your message here.</p>")
-        self._em_body.grid(row=1, column=0, padx=18, pady=(0, 18), sticky="nsew")
-
-        # Progress + Controls
-        ctrl = ctk.CTkFrame(right, fg_color="#101a24", corner_radius=20,
-                             border_width=1, border_color="#173041")
-        ctrl.grid(row=2, column=0, sticky="ew")
-        ctrl.grid_columnconfigure(2, weight=1)
-
-        self._em_bar = ctk.CTkProgressBar(ctrl, progress_color="#39b37a")
-        self._em_bar.grid(row=0, column=0, columnspan=4,
-                           padx=18, pady=(14, 6), sticky="ew")
-        self._em_bar.set(0)
-
-        self._em_status = ctk.StringVar(value="Ready.")
-        ctk.CTkLabel(ctrl, textvariable=self._em_status,
-                     text_color="#8ea5af").grid(
-            row=1, column=0, columnspan=4, padx=18, pady=(0, 6), sticky="w")
-
-        self._em_log_widget = tk.Text(
-            ctrl, height=5, bg="#0c131b", fg="#9db1bd",
-            font=("Courier New", 9), state="disabled",
-            borderwidth=0, highlightthickness=0)
-        self._em_log_widget.grid(row=2, column=0, columnspan=4,
-                                  padx=18, pady=(0, 8), sticky="ew")
-
-        def _log(msg):
-            self._em_log_widget.configure(state="normal")
-            self._em_log_widget.insert("end", msg + "\n")
-            self._em_log_widget.see("end")
-            self._em_log_widget.configure(state="disabled")
-
-        self._em_stop_flag = threading.Event()
-
-        def start_campaign():
-            contacts = [c for c in self._em_contacts_list if c.get("email")]
-            if not contacts:
-                messagebox.showwarning("No Contacts",
-                    "Import contacts with email addresses first.")
-                return
-            if not self._em_user.get() or not self._em_pass.get():
-                messagebox.showwarning("Missing SMTP",
-                    "Enter your SMTP username and password.")
-                return
-            if not messagebox.askyesno("Confirm Send",
-                f"Send to {len(contacts)} contacts?\n\n"
-                "Make sure you have their consent (legal requirement)."):
-                return
-
-            self._em_stop_flag.clear()
-            self._em_bar.set(0)
-            btn_start.configure(state="disabled")
-            btn_stop.configure(state="normal")
-
-            def worker():
-                try:
-                    ctx = ssl.create_default_context()
-                    conn = smtplib.SMTP(
-                        self._em_host.get(), int(self._em_port.get()), timeout=10,
-                    )
-                    conn.starttls(context=ctx)
-                    conn.login(self._em_user.get(), self._em_pass.get())
-                except Exception as ex:
-                    self.after(0, lambda: (
-                        messagebox.showerror("SMTP Error", str(ex)),
-                        btn_start.configure(state="normal"),
-                        btn_stop.configure(state="disabled"),
-                    ))
-                    return
-
-                sent = 0
-                total = len(contacts)
-                for i, contact in enumerate(contacts):
-                    if self._em_stop_flag.is_set():
-                        break
-
-                    to_addr = contact.get("email", "").strip()
-                    if not to_addr:
-                        continue
-
-                    vars_map = dict(contact)
-                    # strip custom_ prefix for template use
-                    for k in list(vars_map.keys()):
-                        if k.startswith("custom_"):
-                            vars_map[k[7:]] = vars_map.pop(k)
-                    vars_map.setdefault("sender", self._em_from_name.get())
-
-                    def substitute(text):
-                        for k, v in vars_map.items():
-                            text = text.replace(f"{{{k}}}", str(v))
-                        return text
-
-                    try:
-                        msg = MIMEMultipart("alternative")
-                        msg["Subject"] = substitute(self._em_subj_var.get())
-                        msg["From"] = (
-                            f"{self._em_from_name.get()} "
-                            f"<{self._em_from_addr.get()}>")
-                        msg["To"] = to_addr
-                        html_body = substitute(
-                            self._em_body.get("1.0", "end"))
-                        msg.attach(MIMEText(html_body, "html", "utf-8"))
-                        conn.sendmail(self._em_from_addr.get(),
-                                      to_addr, msg.as_string())
-                        sent += 1
-                        progress = sent / total
-
-                        def _update(e=to_addr, s=sent, p=progress):
-                            _log(f"✅ Sent → {e}")
-                            self._em_status.set(
-                                f"Sent: {s} / {total}")
-                            self._em_bar.set(p)
-
-                        self.after(0, _update)
-
-                    except Exception as ex:
-                        def _fail(e=to_addr, er=str(ex)):
-                            _log(f"❌ Failed {e}: {er}")
-                        self.after(0, _fail)
-
-                    import time
-                    time.sleep(float(self._em_delay.get() or 5))
-
-                try:
-                    conn.quit()
-                except Exception:
-                    pass
-
-                def finish():
-                    btn_start.configure(state="normal")
-                    btn_stop.configure(state="disabled")
-                    self._em_bar.set(1)
-                    failed = total - sent
-                    self._em_status.set(
-                        f"Done! ✅ Sent: {sent}  ❌ Failed: {failed}")
-                    messagebox.showinfo(
-                        "Campaign Complete",
-                        f"Sent: {sent}\nFailed: {failed}")
-
-                self.after(0, finish)
-
-            threading.Thread(target=worker, daemon=True).start()
-
-        def stop_campaign():
-            self._em_stop_flag.set()
-            self._em_status.set("Stopping…")
-
-        btn_start = ctk.CTkButton(
-            ctrl, text="🚀  Start Email Campaign",
-            fg_color="#1c6b4d", hover_color="#24895f",
-            command=start_campaign)
-        btn_start.grid(row=3, column=0, padx=(18, 8), pady=(0, 14))
-
-        btn_stop = ctk.CTkButton(
-            ctrl, text="⏹  Stop",
-            fg_color="#7d3037", hover_color="#a23e46",
-            state="disabled", command=stop_campaign)
-        btn_stop.grid(row=3, column=1, padx=(0, 18), pady=(0, 14))
 
     def _on_close(self) -> None:
         try:

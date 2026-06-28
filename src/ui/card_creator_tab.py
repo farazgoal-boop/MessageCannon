@@ -19,6 +19,7 @@ from pathlib import Path
 from datetime import datetime, date
 
 from ..modules.data_importer import UniversalDataImporter
+from . import theme as T
 
 logger = logging.getLogger(__name__)
 
@@ -73,8 +74,11 @@ APP_PRESETS = {
 }
 
 ACCENT_COLORS = [
-    "#6c63ff","#0078d4","#00b894","#e17055",
-    "#f39c12","#e74c3c","#27ae60","#8e44ad","#2c3e50",
+    "#4f46e5",  # indigo
+    "#0891b2",  # cyan
+    "#0d9488",  # teal
+    "#7c3aed",  # violet
+    "#e11d48",  # rose
 ]
 
 CARD_STYLE_TEMPLATES = {
@@ -391,13 +395,14 @@ class CardCreatorV2(ctk.CTkFrame):
         left.grid_rowconfigure(1, weight=1)
 
         # ── Top: app selector + meta ──────────────────────────────────────────
-        top = ctk.CTkFrame(left, fg_color="#101a24", corner_radius=16,
-                            border_width=1, border_color="#173041")
+        top = ctk.CTkFrame(left, fg_color=T.BG_SURFACE, corner_radius=14,
+                            border_width=1, border_color=T.BG_BORDER)
         top.grid(row=0, column=0, sticky="ew", pady=(0, 8))
         top.grid_columnconfigure(0, weight=1)
 
         ctk.CTkLabel(top, text="🎯  Select App & Identity",
-                     font=ctk.CTkFont(size=14, weight="bold")).grid(
+                     font=ctk.CTkFont(size=14, weight="bold"),
+                     text_color=T.TEXT_HEAD).grid(
             row=0, column=0, padx=16, pady=(14, 8), sticky="w")
 
         # App buttons
@@ -407,7 +412,8 @@ class CardCreatorV2(ctk.CTkFrame):
         for i, (name, _) in enumerate(APP_PRESETS.items()):
             b = ctk.CTkButton(bf, text=name, width=1,
                               font=ctk.CTkFont(size=11),
-                              fg_color="#1d3545", hover_color="#244329",
+                              fg_color=T.BADGE_BG, hover_color=T.BG_BORDER,
+                              text_color=T.TEXT_HEAD,
                               command=lambda n=name: self._load_preset(n))
             b.grid(row=i//3, column=i%3, padx=3, pady=3, sticky="ew")
             bf.grid_columnconfigure(i%3, weight=1)
@@ -427,10 +433,12 @@ class CardCreatorV2(ctk.CTkFrame):
             ("Icon",     self._micon, "⭐"),
             ("Tagline",  self._mtag,  "Short tagline"),
         ]):
-            ctk.CTkLabel(mf, text=lbl, text_color="#8ea5af",
-                         font=ctk.CTkFont(size=10)).grid(row=0,column=i,sticky="w",padx=2)
+            ctk.CTkLabel(mf, text=lbl, text_color=T.TEXT_MUTED,
+                         font=ctk.CTkFont(size=11)).grid(row=0,column=i,sticky="w",padx=2)
             ctk.CTkEntry(mf, textvariable=var, placeholder_text=ph,
-                         fg_color="#0c131b", border_color="#173041",
+                         fg_color=T.BG_INNER, border_color=T.BG_BORDER,
+                         text_color=T.TEXT_HEAD,
+                         placeholder_text_color=T.TEXT_DIM,
                          font=ctk.CTkFont(size=11)).grid(
                 row=1,column=i,sticky="ew",padx=2)
             var.trace_add("write", lambda *_: self._schedule_preview())
@@ -438,26 +446,31 @@ class CardCreatorV2(ctk.CTkFrame):
         # Accent colors
         cf = ctk.CTkFrame(top, fg_color="transparent")
         cf.grid(row=3, column=0, padx=16, pady=(0,12), sticky="w")
-        ctk.CTkLabel(cf, text="Theme:", text_color="#8ea5af",
-                     font=ctk.CTkFont(size=10)).grid(row=0,column=0,padx=(0,6))
+        ctk.CTkLabel(cf, text="Theme:", text_color=T.TEXT_MUTED,
+                     font=ctk.CTkFont(size=11)).grid(row=0,column=0,padx=(0,6))
         for i,c in enumerate(ACCENT_COLORS):
             b = tk.Button(cf, bg=c, relief="flat", width=2, height=1,
                           cursor="hand2", command=lambda h=c: self._set_accent(h))
             b.grid(row=0, column=i+1, padx=2)
         ctk.CTkButton(cf, text="Custom", width=60,
-                      fg_color="#1d3545", hover_color="#203243",
-                      font=ctk.CTkFont(size=10),
+                      fg_color=T.BADGE_BG, hover_color=T.BG_BORDER,
+                      font=ctk.CTkFont(size=11),
                       command=self._custom_color).grid(row=0,column=len(ACCENT_COLORS)+1,padx=(6,0))
 
         tf = ctk.CTkFrame(top, fg_color="transparent")
         tf.grid(row=4, column=0, padx=16, pady=(0, 12), sticky="ew")
-        ctk.CTkLabel(tf, text="Card Template:", text_color="#8ea5af",
-                     font=ctk.CTkFont(size=10)).grid(row=0, column=0, padx=(0, 8))
+        ctk.CTkLabel(tf, text="Card Template:", text_color=T.TEXT_MUTED,
+                     font=ctk.CTkFont(size=11)).grid(row=0, column=0, padx=(0, 8))
         self._template_var = ctk.StringVar(value="Dark Premium")
         ctk.CTkOptionMenu(
             tf, values=list(CARD_STYLE_TEMPLATES.keys()),
             variable=self._template_var, command=self._apply_card_template,
-            fg_color="#173245", button_color="#1d3545",
+            fg_color=T.BADGE_BG, button_color=T.BADGE_BG,
+            button_hover_color=T.BG_BORDER,
+            text_color=T.TEXT_HEAD,
+            dropdown_fg_color=T.BG_SURFACE,
+            dropdown_hover_color=T.BG_BORDER,
+            dropdown_text_color=T.TEXT_HEAD,
             width=180, font=ctk.CTkFont(size=11),
         ).grid(row=0, column=1, sticky="w")
 
@@ -468,25 +481,27 @@ class CardCreatorV2(ctk.CTkFrame):
         mid.grid_rowconfigure(1, weight=1)
 
         # Add section toolbar
-        tb = ctk.CTkFrame(mid, fg_color="#101a24", corner_radius=12,
-                           border_width=1, border_color="#173041")
+        tb = ctk.CTkFrame(mid, fg_color=T.BG_SURFACE, corner_radius=12,
+                           border_width=1, border_color=T.BG_BORDER)
         tb.grid(row=0, column=0, sticky="ew", pady=(0,6))
         ctk.CTkLabel(tb, text="➕  Add Section:",
-                     font=ctk.CTkFont(size=12, weight="bold")).grid(
+                     font=ctk.CTkFont(size=12, weight="bold"),
+                     text_color=T.TEXT_HEAD).grid(
             row=0,column=0,padx=12,pady=8,sticky="w")
         sbf = ctk.CTkFrame(tb, fg_color="transparent")
         sbf.grid(row=0,column=1,padx=(0,12),pady=6,sticky="e")
         for i,(label,stype) in enumerate(SECTION_TYPES):
             ctk.CTkButton(sbf, text=label, width=1,
-                          font=ctk.CTkFont(size=10),
-                          fg_color="#1d3545", hover_color="#6c63ff",
+                          font=ctk.CTkFont(size=11),
+                          fg_color=T.BADGE_BG, hover_color=T.ACCENT_HOVER,
+                          text_color=T.TEXT_HEAD,
                           command=lambda t=stype: self._add_section(t)).grid(
                 row=i//4, column=i%4, padx=3, pady=3)
             sbf.grid_columnconfigure(i%4, weight=1)
 
         # Sections scroll area
         self._sections_scroll = ctk.CTkScrollableFrame(
-            mid, fg_color="#0a1118", corner_radius=12)
+            mid, fg_color=T.BG_MAIN, corner_radius=12)
         self._sections_scroll.grid(row=1,column=0,sticky="nsew")
         self._sections_scroll.grid_columnconfigure(0,weight=1)
         self._sec_row = 0
@@ -499,7 +514,7 @@ class CardCreatorV2(ctk.CTkFrame):
         ctk.CTkButton(bot,
                       text="✨  Generate Card",
                       font=ctk.CTkFont(size=14, weight="bold"),
-                      height=42, fg_color="#6c63ff", hover_color="#5a52d5",
+                      height=42, fg_color=T.ACCENT, hover_color=T.ACCENT_HOVER,
                       command=self._generate).grid(
             row=0, column=0, sticky="ew", pady=(0,6))
 
@@ -507,18 +522,21 @@ class CardCreatorV2(ctk.CTkFrame):
         r2.grid(row=1, column=0, sticky="ew")
         r2.grid_columnconfigure((0,1,2), weight=1)
         ctk.CTkButton(r2, text="🌐 Open Browser",
-                      fg_color="#1c6b4d", hover_color="#24895f",
+                      fg_color=T.SUCCESS, hover_color=T.SUCCESS,
+                      text_color=T.TEXT_HEAD,
                       command=self._open_browser).grid(row=0,column=0,padx=(0,4),sticky="ew")
         ctk.CTkButton(r2, text="💾 Save HTML",
-                      fg_color="#1d3545", hover_color="#203243",
+                      fg_color=T.BADGE_BG, hover_color=T.BG_BORDER,
+                      text_color=T.TEXT_HEAD,
                       command=self._save_html).grid(row=0,column=1,padx=4,sticky="ew")
         ctk.CTkButton(r2, text="📤 Bulk Send",
-                      fg_color="#7d3037", hover_color="#a23e46",
+                      fg_color=T.DANGER, hover_color=T.DANGER_HOVER,
+                      text_color=T.TEXT_HEAD,
                       command=self._show_bulk_send).grid(row=0,column=2,padx=(4,0),sticky="ew")
 
         self._status = ctk.StringVar(value="Add sections and click Generate.")
         ctk.CTkLabel(bot, textvariable=self._status,
-                     text_color="#8ea5af", font=ctk.CTkFont(size=11)).grid(
+                     text_color=T.TEXT_MUTED, font=ctk.CTkFont(size=11)).grid(
             row=2, column=0, pady=(6,0))
 
     # ─── RIGHT: preview + send stats ──────────────────────────────────────────
@@ -531,32 +549,35 @@ class CardCreatorV2(ctk.CTkFrame):
         right.grid_rowconfigure(1, weight=1)
 
         # HTML preview
-        prev = ctk.CTkFrame(right, fg_color="#101a24", corner_radius=16,
-                             border_width=1, border_color="#173041")
+        prev = ctk.CTkFrame(right, fg_color=T.BG_SURFACE, corner_radius=14,
+                             border_width=1, border_color=T.BG_BORDER)
         prev.grid(row=0, column=0, sticky="nsew", pady=(0,8))
         prev.grid_columnconfigure(0, weight=1)
         prev.grid_columnconfigure(1, weight=0)
 
         ctk.CTkLabel(prev, text="👁  Live Card Preview",
-                     font=ctk.CTkFont(size=12, weight="bold")).grid(
+                     font=ctk.CTkFont(size=12, weight="bold"),
+                     text_color=T.TEXT_HEAD).grid(
             row=0, column=0, padx=14, pady=(12, 6), sticky="w")
 
         toolbar = ctk.CTkFrame(prev, fg_color="transparent")
         toolbar.grid(row=0, column=1, padx=14, pady=(12, 6), sticky="e")
         ctk.CTkButton(
             toolbar, text="⛶ Full Screen", width=110, height=28,
-            fg_color="#1d3545", hover_color="#203243",
-            font=ctk.CTkFont(size=10),
+            fg_color=T.BADGE_BG, hover_color=T.BG_BORDER,
+            text_color=T.TEXT_HEAD,
+            font=ctk.CTkFont(size=11),
             command=self._open_browser,
         ).pack(side="left", padx=(0, 6))
         ctk.CTkButton(
             toolbar, text="↻ Refresh", width=80, height=28,
-            fg_color="#1d3545", hover_color="#203243",
-            font=ctk.CTkFont(size=10),
+            fg_color=T.BADGE_BG, hover_color=T.BG_BORDER,
+            text_color=T.TEXT_HEAD,
+            font=ctk.CTkFont(size=11),
             command=self._update_live_preview,
         ).pack(side="left")
 
-        preview_host = tk.Frame(prev, bg="#0c131b", highlightthickness=0)
+        preview_host = tk.Frame(prev, bg=T.BG_INNER, highlightthickness=0)
         preview_host.grid(row=1, column=0, columnspan=2, padx=12, pady=(0, 12), sticky="nsew")
 
         self._preview_host = preview_host
@@ -564,7 +585,7 @@ class CardCreatorV2(ctk.CTkFrame):
         self._preview_fallback = ctk.CTkLabel(
             preview_host,
             text="Card preview loads when you edit sections.\nClick Full Screen to open in browser.",
-            text_color="#8ea5af",
+            text_color=T.TEXT_MUTED,
             font=ctk.CTkFont(size=11),
         )
         self._preview_fallback.pack(fill="both", expand=True, padx=20, pady=40)
@@ -572,8 +593,8 @@ class CardCreatorV2(ctk.CTkFrame):
         prev.grid_rowconfigure(1, weight=1)
 
         # Stats / Read-Unread panel
-        stats = ctk.CTkFrame(right, fg_color="#101a24", corner_radius=16,
-                              border_width=1, border_color="#173041")
+        stats = ctk.CTkFrame(right, fg_color=T.BG_SURFACE, corner_radius=14,
+                              border_width=1, border_color=T.BG_BORDER)
         stats.grid(row=1, column=0, sticky="nsew")
         stats.grid_columnconfigure(0, weight=1)
         stats.grid_rowconfigure(1, weight=1)
@@ -582,11 +603,13 @@ class CardCreatorV2(ctk.CTkFrame):
         sh.grid(row=0, column=0, padx=14, pady=(12,6), sticky="ew")
         sh.grid_columnconfigure(0, weight=1)
         ctk.CTkLabel(sh, text="📊  Send Summary",
-                     font=ctk.CTkFont(size=12, weight="bold")).grid(
+                     font=ctk.CTkFont(size=12, weight="bold"),
+                     text_color=T.TEXT_HEAD).grid(
             row=0, column=0, sticky="w")
         ctk.CTkButton(sh, text="Refresh", width=70,
-                      fg_color="#1d3545", hover_color="#203243",
-                      font=ctk.CTkFont(size=10),
+                      fg_color=T.BADGE_BG, hover_color=T.BG_BORDER,
+                      text_color=T.TEXT_HEAD,
+                      font=ctk.CTkFont(size=11),
                       command=self._refresh_stats).grid(row=0, column=1)
 
         # Stats counters
@@ -595,29 +618,31 @@ class CardCreatorV2(ctk.CTkFrame):
         cnt.grid_columnconfigure((0,1,2,3), weight=1)
 
         self._stat_vars = {}
-        for i,(lbl,key,col) in enumerate([
-            ("Total",    "total",    "#173245"),
-            ("Sent",     "sent",     "#244329"),
-            ("Read",     "read",     "#4a3318"),
-            ("Unread",   "unread",   "#5f2d33"),
+        for i,(lbl,key) in enumerate([
+            ("Total",  "total"),
+            ("Sent",   "sent"),
+            ("Read",   "read"),
+            ("Unread", "unread"),
         ]):
-            f = ctk.CTkFrame(cnt, fg_color=col, corner_radius=10)
+            f = ctk.CTkFrame(cnt, fg_color=T.BADGE_BG, corner_radius=10)
             f.grid(row=0, column=i, padx=4, pady=4, sticky="ew")
             v = ctk.StringVar(value="0")
             self._stat_vars[key] = v
-            ctk.CTkLabel(f, text=lbl, text_color="#d8ebf6",
+            ctk.CTkLabel(f, text=lbl, text_color=T.TEXT_HEAD,
                          font=ctk.CTkFont(size=9)).pack(anchor="w",padx=8,pady=(8,2))
             ctk.CTkLabel(f, textvariable=v,
-                         font=ctk.CTkFont(size=18,weight="bold")).pack(anchor="w",padx=8,pady=(0,8))
+                         font=ctk.CTkFont(size=18,weight="bold"),
+                         text_color=T.ACCENT).pack(anchor="w",padx=8,pady=(0,8))
 
         # Daily summary list
         ctk.CTkLabel(stats, text="📅  Today's Activity (Read / Unread)",
-                     text_color="#8ea5af",
-                     font=ctk.CTkFont(size=10)).grid(
+                     text_color=T.TEXT_MUTED,
+                     font=ctk.CTkFont(size=11)).grid(
             row=2, column=0, padx=14, pady=(0,4), sticky="w")
 
         self._log_box = ctk.CTkTextbox(
-            stats, height=120, fg_color="#0c131b",
+            stats, height=120, fg_color=T.BG_INNER,
+            text_color=T.TEXT_HEAD,
             font=ctk.CTkFont(family="Courier New", size=9),
             state="disabled")
         self._log_box.grid(row=3, column=0, padx=12, pady=(0,12), sticky="ew")
@@ -632,8 +657,8 @@ class CardCreatorV2(ctk.CTkFrame):
         data: dict = {}
         visible_var = ctk.BooleanVar(value=True)
 
-        card = ctk.CTkFrame(self._sections_scroll, fg_color="#101a24",
-                             corner_radius=12, border_width=1, border_color="#173041")
+        card = ctk.CTkFrame(self._sections_scroll, fg_color=T.BG_SURFACE,
+                             corner_radius=12, border_width=1, border_color=T.BG_BORDER)
         card.grid(row=self._sec_row, column=0, sticky="ew", pady=(0, 6), padx=2)
         card.grid_columnconfigure(0, weight=1)
         self._sec_row += 1
@@ -645,12 +670,13 @@ class CardCreatorV2(ctk.CTkFrame):
         hdr.grid(row=0, column=0, sticky="ew", padx=12, pady=(10, 4))
         hdr.grid_columnconfigure(1, weight=1)
 
-        ctk.CTkLabel(hdr, text="↕", text_color="#6faed2",
+        ctk.CTkLabel(hdr, text="↕", text_color=T.ACCENT,
                      font=ctk.CTkFont(size=14)).grid(row=0, column=0, padx=(0, 8))
         title_lbl = ctk.CTkLabel(
             hdr,
             text=f"Section {section_num}: {label}",
             font=ctk.CTkFont(size=12, weight="bold"),
+            text_color=T.TEXT_HEAD,
         )
         title_lbl.grid(row=0, column=1, sticky="w")
 
@@ -667,25 +693,29 @@ class CardCreatorV2(ctk.CTkFrame):
         ctk.CTkCheckBox(
             ctrl, text="Show", variable=visible_var, width=70,
             command=toggle_visible,
-            font=ctk.CTkFont(size=10),
+            text_color=T.TEXT_MUTED,
+            font=ctk.CTkFont(size=11),
         ).pack(side="left", padx=(0, 4))
 
         ctk.CTkButton(
             ctrl, text="↑", width=28, height=24,
-            fg_color="#1d3545", hover_color="#6c63ff",
+            fg_color=T.BADGE_BG, hover_color=T.ACCENT_HOVER,
+            text_color=T.TEXT_HEAD,
             font=ctk.CTkFont(size=11),
             command=lambda c=card: self._move_section(c, -1),
         ).pack(side="left", padx=2)
         ctk.CTkButton(
             ctrl, text="↓", width=28, height=24,
-            fg_color="#1d3545", hover_color="#6c63ff",
+            fg_color=T.BADGE_BG, hover_color=T.ACCENT_HOVER,
+            text_color=T.TEXT_HEAD,
             font=ctk.CTkFont(size=11),
             command=lambda c=card: self._move_section(c, 1),
         ).pack(side="left", padx=2)
         ctk.CTkButton(
             ctrl, text="✕", width=28, height=24,
-            fg_color="#5f2d33", hover_color="#7d3037",
-            font=ctk.CTkFont(size=10),
+            fg_color=T.DANGER, hover_color=T.DANGER_HOVER,
+            text_color=T.TEXT_HEAD,
+            font=ctk.CTkFont(size=11),
             command=lambda c=card: self._remove_section(c),
         ).pack(side="left", padx=(4, 0))
 
@@ -694,16 +724,19 @@ class CardCreatorV2(ctk.CTkFrame):
         body.grid_columnconfigure(0, weight=1)
 
         def lbl(text): 
-            ctk.CTkLabel(body, text=text, text_color="#8ea5af",
-                         font=ctk.CTkFont(size=10)).pack(anchor="w")
+            ctk.CTkLabel(body, text=text, text_color=T.TEXT_MUTED,
+                         font=ctk.CTkFont(size=11)).pack(anchor="w")
         def entry(var, ph=""):
             e = ctk.CTkEntry(body, textvariable=var, placeholder_text=ph,
-                             fg_color="#0c131b", border_color="#173041")
+                             fg_color=T.BG_INNER, border_color=T.BG_BORDER,
+                             text_color=T.TEXT_HEAD,
+                             placeholder_text_color=T.TEXT_DIM)
             e.pack(fill="x", pady=(2,6))
             return e
         def textarea(height=60):
-            t = ctk.CTkTextbox(body, height=height, fg_color="#0c131b",
-                               border_color="#173041", border_width=1)
+            t = ctk.CTkTextbox(body, height=height, fg_color=T.BG_INNER,
+                               text_color=T.TEXT_HEAD,
+                               border_color=T.BG_BORDER, border_width=1)
             t.pack(fill="x", pady=(2,6))
             return t
 
@@ -721,10 +754,11 @@ class CardCreatorV2(ctk.CTkFrame):
 
         elif stype == "youtube":
             v = ctk.StringVar()
+            v.trace_add("write", lambda *_: self._schedule_preview())
             lbl("YouTube video link")
             entry(v, "https://youtube.com/watch?v=...")
             ctk.CTkLabel(body, text="▶ Video will play inside the card",
-                         text_color="#6faed2", font=ctk.CTkFont(size=10)).pack(anchor="w")
+                         text_color=T.ACCENT, font=ctk.CTkFont(size=11)).pack(anchor="w")
             data["_url_var"] = v
 
         elif stype == "text":
@@ -735,11 +769,12 @@ class CardCreatorV2(ctk.CTkFrame):
             t = textarea(70)
             rr = ctk.CTkFrame(body, fg_color="transparent")
             rr.pack(fill="x")
-            ctk.CTkLabel(rr,text="Size:",text_color="#8ea5af",
-                         font=ctk.CTkFont(size=10)).grid(row=0,column=0,padx=(0,4))
+            ctk.CTkLabel(rr,text="Size:",text_color=T.TEXT_MUTED,
+                         font=ctk.CTkFont(size=11)).grid(row=0,column=0,padx=(0,4))
             for i2,s2 in enumerate(["small","medium","large","heading"]):
                 ctk.CTkButton(rr,text=s2,width=1,
-                              fg_color="#1d3545",hover_color="#6c63ff",
+                              fg_color=T.BADGE_BG,hover_color=T.ACCENT_HOVER,
+                              text_color=T.TEXT_HEAD,
                               font=ctk.CTkFont(size=9),
                               command=lambda s=s2,sv=sv: sv.set(s)).grid(
                     row=0,column=i2+1,padx=2)
@@ -761,14 +796,16 @@ class CardCreatorV2(ctk.CTkFrame):
             rr  = ctk.CTkFrame(body,fg_color="transparent")
             rr.pack(fill="x")
             rr.grid_columnconfigure((0,1),weight=1)
-            ctk.CTkLabel(rr,text="Price",text_color="#8ea5af",
-                         font=ctk.CTkFont(size=10)).grid(row=0,column=0,sticky="w",padx=2)
-            ctk.CTkLabel(rr,text="Old price",text_color="#8ea5af",
-                         font=ctk.CTkFont(size=10)).grid(row=0,column=1,sticky="w",padx=2)
-            ctk.CTkEntry(rr,textvariable=pv,fg_color="#0c131b",
-                         border_color="#173041").grid(row=1,column=0,sticky="ew",padx=2,pady=(2,4))
-            ctk.CTkEntry(rr,textvariable=opv,fg_color="#0c131b",
-                         border_color="#173041").grid(row=1,column=1,sticky="ew",padx=2,pady=(2,4))
+            ctk.CTkLabel(rr,text="Price",text_color=T.TEXT_MUTED,
+                         font=ctk.CTkFont(size=11)).grid(row=0,column=0,sticky="w",padx=2)
+            ctk.CTkLabel(rr,text="Old price",text_color=T.TEXT_MUTED,
+                         font=ctk.CTkFont(size=11)).grid(row=0,column=1,sticky="w",padx=2)
+            ctk.CTkEntry(rr,textvariable=pv,fg_color=T.BG_INNER,
+                         border_color=T.BG_BORDER,text_color=T.TEXT_HEAD,
+                         placeholder_text_color=T.TEXT_DIM).grid(row=1,column=0,sticky="ew",padx=2,pady=(2,4))
+            ctk.CTkEntry(rr,textvariable=opv,fg_color=T.BG_INNER,
+                         border_color=T.BG_BORDER,text_color=T.TEXT_HEAD,
+                         placeholder_text_color=T.TEXT_DIM).grid(row=1,column=1,sticky="ew",padx=2,pady=(2,4))
             lbl("Price note")
             entry(nv,"e.g. One-time · Lifetime")
             data["_price"]=pv; data["_old"]=opv; data["_note"]=nv
@@ -783,11 +820,13 @@ class CardCreatorV2(ctk.CTkFrame):
             ]
             link_vars = []
             for kind, lbl_txt, ph in link_kinds:
-                ctk.CTkLabel(body, text=lbl_txt, text_color="#8ea5af",
-                             font=ctk.CTkFont(size=10)).pack(anchor="w")
+                ctk.CTkLabel(body, text=lbl_txt, text_color=T.TEXT_MUTED,
+                             font=ctk.CTkFont(size=11)).pack(anchor="w")
                 v2 = ctk.StringVar()
                 ctk.CTkEntry(body, textvariable=v2, placeholder_text=ph,
-                             fg_color="#0c131b", border_color="#173041").pack(
+                             fg_color=T.BG_INNER, border_color=T.BG_BORDER,
+                             text_color=T.TEXT_HEAD,
+                             placeholder_text_color=T.TEXT_DIM).pack(
                     fill="x", pady=(2, 4))
                 v2.trace_add("write", lambda *_: self._schedule_preview())
                 if kind == "buy":
@@ -798,8 +837,8 @@ class CardCreatorV2(ctk.CTkFrame):
         elif stype == "contact":
             ctk.CTkLabel(body,
                          text="Contact footer uses your info from App Identity above.",
-                         text_color="#6faed2",
-                         font=ctk.CTkFont(size=10)).pack(anchor="w",pady=4)
+                         text_color=T.ACCENT,
+                         font=ctk.CTkFont(size=11)).pack(anchor="w",pady=4)
 
         self._sections.append(sec_entry)
         self._renumber_sections()
@@ -998,24 +1037,26 @@ class CardCreatorV2(ctk.CTkFrame):
         dlg.title("Bulk Send Card")
         dlg.geometry("500x460")
         dlg.grab_set()
-        dlg.configure(fg_color="#091018")
+        dlg.configure(fg_color=T.BG_MAIN)
         dlg.grid_columnconfigure(0, weight=1)
 
         ctk.CTkLabel(dlg, text="📤  Bulk Send Card",
-                     font=ctk.CTkFont(size=18,weight="bold")).grid(
+                     font=ctk.CTkFont(size=18,weight="bold"),
+                     text_color=T.TEXT_HEAD).grid(
             row=0,column=0,padx=20,pady=(20,4),sticky="w")
 
         # Import contacts
-        cf = ctk.CTkFrame(dlg,fg_color="#101a24",corner_radius=14,
-                           border_width=1,border_color="#173041")
+        cf = ctk.CTkFrame(dlg,fg_color=T.BG_SURFACE,corner_radius=14,
+                           border_width=1,border_color=T.BG_BORDER)
         cf.grid(row=1,column=0,padx=20,pady=(0,10),sticky="ew")
         cf.grid_columnconfigure(0,weight=1)
         ctk.CTkLabel(cf,text="👥 Import Contacts (CSV/Excel/HTML)",
-                     font=ctk.CTkFont(size=13,weight="bold")).grid(
+                     font=ctk.CTkFont(size=13,weight="bold"),
+                     text_color=T.TEXT_HEAD).grid(
             row=0,column=0,padx=14,pady=(12,6),sticky="w")
 
         count_var = ctk.StringVar(value="No contacts loaded")
-        ctk.CTkLabel(cf,textvariable=count_var,text_color="#8ea5af",
+        ctk.CTkLabel(cf,textvariable=count_var,text_color=T.TEXT_MUTED,
                      font=ctk.CTkFont(size=11)).grid(
             row=1,column=0,padx=14,pady=(0,6),sticky="w")
 
@@ -1034,37 +1075,42 @@ class CardCreatorV2(ctk.CTkFrame):
                 messagebox.showerror("Error", str(ex), parent=dlg)
 
         ctk.CTkButton(cf,text="📂 Import Contacts",
+                      fg_color=T.ACCENT, hover_color=T.ACCENT_HOVER,
+                      text_color=T.TEXT_HEAD,
                       command=import_contacts).grid(
             row=2,column=0,padx=14,pady=(0,12),sticky="ew")
 
         # Channel selection
-        ch = ctk.CTkFrame(dlg,fg_color="#101a24",corner_radius=14,
-                           border_width=1,border_color="#173041")
+        ch = ctk.CTkFrame(dlg,fg_color=T.BG_SURFACE,corner_radius=14,
+                           border_width=1,border_color=T.BG_BORDER)
         ch.grid(row=2,column=0,padx=20,pady=(0,10),sticky="ew")
         ch.grid_columnconfigure((0,1),weight=1)
         ctk.CTkLabel(ch,text="📡 Send Channel",
-                     font=ctk.CTkFont(size=13,weight="bold")).grid(
+                     font=ctk.CTkFont(size=13,weight="bold"),
+                     text_color=T.TEXT_HEAD).grid(
             row=0,column=0,columnspan=2,padx=14,pady=(12,8),sticky="w")
 
         channel_var = ctk.StringVar(value="whatsapp")
         ctk.CTkRadioButton(ch,text="📱 WhatsApp",
-                           variable=channel_var,value="whatsapp").grid(
+                           variable=channel_var,value="whatsapp",
+                           text_color=T.TEXT_MUTED).grid(
             row=1,column=0,padx=14,pady=(0,12),sticky="w")
         ctk.CTkRadioButton(ch,text="📧 Email (HTML card)",
-                           variable=channel_var,value="email").grid(
+                           variable=channel_var,value="email",
+                           text_color=T.TEXT_MUTED).grid(
             row=1,column=1,padx=14,pady=(0,12),sticky="w")
 
         # Progress
-        pf = ctk.CTkFrame(dlg,fg_color="#101a24",corner_radius=14,
-                           border_width=1,border_color="#173041")
+        pf = ctk.CTkFrame(dlg,fg_color=T.BG_SURFACE,corner_radius=14,
+                           border_width=1,border_color=T.BG_BORDER)
         pf.grid(row=3,column=0,padx=20,pady=(0,10),sticky="ew")
         pf.grid_columnconfigure(0,weight=1)
 
-        prog = ctk.CTkProgressBar(pf,progress_color="#39b37a")
+        prog = ctk.CTkProgressBar(pf,progress_color=T.SUCCESS)
         prog.grid(row=0,column=0,padx=14,pady=(12,4),sticky="ew")
         prog.set(0)
         prog_lbl = ctk.CTkLabel(pf,text="Ready.",
-                                 text_color="#8ea5af",font=ctk.CTkFont(size=11))
+                                 text_color=T.TEXT_MUTED,font=ctk.CTkFont(size=11))
         prog_lbl.grid(row=1,column=0,padx=14,pady=(0,12),sticky="w")
 
         stop_flag = threading.Event()
@@ -1145,11 +1191,13 @@ class CardCreatorV2(ctk.CTkFrame):
         btn_row.grid(row=4,column=0,padx=20,pady=(0,20),sticky="ew")
         btn_row.grid_columnconfigure(0,weight=1)
         btn_send = ctk.CTkButton(btn_row,text="🚀 Start Sending",
-                                  fg_color="#1c6b4d",hover_color="#24895f",
+                                  fg_color=T.SUCCESS,hover_color=T.SUCCESS,
+                                  text_color=T.TEXT_HEAD,
                                   command=do_send)
         btn_send.grid(row=0,column=0,sticky="ew",padx=(0,6))
         btn_stop = ctk.CTkButton(btn_row,text="⏹ Stop",
-                                  fg_color="#7d3037",hover_color="#a23e46",
+                                  fg_color=T.DANGER,hover_color=T.DANGER_HOVER,
+                                  text_color=T.TEXT_HEAD,
                                   state="disabled",command=do_stop)
         btn_stop.grid(row=0,column=1,sticky="ew")
 
@@ -1198,8 +1246,8 @@ class CardCreatorV2(ctk.CTkFrame):
             self._accent = preset["accent"]
         for n2, btn in self._app_btns.items():
             btn.configure(
-                fg_color="#6c63ff" if n2==name else "#1d3545",
-                hover_color="#5a52d5" if n2==name else "#244329")
+                fg_color=T.ACCENT if n2==name else T.BADGE_BG,
+                hover_color=T.ACCENT_HOVER if n2==name else T.BG_BORDER)
         # Clear and add default sections for preset
         for sec in list(self._sections):
             if sec["frame"].winfo_exists():
@@ -1237,9 +1285,7 @@ class CardCreatorV2(ctk.CTkFrame):
 
 def build_card_creator_view(main_window) -> None:
     """
-    Call inside MainWindow._create_ui() after self._build_email_view().
-    Also add to nav_items: ("Cards", "CC   Card Creator")
-    And to _apply_view_chrome: "Cards": ("Build marketing cards...", "Card Creator Studio")
+    Call inside MainWindow._create_ui() to register the Card Creator view.
     """
     frame = main_window._new_view_container("Cards", scrollable=False)
     frame.grid_rowconfigure(0, weight=1)
