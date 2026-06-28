@@ -9,10 +9,9 @@
 #define MyAppPublisher "Muhammad Faraz"
 #define MyAppURL       "https://muhammad-faraz-dev.netlify.app"
 #define MyAppExeName   "MessageCannon Pro.exe"
-#define MyAppId        "{A1B2C3D4-E5F6-7890-ABCD-EF1234567890}"
 
 [Setup]
-AppId={#MyAppId}
+AppId={{A1B2C3D4-E5F6-7890-ABCD-EF1234567890}
 AppName={#MyAppName}
 AppVersion={#MyAppVersion}
 AppVerName={#MyAppName} {#MyAppVersion}
