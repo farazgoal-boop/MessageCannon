@@ -3373,6 +3373,17 @@ class MainWindow(ctk.CTk):
         # Prevent double-close while shutdown is in progress
         self.protocol("WM_DELETE_WINDOW", lambda: None)
 
+        # Instant visual feedback: hide the window right away. Root cause of the
+        # perceived close delay is whatsapp_sender.shutdown() blocking on
+        # driver_lock if a Chrome session-bootstrap attempt is still in flight —
+        # that lock wait is unavoidable (we must not orphan a Chrome process),
+        # but the user doesn't need to see the window sitting there while it
+        # resolves. Actual process teardown still happens below, safely.
+        try:
+            self.withdraw()
+        except Exception:
+            pass
+
         # Signal active send threads to stop
         self._em_stop_flag.set()
         try:
