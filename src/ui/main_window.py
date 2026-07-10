@@ -1075,9 +1075,14 @@ class MainWindow(ctk.CTk):
         except Exception:
             campaigns = []
         if not campaigns:
-            ctk.CTkLabel(scroll, text="No campaigns yet. Start one with '+ New campaign' above.",
-                         text_color=T.TEXT_MUTED, font=ctk.CTkFont(size=13),
-                         ).grid(row=0, column=0, pady=32)
+            empty = ctk.CTkFrame(scroll, fg_color=T.BG_INNER, corner_radius=12,
+                                 border_width=1, border_color=T.BG_BORDER)
+            empty.grid(row=0, column=0, sticky="ew", padx=6, pady=6)
+            ctk.CTkLabel(empty, text="No campaigns yet",
+                         font=ctk.CTkFont(size=14, weight="bold"),
+                         text_color=T.TEXT_HEAD).pack(padx=16, pady=(16, 4), anchor="w")
+            ctk.CTkLabel(empty, text="Start one with '+ New campaign' above.",
+                         text_color=T.TEXT_MUTED).pack(padx=16, pady=(0, 16), anchor="w")
             return
         STATUS_COLORS = {"sent": T.SUCCESS, "failed": T.DANGER, "draft": T.TEXT_MUTED}
         for i, camp in enumerate(campaigns):
@@ -1937,12 +1942,17 @@ class MainWindow(ctk.CTk):
                      if not q or q in (c.get("name") or "").lower()]
 
         if not campaigns:
-            empty_text = ("No campaigns match that search."
-                          if q else
-                          "No campaigns yet. Start an email campaign to see history here.")
-            ctk.CTkLabel(self._history_scroll, text=empty_text,
-                         text_color=T.TEXT_MUTED, font=ctk.CTkFont(size=13),
-                         ).grid(row=0, column=0, pady=40)
+            title = "No campaigns match that search" if q else "No campaign history yet"
+            subtitle = ("Try a different search term."
+                        if q else
+                        "Start an email campaign from Compose to see it here.")
+            empty = ctk.CTkFrame(self._history_scroll, fg_color=T.BG_INNER, corner_radius=12,
+                                 border_width=1, border_color=T.BG_BORDER)
+            empty.grid(row=0, column=0, sticky="ew", padx=6, pady=6)
+            ctk.CTkLabel(empty, text=title, font=ctk.CTkFont(size=14, weight="bold"),
+                         text_color=T.TEXT_HEAD).pack(padx=16, pady=(16, 4), anchor="w")
+            ctk.CTkLabel(empty, text=subtitle,
+                         text_color=T.TEXT_MUTED).pack(padx=16, pady=(0, 16), anchor="w")
             return
 
         STATUS_COLORS = {"sent": T.SUCCESS, "failed": T.DANGER_ON_BADGE, "draft": T.TEXT_MUTED}

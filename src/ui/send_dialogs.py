@@ -36,6 +36,8 @@ class SendConfirmationDialog(ctk.CTkToplevel):
         self.grab_set()
         self.configure(fg_color=T.BG_MAIN)
         self.protocol("WM_DELETE_WINDOW", self.destroy)
+        self.bind("<Escape>", lambda _e: self.destroy())
+        self.bind("<Return>", lambda _e: self._confirm())
 
         self.grid_columnconfigure(0, weight=1)
         self.grid_rowconfigure(3, weight=1)
@@ -102,6 +104,7 @@ class SendReportDialog(ctk.CTkToplevel):
         self.grab_set()
         self.configure(fg_color=T.BG_MAIN)
         self.protocol("WM_DELETE_WINDOW", self.destroy)
+        self.bind("<Escape>", lambda _e: self.destroy())
 
         self.grid_columnconfigure(0, weight=1)
         total = sent + failed

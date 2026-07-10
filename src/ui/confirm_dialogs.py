@@ -41,6 +41,8 @@ class DangerConfirmDialog(ctk.CTkToplevel):
                               border_color=T.BG_BORDER, text_color=T.TEXT_HEAD, height=36)
         entry.grid(row=3, column=0, padx=24, pady=(0, 20), sticky="ew")
         entry.focus_set()
+        self.bind("<Escape>", lambda _e: self.destroy())
+        entry.bind("<Return>", lambda _e: self._confirm() if self._entry_var.get().strip() == self.confirm_word else None)
 
         footer = ctk.CTkFrame(self, fg_color="transparent")
         footer.grid(row=4, column=0, padx=24, pady=(0, 20), sticky="ew")
