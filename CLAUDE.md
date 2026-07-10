@@ -314,4 +314,80 @@ flagged as user-only): an actual successful SMTP send, a real WhatsApp Web sessi
 behavior against real provider throttling — the mocked drivers prove the send/pause/retry/report
 *wiring* is correct, not real-world deliverability.
 
-Phase 5 (app-wide polish) and the signature transition animation not yet started.
+### Phase 5 — App-wide Polish (partial, branch `phase-5-polish`)
+
+Built and verified this pass:
+
+- **Close-button delay fixed**: `_on_close()` already ran `whatsapp_sender.shutdown()` off the
+  UI thread (from an earlier fix, `c2978a0`), but the window itself stayed visible until that
+  background thread finished — which blocks on `driver_lock` if a Chrome session-bootstrap
+  attempt is still in flight (~2s measured via a real `_on_close()` timing driver). Fixed by
+  calling `self.withdraw()` as the very first action in `_on_close()`: window disappears in
+  ~15ms (measured), while the existing background thread + 4s hard deadline still safely finish
+  real teardown afterward, unseen.
+- **Toast notifications** (`src/ui/toast.py`): non-blocking, auto-dismissing, no third-party
+  dependency. Replaces `messagebox.showinfo` for one-way success confirmations that don't need a
+  click-to-dismiss decision — template saved, contacts/campaigns/report exported, license
+  activated, AI Cards send done. Destructive/decision dialogs are untouched (still real modals).
+- **Danger Zone** (`src/ui/confirm_dialogs.py`, new Settings card): typed-confirmation gate
+  (must type an exact word like "DELETE" before the action button enables) for Reset Session,
+  Delete All Contacts, and Clear Campaign History. The latter two are new bulk DB operations
+  (`db_manager.delete_all_contacts()`, `clear_campaign_history()`). The pre-existing WhatsApp-panel
+  Reset Session button keeps its lighter plain-`askyesno` confirm since that's routine re-auth,
+  not data loss — the Settings copy of Reset Session was removed from "System Experience" and
+  re-homed in Danger Zone with the stronger typed confirm instead of having two buttons with two
+  different confirmation strengths for the same action.
+- **Tooltips** (`src/ui/tooltip.py`, no third-party `CTkToolTip` dependency): hover tooltips on
+  every genuinely technical Settings field — SMTP host/port/username/password/sender/delay, the
+  AI Cards API key, and the delay/daily-limit/jitter/consent-required controls in Campaign Safety.
+  Binds to `CTkLabel`'s internal `_canvas`/`_label` widgets (found by reading `CTkLabel.bind()`'s
+  source — it delegates there, not the outer wrapper) so both real mouse hover and the
+  verification driver's synthesized `<Enter>` event trigger it identically.
+- **Empty states**: Campaigns-home and History list now use the same bordered-card style
+  (title + muted subtext) already used in the Contacts directory, instead of a single unstyled
+  label — for visual consistency across the three list views.
+- **Keyboard**: Escape-to-cancel on the three new dialog types from this phase and Phase 4
+  (`DangerConfirmDialog`, `SendConfirmationDialog`, `SendReportDialog`); Enter-to-confirm on
+  `SendConfirmationDialog` always, and on `DangerConfirmDialog` only when the typed word already
+  matches (verified: Enter with wrong text does nothing and leaves real data untouched, Escape
+  closes cleanly) — this is a scoped, verified subset, not a full keyboard-accessibility pass
+  (see Not done below).
+
+**Real bugs found and fixed while verifying with drivers (not just noted):**
+1. The close-button delay described above.
+2. A pre-existing clipped, low-contrast daily-limit warning label (`text_color=T.DANGER` — against
+   the Design System's own rule that `T.DANGER` is fg_color-only, not text_color — plus no
+   `wraplength` and a too-narrow grid column) — found while screenshotting Settings for this pass,
+   unrelated to any single Phase 5 feature. Fixed to `T.DANGER_ON_BADGE` (matching the convention
+   already used elsewhere for warning text), full-width `columnspan=3`, and `wraplength=360`.
+
+**Found but explicitly NOT fixed this pass** (documented per standing instructions, not silently
+dropped): the Campaigns-home "Recent campaigns" card collapses to near-zero visible height despite
+`frame.grid_rowconfigure(2, weight=1)` being set correctly — a pre-existing `CTkScrollableFrame`
+nested-sizing quirk that predates this session (the old single-label empty state had the exact
+same underlying container problem, just less visually obvious than a bordered card). Left as a
+follow-up rather than risk an unreviewed grid-layout fix in a view not otherwise being touched
+this pass.
+
+**Verified real-data-safety note**: driving "Delete All Contacts"/"Clear Campaign History" through
+the actual GUI was correctly **blocked by the auto-mode safety classifier** (it detected an
+unpredicated `DELETE` against the live production DB with no per-action authorization) on first
+attempt. The SQL logic itself (`delete_all_contacts()`, `clear_campaign_history()`) was instead
+verified against an isolated throwaway SQLite database (insert fake rows, delete, confirm counts
+go to 0, delete the temp file) — the GUI-level dialog was verified separately for its safety
+mechanics only (button starts disabled, stays disabled on wrong text, enables on exact match,
+Escape cancels) without ever completing the actual delete against the real 9-contact production
+database. Confirmed via direct DB query that the real contacts were untouched throughout.
+
+**Not done this pass** (explicit roadmap, not silently skipped):
+- A **full** visual consistency audit across all three themes (only the items found incidentally
+  while building the above were fixed — this was not an exhaustive screen-by-screen pass).
+- A **full** keyboard accessibility pass (tab order, all dialogs, all buttons) — only the three
+  new dialog types got Escape/Enter; older dialogs (setup wizard, AI compose, save-template,
+  contact import review) were not touched.
+- Per-row delete for individual contacts/templates/campaigns (backend `delete_contact()` exists
+  and is DB-verified working, but has no UI entry point yet — only the new bulk "Delete All"
+  action in Danger Zone is wired up).
+- The Recent Campaigns card sizing issue noted above.
+
+Signature transition animation not yet started.
