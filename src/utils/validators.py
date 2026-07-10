@@ -71,7 +71,25 @@ class PhoneValidator:
         elif PhoneValidator.is_valid_international_format(phone):
             return phone, ""
         else:
-            return None, f"Invalid phone number format: {phone}"
+            return None, PhoneValidator._describe_phone_error(phone)
+
+    @staticmethod
+    def _describe_phone_error(phone: str) -> str:
+        """Best-effort specific reason a normalized phone still failed
+        validation — used by import review UIs so users see *why*, not just
+        a generic rejection."""
+        digits_only = re.sub(r"\D", "", phone)
+        if not digits_only:
+            return "Contains no digits"
+        if not phone.startswith("+"):
+            return "Missing country code (e.g. +1, +92)"
+        if len(digits_only) < 7:
+            return "Number too short"
+        if len(digits_only) > 15:
+            return "Number too long"
+        if not re.match(r"^\+\d+$", phone):
+            return "Contains invalid characters"
+        return f"Invalid phone number format: {phone}"
     
     @staticmethod
     def detect_duplicates(phones: list) -> list:

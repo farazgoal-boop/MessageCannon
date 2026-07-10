@@ -285,9 +285,54 @@ class DatabaseManager:
                 conn.commit()
         except Exception as e:
             Logger.error(f"Error adding contacts batch: {e}")
-        
+
         return count
-    
+
+    def get_existing_phones(self) -> set:
+        """Cheap set of every phone already saved — used by import-review
+        duplicate detection so it doesn't have to load full Contact objects."""
+        try:
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("SELECT phone FROM contacts WHERE phone IS NOT NULL AND phone != ''")
+                return {row[0] for row in cursor.fetchall()}
+        except Exception as e:
+            Logger.error(f"Error reading existing phones: {e}")
+            return set()
+
+    def update_contact_by_phone(self, phone: str, name: str = "", email: str = "",
+                                 custom_fields: Optional[dict] = None) -> bool:
+        """Merge new data into an existing contact matched by phone (the
+        UNIQUE key) — only overwrites a field if the new value is non-empty,
+        so merging never blanks out data the existing contact already had."""
+        try:
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("SELECT name, email, custom_fields FROM contacts WHERE phone = ?", (phone,))
+                row = cursor.fetchone()
+                if row is None:
+                    return False
+                # Existing data wins — only fall back to the new value when
+                # the existing contact's field is blank (this was backwards
+                # before: it must never let an import silently overwrite
+                # real data the user already had).
+                merged_name = row["name"] or name or ""
+                merged_email = row["email"] or email or ""
+                try:
+                    existing_custom = json.loads(row["custom_fields"] or "{}")
+                except (TypeError, ValueError):
+                    existing_custom = {}
+                existing_custom.update({k: v for k, v in (custom_fields or {}).items() if v})
+                cursor.execute(
+                    "UPDATE contacts SET name = ?, email = ?, custom_fields = ? WHERE phone = ?",
+                    (merged_name, merged_email, json.dumps(existing_custom), phone),
+                )
+                conn.commit()
+                return True
+        except Exception as e:
+            Logger.error(f"Error merging contact {phone}: {e}")
+            return False
+
     def get_contacts(self, limit: Optional[int] = None, offset: int = 0) -> List[Contact]:
         """
         Get all contacts with optional limit.

@@ -146,5 +146,68 @@ off `main`, each proven with real execution (not claimed) before moving to the n
   credentials) and the WhatsApp QR-scan step (needs a phone) — left for the user to confirm
   live, per their own choice.
 
-Phases 2-5 (contact import validation, AI content variations, bulletproof bulk send, app-wide
-polish) not yet started.
+### Theme system — Warm Ivory added (complete, branch `phase-2-contact-import`)
+
+`theme.py` now supports a third named palette ("dark"/"light"/"warm_ivory") via a module-level
+`__getattr__` resolving against `theme.get_palette()`/`set_palette()`, so every existing `T.TOKEN`
+call site is unchanged. Dark<->Light<->System still uses CTk's fast native in-place tuple
+resolution (no rebuild). Entering/leaving Warm Ivory triggers a full sidebar+content rebuild
+(`MainWindow._rebuild_ui_for_theme`) since CTk's binary appearance mode has no way to represent
+a 3rd state on already-built widgets — this is a deliberate, documented tradeoff (see theme.py's
+module docstring), not a bug. Verified via screenshots: all three palettes render correctly and
+round-trip cleanly.
+
+### Phase 2 — Contact Import review flow (complete, branch `phase-2-contact-import`)
+
+Replaced the old "pick a file, get a bare count" import with a real review flow:
+`src/ui/contact_import_review.py` (`ContactImportReviewDialog`) — drag-and-drop (via
+`tkinterdnd2`, attached to the CTk root through `TkinterDnD._require(self)`, new dependency) or
+Browse, a scrollable per-row preview table with color-coded status pills and a specific reason
+per row, a duplicate resolution choice (Skip/Merge — see below for why not literally
+"Merge/Skip/Keep Both"), and an accurate completion summary.
+
+New engine in `core/contact_manager.py`: `analyze_import()` (pure — parses + classifies, never
+touches the DB) and `commit_import()` (writes only what the user approved). New `db_manager.py`
+helpers: `get_existing_phones()`, `update_contact_by_phone()` (merge — existing data always wins,
+only fills blanks).
+
+**Real bugs found and fixed while verifying with a deliberately messy test CSV** (not just noted —
+fixed at the root cause, per standing instructions):
+1. `data_importer.py`'s `_clean_phone`/`_clean_email` were silently discarding malformed values
+   before any validator ever saw them, so "specific reason" was impossible — they were nulling
+   the very data needed to explain the rejection. Fixed to pass values through unjudged; real
+   validation (with a reason) now happens exactly once, in `PhoneValidator`/`DataValidator`.
+2. `PhoneValidator.normalize_phone()` only had two generic error strings. Added
+   `_describe_phone_error()` for specific reasons (missing country code, too short, too long,
+   invalid characters).
+3. **The live production database's `contacts.phone` column is `NOT NULL` — an older, already-
+   deployed schema than the aspirational `phone TEXT UNIQUE` (no NOT NULL) in `db_manager.py`'s
+   own `CREATE TABLE IF NOT EXISTS`, which only applies to brand-new installs.** This means
+   email-only contacts have probably never actually saved in this app, ever — the old
+   `import_from_file` path passed `phone=None` for them, which the real DB always rejected via a
+   silently-caught `IntegrityError`, with zero explanation ever shown to the user. Confirmed a
+   real orphaned row from this exact failure mode already sitting in the live DB. Considered an
+   email-derived placeholder phone value as a workaround, but rejected it: `contact.phone` is
+   used as the literal WhatsApp send target and gets substituted into `{phone}` in real message
+   templates elsewhere in the app (`main_window.py`, `core/whatsapp_sender.py`) — a fake
+   placeholder would leak into the Contacts list display, search, and real outgoing messages.
+   Chose the honest fix instead: a phone number is required to import a contact, and email-only
+   rows are now clearly flagged "invalid" with that exact reason — a real improvement over the
+   previous silent failure, not a new limitation. **A proper schema migration (rebuild the
+   `contacts` table without the NOT NULL constraint) would let email-only contacts work
+   end-to-end, but was judged too risky to do inline against a live production database in this
+   pass — flagging it as a known follow-up, not doing it silently.**
+4. `commit_import`'s merge logic had new-value-wins priority backwards — it would have let an
+   imported row silently overwrite a real existing contact's name/email, contradicting the UI's
+   own "never overwrites" promise. Caught by testing the merge path against a real existing
+   contact before shipping (not just synthetic data) and fixed to existing-wins,
+   fill-blanks-only, before it ever reached a real merge.
+
+Verified end-to-end with a deliberately messy CSV (duplicates, bad phone, bad email, empty row,
+email-only row) via a programmatic driver + screenshots: correct classification counts, correct
+per-row reasons, correct duplicate detection against both the file and the real DB, correct
+skip/merge behavior (merge tested against a real contact and confirmed non-destructive), accurate
+completion summary. All test rows cleaned up from the real database afterward.
+
+Phases 3-5 (AI content variations, bulletproof bulk send, app-wide polish) and the signature
+transition animation not yet started.

@@ -22,6 +22,12 @@ from PIL import Image
 from ..ui.card_creator_tab import build_card_creator_view
 from ..ui.reports_chart import ReportsChart
 
+try:
+    from tkinterdnd2 import TkinterDnD
+    HAS_DND = True
+except ImportError:
+    HAS_DND = False
+
 
 def _ensure_tcl_tk_paths() -> None:
     """Set Tcl/Tk env vars early so direct UI imports work on Windows."""
@@ -319,6 +325,12 @@ class MainWindow(ctk.CTk):
         self.minsize(1220, 760)
         self.configure(fg_color=T.BG_MAIN)
         self.protocol("WM_DELETE_WINDOW", self._on_close)
+
+        if HAS_DND:
+            try:
+                TkinterDnD._require(self)
+            except Exception as exc:
+                Logger.warning(f"Drag-and-drop unavailable: {exc}")
 
         self._load_settings()
         self._apply_theme(self.theme_var.get())
@@ -672,7 +684,7 @@ class MainWindow(ctk.CTk):
         build_card_creator_view(self)
 
         self.bind("<Control-n>", lambda _event: self._show_view("Compose"))
-        self.bind("<Control-i>", lambda _event: self._import_contacts())
+        self.bind("<Control-i>", lambda _event: self._open_import_review())
         self.bind("<Control-g>", lambda _event: self._show_view("Cards"))
 
     def _enforce_license(self) -> None:
@@ -1118,7 +1130,7 @@ class MainWindow(ctk.CTk):
 
         ctk.CTkButton(toolbar, text="Import Contacts",
                       corner_radius=8, fg_color=T.BADGE_BG, hover_color=T.BG_BORDER,
-                      text_color=T.TEXT_HEAD, command=self._import_contacts).grid(
+                      text_color=T.TEXT_HEAD, command=self._open_import_review).grid(
             row=0, column=0, padx=12, pady=12)
         ctk.CTkButton(toolbar, text="Export CSV", corner_radius=8,
                       fg_color=T.ACCENT, hover_color=T.ACCENT_HOVER,
@@ -2731,46 +2743,9 @@ class MainWindow(ctk.CTk):
                 selected.append(contact)
         return selected
 
-    def _import_contacts(self) -> None:
-        file_path = filedialog.askopenfilename(
-            title="Import Contacts",
-            filetypes=[
-                ("All supported", "*.csv *.xls *.xlsx *.xlsm *.html *.htm *.json *.vcf"),
-                ("CSV", "*.csv"),
-                ("Excel", "*.xls *.xlsx *.xlsm"),
-                ("HTML", "*.html *.htm"),
-                ("JSON", "*.json"),
-                ("vCard", "*.vcf"),
-            ],
-        )
-        if not file_path:
-            return
-
-        self.progress_status_var.set("Importing contacts...")
-        self._log_activity(f"Import started from {Path(file_path).name}")
-
-        def worker() -> None:
-            try:
-                imported_count, errors = self.contact_manager.import_from_file(file_path)
-                self.after(0, lambda: self._finish_import(imported_count, errors, file_path))
-            except Exception as exc:
-                Logger.error(f"Contact import failed: {exc}")
-                self.after(0, lambda: messagebox.showerror("Import Failed", str(exc)))
-                self.after(0, lambda: self.progress_status_var.set("Import failed"))
-
-        threading.Thread(target=worker, daemon=True).start()
-
-    def _finish_import(self, imported_count: int, errors: List[str], file_path: str) -> None:
-        self._reload_contacts()
-        self.progress_status_var.set("Ready")
-        if errors:
-            messagebox.showwarning(
-                "Import completed with warnings",
-                f"Imported {imported_count} contacts\n\n" + "\n".join(errors[:10]),
-            )
-        else:
-            messagebox.showinfo("Contacts Imported", f"Imported {imported_count} contacts successfully.")
-        self._log_activity(f"Imported {imported_count} contacts from {Path(file_path).name}")
+    def _open_import_review(self) -> None:
+        from .contact_import_review import show_contact_import_review
+        show_contact_import_review(self)
 
     def _export_contacts_csv(self) -> None:
         """Export all contacts to CSV."""

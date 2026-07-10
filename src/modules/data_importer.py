@@ -95,9 +95,16 @@ class UniversalDataImporter:
         return result
 
     def _finalize_stats(self, result: ImportResult) -> None:
-        """Compute valid email/phone counts after import."""
-        result.valid_emails = sum(1 for c in result.contacts if c.get("email"))
-        result.valid_phones = sum(1 for c in result.contacts if c.get("phone"))
+        """Compute valid email/phone counts after import — real validation,
+        not just "field is non-empty" (values now pass through _clean_email/
+        _clean_phone unjudged, so presence alone no longer implies validity)."""
+        from ..utils.validators import DataValidator, PhoneValidator
+        phone_validator = PhoneValidator()
+        result.valid_emails = sum(
+            1 for c in result.contacts if c.get("email") and DataValidator.is_valid_email(c["email"]))
+        result.valid_phones = sum(
+            1 for c in result.contacts
+            if c.get("phone") and phone_validator.normalize_phone(c["phone"])[0])
 
     def _import_csv(self, filepath: str, result: ImportResult) -> None:
         try:
@@ -344,10 +351,15 @@ class UniversalDataImporter:
 
     @staticmethod
     def _clean_email(email: str) -> str:
-        email = email.strip().lower()
-        return email if re.match(r"[^@]+@[^@]+\.[^@]+", email) else ""
+        # Trim/lowercase only — do NOT silently discard malformed values here.
+        # Real validation (with a specific reason) is DataValidator's job;
+        # nulling out bad-looking input at this layer would destroy the very
+        # information callers need to explain *why* a row was rejected.
+        return email.strip().lower()
 
     @staticmethod
     def _clean_phone(phone: str) -> str:
-        digits = re.sub(r"[^\d+]", "", phone)
-        return digits if len(digits) >= 7 else ""
+        # Strip formatting characters only — do NOT discard short/malformed
+        # values. Real validation (with a specific reason) is PhoneValidator's
+        # job; see _clean_email for why this layer must not pre-judge.
+        return re.sub(r"[^\d+]", "", phone)
