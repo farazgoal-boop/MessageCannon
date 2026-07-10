@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 import threading
 import time
@@ -56,6 +57,7 @@ from . import theme as T
 from ..core import ai_service
 from ..core.ai_service import AIServiceError
 from ..utils.crypto import encrypt_secret, decrypt_secret
+from ..utils.validators import DataValidator
 from ..utils.license_manager import LicenseManager
 from ..utils.logger import Logger
 
@@ -1232,12 +1234,23 @@ class MainWindow(ctk.CTk):
                         corner_radius=4, text_color=T.TEXT_HEAD).grid(
             row=0, column=3, padx=(0, 16), pady=14, sticky="e")
 
+        wa_ai_row = ctk.CTkFrame(wa_top, fg_color="transparent")
+        wa_ai_row.grid(row=1, column=0, columnspan=4, padx=16, pady=(0, 14), sticky="w")
+        ctk.CTkButton(wa_ai_row, text="✨ Generate with AI", height=30, corner_radius=8,
+                      fg_color=T.ACCENT, hover_color=T.ACCENT_HOVER, text_color=T.TEXT_HEAD,
+                      font=ctk.CTkFont(size=11, weight="bold"),
+                      command=lambda: self._open_ai_compose("whatsapp")).pack(side="left", padx=(0, 8))
+        ctk.CTkButton(wa_ai_row, text="💾 Save as Template", height=30, corner_radius=8,
+                      fg_color=T.BADGE_BG, hover_color=T.BG_BORDER, text_color=T.TEXT_HEAD,
+                      font=ctk.CTkFont(size=11),
+                      command=lambda: self._open_save_template("whatsapp")).pack(side="left")
+
         editor_frame = ctk.CTkFrame(self._wa_compose_frame, fg_color=T.BG_SURFACE, corner_radius=14,
                                     border_width=1, border_color=T.BG_BORDER)
         editor_frame.grid(row=1, column=0, sticky="nsew", padx=(0, 8))
         editor_frame.grid_columnconfigure(0, weight=1)
         editor_frame.grid_rowconfigure(2, weight=1)
-        editor_frame.grid_rowconfigure(4, weight=1)
+        editor_frame.grid_rowconfigure(5, weight=1)
 
         ctk.CTkLabel(editor_frame, text="Message editor",
                      font=ctk.CTkFont(size=15, weight="bold"),
@@ -1257,17 +1270,22 @@ class MainWindow(ctk.CTk):
                                               text_color=T.TEXT_HEAD,
                                               border_width=1, border_color=T.BG_BORDER,
                                               wrap="word")
-        self.message_textbox.grid(row=2, column=0, padx=16, pady=(0, 14), sticky="nsew")
-        self.message_textbox.bind("<KeyRelease>", lambda _event: self._refresh_preview())
+        self.message_textbox.grid(row=2, column=0, padx=16, pady=(0, 6), sticky="nsew")
+        self.message_textbox.bind("<KeyRelease>", lambda _event: self._on_wa_message_changed())
+
+        self._wa_warning_var = StringVar(value="")
+        ctk.CTkLabel(editor_frame, textvariable=self._wa_warning_var, text_color=T.TEXT_DIM,
+                     font=ctk.CTkFont(size=11), wraplength=520, justify="left").grid(
+            row=3, column=0, padx=16, pady=(0, 8), sticky="w")
 
         ctk.CTkLabel(editor_frame, text="Contacts",
                      font=ctk.CTkFont(size=14, weight="bold"),
                      text_color=T.TEXT_HEAD).grid(
-            row=3, column=0, padx=16, pady=(0, 6), sticky="w")
+            row=4, column=0, padx=16, pady=(0, 6), sticky="w")
         self.compose_contacts_frame = ctk.CTkScrollableFrame(
             editor_frame, fg_color=T.BG_INNER, corner_radius=10,
             border_width=1, border_color=T.BG_BORDER)
-        self.compose_contacts_frame.grid(row=4, column=0, padx=16, pady=(0, 16), sticky="nsew")
+        self.compose_contacts_frame.grid(row=5, column=0, padx=16, pady=(0, 16), sticky="nsew")
         self._bind_scrollable_frame_mousewheel(self.compose_contacts_frame)
 
         preview_frame = ctk.CTkFrame(self._wa_compose_frame, fg_color=T.BG_SURFACE, corner_radius=14,
@@ -1310,7 +1328,7 @@ class MainWindow(ctk.CTk):
                                border_width=1, border_color=T.BG_BORDER)
         em_left.grid(row=0, column=0, rowspan=2, sticky="nsew", padx=(0, 8))
         em_left.grid_columnconfigure(0, weight=1)
-        em_left.grid_rowconfigure(3, weight=1)
+        em_left.grid_rowconfigure(4, weight=1)
 
         ctk.CTkLabel(em_left, text="Email compose",
                      font=ctk.CTkFont(size=15, weight="bold"),
@@ -1354,13 +1372,35 @@ class MainWindow(ctk.CTk):
                          padx=10, pady=4, text_color=T.TEXT_MUTED,
                          font=ctk.CTkFont(size=11)).grid(row=0, column=i + 1, padx=4)
 
+        em_ai_row = ctk.CTkFrame(em_left, fg_color="transparent")
+        em_ai_row.grid(row=3, column=0, padx=16, pady=(0, 8), sticky="ew")
+        ctk.CTkButton(em_ai_row, text="✨ Generate with AI", height=30, corner_radius=8,
+                      fg_color=T.ACCENT, hover_color=T.ACCENT_HOVER, text_color=T.TEXT_HEAD,
+                      font=ctk.CTkFont(size=11, weight="bold"),
+                      command=lambda: self._open_ai_compose("email")).pack(side="left", padx=(0, 8))
+        ctk.CTkButton(em_ai_row, text="💾 Save as Template", height=30, corner_radius=8,
+                      fg_color=T.BADGE_BG, hover_color=T.BG_BORDER, text_color=T.TEXT_HEAD,
+                      font=ctk.CTkFont(size=11),
+                      command=lambda: self._open_save_template("email")).pack(side="left")
+        self._em_warning_var = StringVar(value="")
+        ctk.CTkLabel(em_ai_row, textvariable=self._em_warning_var, text_color=T.TEXT_DIM,
+                     font=ctk.CTkFont(size=11), wraplength=340, justify="left").pack(
+            side="left", padx=(12, 0))
+
         self._compose_em_body = tk.Text(
             em_left, wrap="word", bg=T.resolve(T.BG_INNER), fg=T.resolve(T.TEXT_HEAD),
             insertbackground=T.resolve(T.TEXT_HEAD), font=("Courier New", 10),
             borderwidth=0, highlightthickness=0, relief="flat")
         self._compose_em_body.insert("1.0",
             "<p>Dear <strong>{name}</strong>,</p>\n<p>Your message here.</p>")
-        self._compose_em_body.grid(row=3, column=0, padx=16, pady=(0, 16), sticky="nsew")
+        self._compose_em_body.grid(row=4, column=0, padx=16, pady=(0, 16), sticky="nsew")
+        self._compose_em_body.bind("<KeyRelease>", lambda _e: self._update_email_warnings())
+        # _em_subj_var is created once in __init__ and outlives UI rebuilds
+        # (e.g. switching to/from the Warm Ivory theme), but this method runs
+        # again on every rebuild — guard so the trace isn't added repeatedly.
+        if not getattr(self, "_em_subj_trace_added", False):
+            self._em_subj_var.trace_add("write", lambda *_a: self._update_email_warnings())
+            self._em_subj_trace_added = True
 
         # Email right column — SMTP status + recipients
         em_smtp_card = ctk.CTkFrame(self._em_compose_frame, fg_color=T.BG_SURFACE, corner_radius=14,
@@ -2706,7 +2746,7 @@ class MainWindow(ctk.CTk):
 
     def _insert_variable(self, token: str) -> None:
         self.message_textbox.insert("insert", token)
-        self._refresh_preview()
+        self._on_wa_message_changed()
 
     def _on_template_selected(self, template_name: str) -> None:
         if template_name == "Custom Message":
@@ -2716,7 +2756,126 @@ class MainWindow(ctk.CTk):
             return
         self.message_textbox.delete("1.0", "end")
         self.message_textbox.insert("1.0", template.message_text)
+        self._on_wa_message_changed()
+
+    def _on_wa_message_changed(self) -> None:
         self._refresh_preview()
+        self._highlight_variables(self.message_textbox)
+        self._update_wa_warning()
+
+    @staticmethod
+    def _highlight_variables(textbox: ctk.CTkTextbox) -> None:
+        """Visually distinguish {variable} tokens from plain message text."""
+        inner = textbox._textbox
+        inner.tag_remove("variable", "1.0", "end")
+        inner.tag_config("variable", foreground=T.resolve(T.ACCENT))
+        content = textbox.get("1.0", "end")
+        for match in re.finditer(r"\{[^}]+\}", content):
+            inner.tag_add("variable", f"1.0+{match.start()}c", f"1.0+{match.end()}c")
+
+    def _update_wa_warning(self) -> None:
+        template = self.message_textbox.get("1.0", "end").strip()
+        if not template:
+            self._wa_warning_var.set("")
+            return
+        is_valid, warnings = self.message_processor.validate_template(template)
+        if not is_valid:
+            self._wa_warning_var.set(f"⚠ {warnings[0]}")
+        elif warnings:
+            self._wa_warning_var.set(f"ℹ {warnings[0]}")
+        else:
+            self._wa_warning_var.set(f"{len(template)} characters")
+
+    def _update_email_warnings(self) -> None:
+        if not hasattr(self, "_compose_em_body"):
+            return
+        self._highlight_variables_tk(self._compose_em_body)
+        body = self._compose_em_body.get("1.0", "end").strip()
+        subject = self._em_subj_var.get()
+        warnings = []
+        _ok, subj_msg = DataValidator.check_subject_length(subject)
+        if subj_msg:
+            warnings.append(subj_msg)
+        spam_hits = DataValidator.check_spam_trigger_words(f"{body} {subject}")
+        if spam_hits:
+            warnings.append(f"Possible spam words: {', '.join(spam_hits[:3])}")
+        self._em_warning_var.set(" · ".join(warnings))
+
+    @staticmethod
+    def _highlight_variables_tk(text_widget: tk.Text) -> None:
+        """Same as _highlight_variables but for a raw tk.Text (email body)."""
+        text_widget.tag_remove("variable", "1.0", "end")
+        text_widget.tag_config("variable", foreground=T.resolve(T.ACCENT))
+        content = text_widget.get("1.0", "end")
+        for match in re.finditer(r"\{[^}]+\}", content):
+            text_widget.tag_add("variable", f"1.0+{match.start()}c", f"1.0+{match.end()}c")
+
+    def _open_ai_compose(self, channel: str) -> None:
+        from .ai_compose_dialog import show_ai_compose_dialog
+
+        def on_pick(text: str, subject: str) -> None:
+            if channel == "whatsapp":
+                self.message_textbox.delete("1.0", "end")
+                self.message_textbox.insert("1.0", text)
+                self._on_wa_message_changed()
+            else:
+                self._compose_em_body.delete("1.0", "end")
+                self._compose_em_body.insert("1.0", text)
+                if subject:
+                    self._em_subj_var.set(subject)
+                self._update_email_warnings()
+
+        show_ai_compose_dialog(self, channel, on_pick)
+
+    def _open_save_template(self, channel: str) -> None:
+        text = (self.message_textbox.get("1.0", "end").strip() if channel == "whatsapp"
+                else self._compose_em_body.get("1.0", "end").strip())
+        if not text:
+            messagebox.showwarning("Nothing to save", "Write a message first.")
+            return
+
+        dlg = ctk.CTkToplevel(self)
+        dlg.title("Save as Template")
+        dlg.geometry("420x280")
+        dlg.resizable(False, False)
+        dlg.transient(self)
+        dlg.grab_set()
+        dlg.configure(fg_color=T.BG_MAIN)
+
+        ctk.CTkLabel(dlg, text="Template name", text_color=T.TEXT_HEAD).pack(
+            anchor="w", padx=20, pady=(20, 4))
+        name_var = StringVar(value="")
+        ctk.CTkEntry(dlg, textvariable=name_var, fg_color=T.BG_INNER, border_color=T.BG_BORDER,
+                     text_color=T.TEXT_HEAD).pack(fill="x", padx=20)
+
+        ctk.CTkLabel(dlg, text="Category (optional)", text_color=T.TEXT_HEAD).pack(
+            anchor="w", padx=20, pady=(14, 4))
+        category_var = StringVar(value=channel.capitalize())
+        ctk.CTkEntry(dlg, textvariable=category_var, fg_color=T.BG_INNER, border_color=T.BG_BORDER,
+                     text_color=T.TEXT_HEAD).pack(fill="x", padx=20)
+
+        status_var = StringVar(value="")
+        ctk.CTkLabel(dlg, textvariable=status_var, text_color=T.DANGER_ON_BADGE,
+                     font=ctk.CTkFont(size=11)).pack(anchor="w", padx=20, pady=(6, 0))
+
+        def do_save() -> None:
+            name = name_var.get().strip()
+            if not name:
+                status_var.set("Enter a template name.")
+                return
+            template_id = self.db.add_template(Template(
+                name=name, category=category_var.get().strip(), message_text=text))
+            if template_id is None:
+                status_var.set("A template with that name may already exist.")
+                return
+            self._load_templates()
+            dlg.destroy()
+            messagebox.showinfo("Saved", f'Template "{name}" saved — pick it from the '
+                                          f'Template dropdown any time.')
+
+        ctk.CTkButton(dlg, text="Save Template", fg_color=T.ACCENT, hover_color=T.ACCENT_HOVER,
+                      text_color=T.TEXT_HEAD, font=ctk.CTkFont(size=13, weight="bold"),
+                      command=do_save).pack(pady=(20, 0))
 
     def _refresh_preview(self) -> None:
         template = self.message_textbox.get("1.0", "end").strip() if hasattr(self, "message_textbox") else ""

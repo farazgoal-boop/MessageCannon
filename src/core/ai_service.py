@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import requests
 
@@ -174,3 +174,56 @@ def generate_personalized_messages(
             continue
 
     return results
+
+
+def generate_message_variations(
+    brief: str, channel: str, api_key: str, count: int = 3,
+    sample_variables: Optional[List[str]] = None,
+) -> List[Dict[str, str]]:
+    """Draft `count` distinct outgoing-message variations from a short brief
+    (product, tone, goal) — never a single forced output. Returns
+    [{"label": str, "text": str, "subject": str}, ...]; "subject" is only
+    meaningful when channel == "email" (empty string otherwise).
+
+    Uses the app's own {variable} syntax (e.g. {name}, {amount}, or any
+    custom column name) so results drop straight into the composer and
+    substitute against real contacts completely unchanged — the AI is told
+    exactly which variables are available so it doesn't invent ones that
+    don't exist in the imported contact data.
+    """
+    if not brief.strip():
+        raise AIServiceError("Describe what you want to say before generating.")
+
+    available_vars = ", ".join(f"{{{v}}}" for v in (sample_variables or ["name"]))
+    channel_guidance = (
+        "WhatsApp message: short (under ~300 characters), casual, plain text, "
+        "emoji used sparingly and naturally, no markdown."
+        if channel == "whatsapp" else
+        "Email: a short subject line plus a 2-4 paragraph plain-text body, "
+        "professional but warm, no markdown, no HTML."
+    )
+
+    system = (
+        f"You write outgoing marketing/notification messages for a small business "
+        f"messaging app. Generate exactly {count} genuinely DIFFERENT variations "
+        f"(different angle, tone, or structure each — not just reworded copies) for "
+        f"this brief. {channel_guidance} "
+        f"Personalize using ONLY these variables, exactly as written (do not invent "
+        f"others): {available_vars}. "
+        "Respond with ONLY a JSON array, no markdown fences, shaped exactly like: "
+        '[{"label": "<3-word style label, e.g. \'Friendly & Casual\'>", '
+        '"text": "<the message, with {variables} inline>", '
+        '"subject": "<email subject line, or empty string if not email>"}, ...]'
+    )
+    raw = _call_claude(api_key, system=system, user=brief.strip(), max_tokens=1500)
+    data = _parse_json_response(raw)
+    if not isinstance(data, list) or not data:
+        raise AIServiceError("AI response wasn't a JSON array of variations.")
+    return [
+        {
+            "label": str(item.get("label", f"Variation {i + 1}")),
+            "text": str(item.get("text", "")),
+            "subject": str(item.get("subject", "")),
+        }
+        for i, item in enumerate(data) if item.get("text")
+    ]

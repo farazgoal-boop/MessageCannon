@@ -3,7 +3,7 @@ Validators module for phone numbers, emails, and data validation.
 """
 
 import re
-from typing import Tuple, Optional
+from typing import List, Tuple, Optional
 from .constants import PAKISTAN_PHONE_PATTERN
 
 
@@ -154,6 +154,36 @@ class DataValidator:
         
         return True, ""
     
+    # Common words/phrases that trigger spam filters — not exhaustive, just
+    # the highest-signal ones worth flagging inline before a real send.
+    SPAM_TRIGGER_WORDS = [
+        "free money", "act now", "limited time", "click here", "buy now",
+        "100% free", "risk-free", "guarantee", "no obligation", "winner",
+        "congratulations", "urgent", "cash bonus", "double your",
+        "cheap", "discount", "earn extra cash", "work from home",
+        "viagra", "casino", "lottery", "credit card", "!!!",
+    ]
+
+    @staticmethod
+    def check_spam_trigger_words(text: str) -> List[str]:
+        """Return every known spam-trigger phrase found in text (case-insensitive),
+        for an inline warning — not a hard block, just a heads-up."""
+        lowered = text.lower()
+        return [phrase for phrase in DataValidator.SPAM_TRIGGER_WORDS if phrase in lowered]
+
+    @staticmethod
+    def check_subject_length(subject: str) -> Tuple[bool, str]:
+        """Email subject length guidance — most clients truncate well before
+        78 chars, and very short subjects can look unfinished/spammy."""
+        length = len(subject.strip())
+        if length == 0:
+            return False, "Subject is empty"
+        if length > 78:
+            return True, f"Subject is long ({length} chars) — may get truncated in inboxes"
+        if length < 10:
+            return True, f"Subject is very short ({length} chars) — may look incomplete"
+        return True, ""
+
     @staticmethod
     def validate_message_length(message: str, max_length: int = 65536) -> Tuple[bool, str]:
         """

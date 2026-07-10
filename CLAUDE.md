@@ -209,5 +209,48 @@ per-row reasons, correct duplicate detection against both the file and the real 
 skip/merge behavior (merge tested against a real contact and confirmed non-destructive), accurate
 completion summary. All test rows cleaned up from the real database afterward.
 
-Phases 3-5 (AI content variations, bulletproof bulk send, app-wide polish) and the signature
-transition animation not yet started.
+### Phase 3 — AI-Generated Marketing Content (branch `phase-3-ai-content`)
+
+Compose screen already had more infrastructure than the spec assumed — reused rather than
+rebuilt: `_refresh_preview()` already rendered live preview against real selected contacts via
+`MessageProcessor.substitute_variables`; `MessageProcessor.validate_template()` already did
+WhatsApp length validation; `{variable}` insert buttons already existed. New work built on top:
+
+- `src/ui/ai_compose_dialog.py` (`AIComposeDialog`) — shared by both WhatsApp and Email compose
+  panels. User gives a brief, `ai_service.generate_message_variations()` (new function) returns
+  3 genuinely different variations (not reworded copies of one idea — the prompt explicitly
+  requires different angle/tone/structure), shown as cards the user can edit before picking.
+  Told exactly which `{variable}` names are available (from the first selected contact's
+  `custom_fields`) so it never invents variables that don't exist in the imported data.
+- Variable highlighting: `{variable}` tokens get a distinct accent color inside both the
+  WhatsApp `CTkTextbox` and the raw-tk email body, via `Text.tag_add`/`tag_config` on regex
+  matches — re-applied on every keystroke alongside the existing live preview refresh.
+- Inline warnings, updated live: WhatsApp reuses `MessageProcessor.validate_template()`
+  (already existed). Email got two new `DataValidator` methods —
+  `check_spam_trigger_words()` and `check_subject_length()` — since nothing already checked
+  those.
+- "Save as Template" — new dialog (name + category) wired to `db.add_template()`
+  (already existed, was just never exposed from Compose).
+- Found and fixed a latent bug while wiring this in: `_em_subj_var.trace_add()` was being
+  re-registered every time `_build_compose_view()` runs, but that StringVar is created once in
+  `__init__` and outlives UI rebuilds (e.g. the Warm Ivory theme's rebuild) — repeated theme
+  switches would have silently stacked duplicate trace callbacks. Guarded with a one-time flag.
+
+Not built: a dedicated template library/search screen (spec's own "if more than a handful of
+templates exist" framing made this conditional/lower-priority; the existing Template dropdown
+already lists everything, just without search — flagging as a deferred nice-to-have, not
+silently dropped).
+
+Verified via a programmatic driver + screenshots (network layer mocked — no real Anthropic key
+available in this environment, everything else is the real UI code path, not simulated):
+variable highlighting confirmed in both the WhatsApp `CTkTextbox` and the raw-tk email body,
+WhatsApp character-count warning, email subject-length + spam-word warnings correctly triggered
+on deliberately bad test input ("hi" subject + "click here now for a 100% free cash bonus!!!
+Act now!" body → correctly flagged all three), the AI variations dialog rendering + "Use this"
+correctly loading a picked variation back into the editor for both channels, and the Save-as-
+Template dialog rendering with the right pre-filled category. **Not verified**: an actual
+successful AI generation against the real Anthropic API (needs your key) and delivery of a real
+message (needs real SMTP/WhatsApp session, already covered by Phase 1).
+
+Phases 4-5 (bulletproof bulk send, app-wide polish) and the signature transition animation not
+yet started.
