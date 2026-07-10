@@ -56,6 +56,7 @@ from ..utils.constants import APP_NAME, APP_VERSION, WINDOW_HEIGHT, WINDOW_WIDTH
 from . import theme as T
 from .toast import show_toast
 from .confirm_dialogs import show_danger_confirm
+from .tooltip import add_tooltip
 from ..core import ai_service
 from ..core.ai_service import AIServiceError
 from ..utils.crypto import encrypt_secret, decrypt_secret
@@ -2049,8 +2050,11 @@ class MainWindow(ctk.CTk):
                      text_color=T.TEXT_MUTED, font=ctk.CTkFont(size=12)).grid(
             row=1, column=0, columnspan=3, padx=16, pady=(0, 14), sticky="w")
 
-        ctk.CTkLabel(card, text="Delay between messages",
-                     text_color=T.TEXT_HEAD).grid(row=2, column=0, padx=16, pady=10, sticky="w")
+        delay_lbl = ctk.CTkLabel(card, text="Delay between messages", text_color=T.TEXT_HEAD)
+        delay_lbl.grid(row=2, column=0, padx=16, pady=10, sticky="w")
+        add_tooltip(delay_lbl, "How long to wait after each message before sending the next "
+                                "one. Longer delays look more human and are less likely to get "
+                                "your account flagged or blocked.")
         self.delay_slider = ctk.CTkSlider(card, from_=10, to=120, number_of_steps=110, command=self._on_delay_change)
         self.delay_slider.grid(row=2, column=1, padx=16, pady=10, sticky="ew")
         self.delay_slider.set(self.delay_var.get())
@@ -2058,8 +2062,11 @@ class MainWindow(ctk.CTk):
                                         text_color=T.TEXT_MUTED)
         self.delay_label.grid(row=2, column=2, padx=(0, 16), pady=10, sticky="e")
 
-        ctk.CTkLabel(card, text="Daily limit",
-                     text_color=T.TEXT_HEAD).grid(row=3, column=0, padx=16, pady=10, sticky="w")
+        limit_lbl = ctk.CTkLabel(card, text="Daily limit", text_color=T.TEXT_HEAD)
+        limit_lbl.grid(row=3, column=0, padx=16, pady=10, sticky="w")
+        add_tooltip(limit_lbl, "The maximum number of messages this app will send in one "
+                                "campaign/day. Keeping this low reduces the risk of your "
+                                "WhatsApp or email account being flagged.")
         self.limit_slider = ctk.CTkSlider(card, from_=10, to=500, number_of_steps=98, command=self._on_daily_limit_change)
         self.limit_slider.grid(row=3, column=1, padx=16, pady=10, sticky="ew")
         self.limit_slider.set(self.daily_limit_var.get())
@@ -2071,14 +2078,18 @@ class MainWindow(ctk.CTk):
                                                 font=ctk.CTkFont(size=11), wraplength=360, justify="left")
         self.limit_warning_label.grid(row=4, column=0, columnspan=3, padx=16, pady=(0, 12), sticky="w")
 
-        ctk.CTkSwitch(card, text="Random jitter", variable=self.jitter_var,
-                      text_color=T.TEXT_HEAD, command=self._save_settings).grid(
-            row=5, column=0, padx=16, pady=10, sticky="w"
-        )
-        ctk.CTkSwitch(card, text="Consent required", variable=self.consent_required_var,
-                      text_color=T.TEXT_HEAD, command=self._save_settings).grid(
-            row=5, column=1, padx=16, pady=10, sticky="w"
-        )
+        jitter_switch = ctk.CTkSwitch(card, text="Random jitter", variable=self.jitter_var,
+                      text_color=T.TEXT_HEAD, command=self._save_settings)
+        jitter_switch.grid(row=5, column=0, padx=16, pady=10, sticky="w")
+        add_tooltip(jitter_switch, "Adds a small random variation to the delay between "
+                                    "messages instead of a perfectly even gap — makes sending "
+                                    "look more natural and less like an automated bot.")
+        consent_switch = ctk.CTkSwitch(card, text="Consent required", variable=self.consent_required_var,
+                      text_color=T.TEXT_HEAD, command=self._save_settings)
+        consent_switch.grid(row=5, column=1, padx=16, pady=10, sticky="w")
+        add_tooltip(consent_switch, "When on, you must confirm you have recipients' consent "
+                                     "before every send — required in most places for bulk "
+                                     "email/WhatsApp messaging.")
 
         system_card = ctk.CTkFrame(frame, fg_color=T.BG_SURFACE, corner_radius=14,
                                    border_width=1, border_color=T.BG_BORDER)
@@ -2221,17 +2232,28 @@ class MainWindow(ctk.CTk):
                           dropdown_text_color=T.TEXT_HEAD).grid(
             row=2, column=1, padx=(4, 16), pady=6, sticky="ew")
 
-        for i, (lbl, var, secret) in enumerate([
-            ("Host",         self._em_host,      False),
-            ("Port",         self._em_port,      False),
-            ("Username",     self._em_user,      False),
-            ("Password",     self._em_pass,      True),
-            ("Sender name",  self._em_from_name, False),
-            ("Sender email", self._em_from_addr, False),
-            ("Delay (sec)",  self._em_delay,     False),
+        for i, (lbl, var, secret, tip) in enumerate([
+            ("Host",         self._em_host,      False,
+             "Your email provider's outgoing mail server address, e.g. smtp.gmail.com. "
+             "Check your provider's help pages if you're not sure."),
+            ("Port",         self._em_port,      False,
+             "The connection port for outgoing mail — usually 587. If sending fails, try 465."),
+            ("Username",     self._em_user,      False,
+             "Usually your full email address."),
+            ("Password",     self._em_pass,      True,
+             "For Gmail/Outlook this is often an app password, not your regular login "
+             "password — check your provider's security settings to generate one."),
+            ("Sender name",  self._em_from_name, False,
+             "The name recipients see in their inbox, e.g. your business name."),
+            ("Sender email", self._em_from_addr, False,
+             "Must match the email account you're sending from."),
+            ("Delay (sec)",  self._em_delay,     False,
+             "Seconds to wait between each email — spreads sends out so your account "
+             "isn't flagged as spam."),
         ], start=3):
-            ctk.CTkLabel(smtp_card, text=lbl, text_color=T.TEXT_HEAD).grid(
-                row=i, column=0, padx=16, pady=5, sticky="w")
+            lbl_widget = ctk.CTkLabel(smtp_card, text=lbl, text_color=T.TEXT_HEAD)
+            lbl_widget.grid(row=i, column=0, padx=16, pady=5, sticky="w")
+            add_tooltip(lbl_widget, tip)
             entry = ctk.CTkEntry(smtp_card, textvariable=var, show="●" if secret else "",
                                  fg_color=T.BG_INNER, border_color=T.BG_BORDER,
                                  text_color=T.TEXT_HEAD)
@@ -2263,8 +2285,11 @@ class MainWindow(ctk.CTk):
                      wraplength=700, justify="left").grid(
             row=1, column=0, columnspan=3, padx=16, pady=(0, 12), sticky="w")
 
-        ctk.CTkLabel(ai_card, text="API key", text_color=T.TEXT_HEAD).grid(
-            row=2, column=0, padx=16, pady=6, sticky="w")
+        ai_key_lbl = ctk.CTkLabel(ai_card, text="API key", text_color=T.TEXT_HEAD)
+        ai_key_lbl.grid(row=2, column=0, padx=16, pady=6, sticky="w")
+        add_tooltip(ai_key_lbl, "Get this from your Anthropic account's API console. It's "
+                                 "stored encrypted on this device only and is never sent "
+                                 "anywhere except directly to Anthropic when generating content.")
         self._ai_key_entry = ctk.CTkEntry(
             ai_card, textvariable=self._ai_api_key, show="●",
             fg_color=T.BG_INNER, border_color=T.BG_BORDER, text_color=T.TEXT_HEAD)
