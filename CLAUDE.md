@@ -361,13 +361,9 @@ Built and verified this pass:
    unrelated to any single Phase 5 feature. Fixed to `T.DANGER_ON_BADGE` (matching the convention
    already used elsewhere for warning text), full-width `columnspan=3`, and `wraplength=360`.
 
-**Found but explicitly NOT fixed this pass** (documented per standing instructions, not silently
-dropped): the Campaigns-home "Recent campaigns" card collapses to near-zero visible height despite
-`frame.grid_rowconfigure(2, weight=1)` being set correctly — a pre-existing `CTkScrollableFrame`
-nested-sizing quirk that predates this session (the old single-label empty state had the exact
-same underlying container problem, just less visually obvious than a bordered card). Left as a
-follow-up rather than risk an unreviewed grid-layout fix in a view not otherwise being touched
-this pass.
+**Update**: the Campaigns-home "Recent campaigns" card sizing issue noted above was investigated
+further (see "Signature Animation + High-Volume Scale Strategy — Step 0" below) and turned out to
+hide real data, not just look bad — it has since been fixed.
 
 **Verified real-data-safety note**: driving "Delete All Contacts"/"Clear Campaign History" through
 the actual GUI was correctly **blocked by the auto-mode safety classifier** (it detected an
@@ -388,6 +384,41 @@ database. Confirmed via direct DB query that the real contacts were untouched th
 - Per-row delete for individual contacts/templates/campaigns (backend `delete_contact()` exists
   and is DB-verified working, but has no UI entry point yet — only the new bulk "Delete All"
   action in Danger Zone is wired up).
-- The Recent Campaigns card sizing issue noted above.
 
-Signature transition animation not yet started.
+Signature transition animation not yet started as of the end of Phase 5. See next section for
+subsequent work.
+
+## Signature Animation + High-Volume Scale Strategy (in progress)
+
+Direction locked 2026-07-11: after Phases 1-5, two more efforts before returning to the "Final
+Testing & World-Class Recommendations" document (Parts 1, 3-7 — Part 2, the close-button delay,
+was already fixed in Phase 5). Standing rule for this effort: checkpoint in this file after every
+sub-step below, so an interrupted session can resume from the last `CHECKPOINT:` line instead of
+restarting or needing re-explained context.
+
+**CHECKPOINT: Step 0 (data-safety check on the Recent Campaigns quirk) complete.**
+
+Investigated whether the Campaigns-home "Recent campaigns" card issue (flagged at the end of
+Phase 5) was cosmetic or actually hid real data. Inserted 5 real campaign rows into an isolated,
+cleaned-up-after test against the actual local DB and confirmed via `grid_bbox` diagnostics: **it
+hid real data.** Root cause — the Campaigns/Home view (`_build_campaigns_home_view`) was a
+fixed-height, non-scrollable `CTkFrame` (unlike Settings/History/Contacts, which are all
+`scrollable=True`). Its fixed-size rows (hero ~505px + two header rows + a 168px activity log)
+already consumed nearly all available height before the one `weight=1` row (the recent-campaigns
+list) got anything — that row's weight config was working correctly, there was just never any
+leftover space to hand it, so real campaign rows were mapped by Tk but not visible on screen.
+
+Per this document's own instruction ("if it risks hiding real data, flag it to me clearly before
+proceeding"), stopped and asked before fixing. User chose to fix it immediately rather than defer.
+
+Fix: `_build_campaigns_home_view` now uses `_new_view_container("Campaigns", scrollable=True)`
+(matching the other views) so the whole page scrolls instead of one internal section being
+squeezed to ~2px. The nested `CTkScrollableFrame` for the recent-campaigns preview was simplified
+to a plain `CTkFrame` — double-nested independent scroll regions are a bad pattern, and the
+preview is already capped at 10 rows (`get_recent_campaigns_summary(limit=10)`) with "View all"
+opening the real, independently-scrollable History list for anything beyond that. Verified with
+both a real-data screenshot (5 inserted campaigns, all visible, page scrolls) and the empty-state
+screenshot (unchanged, still renders correctly) — test rows deleted after, real DB confirmed back
+to its actual state (9 contacts, 0 campaigns) throughout.
+
+**Next: CHECKPOINT: Step 1 (Signature Animation) — not yet started.**
