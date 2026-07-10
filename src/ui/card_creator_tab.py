@@ -17,8 +17,13 @@ import tempfile
 import time
 from pathlib import Path
 from datetime import datetime, date
+from typing import Dict, List
 
+from ..core import ai_service
+from ..core.ai_service import AIServiceError
+from ..models import Contact
 from ..modules.data_importer import UniversalDataImporter
+from ..utils.validators import DataValidator, PhoneValidator
 from . import theme as T
 
 logger = logging.getLogger(__name__)
@@ -132,6 +137,51 @@ def safe_text(value: str) -> str:
 def _clean_url(url: str) -> str:
     """Strip whitespace and stray surrounding quotes from pasted URLs."""
     return str(url).strip().strip('"').strip("'").strip()
+
+
+def _contact_key(contact: Contact) -> str:
+    """Stable per-contact identifier used to line up AI-personalized messages."""
+    return (contact.phone or contact.email or "").strip()
+
+
+def _rows_to_contacts(rows: List[dict]) -> List[Contact]:
+    """Convert UniversalDataImporter's flat custom_-prefixed dicts into real
+    Contact objects — mirrors core/contact_manager.py:import_from_file()."""
+    phone_validator = PhoneValidator()
+    contacts: List[Contact] = []
+    for row in rows:
+        phone_raw = row.get("phone", "")
+        email_raw = row.get("email", "")
+        name = row.get("name", "")
+
+        normalized_phone = ""
+        if phone_raw:
+            normalized_phone, _phone_error = phone_validator.normalize_phone(phone_raw)
+            if normalized_phone is None and not email_raw:
+                continue
+            normalized_phone = normalized_phone or ""
+
+        if email_raw and not DataValidator.is_valid_email(email_raw):
+            if not normalized_phone:
+                continue
+            email_raw = ""
+
+        if not normalized_phone and not email_raw:
+            continue
+
+        custom_fields = {
+            key[7:]: value
+            for key, value in row.items()
+            if key.startswith("custom_") and value
+        }
+
+        contacts.append(Contact(
+            phone=normalized_phone or "",
+            email=email_raw or "",
+            name=name or "",
+            custom_fields=custom_fields or {},
+        ))
+    return contacts
 
 
 def generate_html(sections: list, meta: dict, for_preview: bool = False) -> str:
@@ -346,12 +396,14 @@ class CardCreatorV2(ctk.CTkFrame):
     Actions: Preview in browser, Save HTML, Bulk send WA, Bulk send Email
     """
 
-    def __init__(self, parent, **kwargs):
+    def __init__(self, parent, main_window=None, **kwargs):
         super().__init__(parent, fg_color="transparent", **kwargs)
+        self.main_window = main_window
         self._accent   = "#6c63ff"
         self._sections = []   # list of {"type":str, "data":dict, "frame":widget}
         self._html     = ""
-        self._contacts = []
+        self._bulk_contacts: List[Contact] = []   # set by bulk-send dialog's import step
+        self._bulk_messages: Dict[str, str] = {}  # contact key -> AI-personalized message
         self._preview_job = None
         self._style_name = "Dark Premium"
         self._buy_var = ctk.StringVar(value="")
@@ -400,14 +452,50 @@ class CardCreatorV2(ctk.CTkFrame):
         top.grid(row=0, column=0, sticky="ew", pady=(0, 8))
         top.grid_columnconfigure(0, weight=1)
 
-        ctk.CTkLabel(top, text="🎯  Select App & Identity",
+        ctk.CTkLabel(top, text="🎯  Card Identity",
                      font=ctk.CTkFont(size=14, weight="bold"),
                      text_color=T.TEXT_HEAD).grid(
             row=0, column=0, padx=16, pady=(14, 8), sticky="w")
 
-        # App buttons
+        # ── AI card generation — promoted to the primary, easiest path ─────────
+        ai_row = ctk.CTkFrame(top, fg_color=T.BG_INNER, corner_radius=12,
+                               border_width=2, border_color=T.ACCENT)
+        ai_row.grid(row=1, column=0, padx=16, pady=(0, 14), sticky="ew")
+        ai_row.grid_columnconfigure(0, weight=1)
+
+        ai_header = ctk.CTkFrame(ai_row, fg_color="transparent")
+        ai_header.grid(row=0, column=0, padx=12, pady=(12, 4), sticky="w")
+        ctk.CTkLabel(ai_header, text="✨ AI-POWERED", fg_color=T.BADGE_BG,
+                     corner_radius=999, text_color=T.ACCENT,
+                     font=ctk.CTkFont(size=10, weight="bold"),
+                     padx=10, pady=3).pack(side="left")
+        ctk.CTkLabel(ai_header, text="  Describe your product — AI drafts the whole card",
+                     text_color=T.TEXT_HEAD, font=ctk.CTkFont(size=12, weight="bold")).pack(
+            side="left", padx=(8, 0))
+
+        self._ai_desc_box = ctk.CTkTextbox(
+            ai_row, height=54, fg_color=T.BG_MAIN, text_color=T.TEXT_HEAD,
+            border_color=T.BG_BORDER, border_width=1, font=ctk.CTkFont(size=11))
+        self._ai_desc_box.grid(row=1, column=0, padx=12, pady=(0, 8), sticky="ew")
+        ai_btn_row = ctk.CTkFrame(ai_row, fg_color="transparent")
+        ai_btn_row.grid(row=2, column=0, padx=12, pady=(0, 12), sticky="ew")
+        self._ai_generate_btn = ctk.CTkButton(
+            ai_btn_row, text="✨ Generate with AI", fg_color=T.ACCENT, hover_color=T.ACCENT_HOVER,
+            text_color=T.TEXT_HEAD, font=ctk.CTkFont(size=12, weight="bold"),
+            height=34, command=self._generate_card_with_ai)
+        self._ai_generate_btn.pack(side="left")
+        self._ai_status_var = ctk.StringVar(value="")
+        ctk.CTkLabel(ai_btn_row, textvariable=self._ai_status_var,
+                     text_color=T.TEXT_MUTED, font=ctk.CTkFont(size=11)).pack(
+            side="left", padx=(10, 0))
+
+        ctk.CTkLabel(top, text="OR START FROM A TEMPLATE",
+                     text_color=T.TEXT_DIM, font=ctk.CTkFont(size=10, weight="bold")).grid(
+            row=2, column=0, padx=16, pady=(0, 4), sticky="w")
+
+        # App buttons — segmented preset picker
         bf = ctk.CTkFrame(top, fg_color="transparent")
-        bf.grid(row=1, column=0, padx=16, pady=(0, 8), sticky="ew")
+        bf.grid(row=3, column=0, padx=16, pady=(0, 8), sticky="ew")
         self._app_btns = {}
         for i, (name, _) in enumerate(APP_PRESETS.items()):
             b = ctk.CTkButton(bf, text=name, width=1,
@@ -421,7 +509,7 @@ class CardCreatorV2(ctk.CTkFrame):
 
         # Meta fields row
         mf = ctk.CTkFrame(top, fg_color="transparent")
-        mf.grid(row=2, column=0, padx=16, pady=(0, 8), sticky="ew")
+        mf.grid(row=4, column=0, padx=16, pady=(0, 8), sticky="ew")
         mf.grid_columnconfigure((0,1,2,3), weight=1)
 
         self._mname = ctk.StringVar(value="MessageCannon Pro")
@@ -445,7 +533,7 @@ class CardCreatorV2(ctk.CTkFrame):
 
         # Accent colors
         cf = ctk.CTkFrame(top, fg_color="transparent")
-        cf.grid(row=3, column=0, padx=16, pady=(0,12), sticky="w")
+        cf.grid(row=5, column=0, padx=16, pady=(0,12), sticky="w")
         ctk.CTkLabel(cf, text="Theme:", text_color=T.TEXT_MUTED,
                      font=ctk.CTkFont(size=11)).grid(row=0,column=0,padx=(0,6))
         for i,c in enumerate(ACCENT_COLORS):
@@ -458,7 +546,7 @@ class CardCreatorV2(ctk.CTkFrame):
                       command=self._custom_color).grid(row=0,column=len(ACCENT_COLORS)+1,padx=(6,0))
 
         tf = ctk.CTkFrame(top, fg_color="transparent")
-        tf.grid(row=4, column=0, padx=16, pady=(0, 12), sticky="ew")
+        tf.grid(row=6, column=0, padx=16, pady=(0, 14), sticky="ew")
         ctk.CTkLabel(tf, text="Card Template:", text_color=T.TEXT_MUTED,
                      font=ctk.CTkFont(size=11)).grid(row=0, column=0, padx=(0, 8))
         self._template_var = ctk.StringVar(value="Dark Premium")
@@ -577,7 +665,7 @@ class CardCreatorV2(ctk.CTkFrame):
             command=self._update_live_preview,
         ).pack(side="left")
 
-        preview_host = tk.Frame(prev, bg=T.BG_INNER, highlightthickness=0)
+        preview_host = tk.Frame(prev, bg=T.resolve(T.BG_INNER), highlightthickness=0)
         preview_host.grid(row=1, column=0, columnspan=2, padx=12, pady=(0, 12), sticky="nsew")
 
         self._preview_host = preview_host
@@ -1033,32 +1121,50 @@ class CardCreatorV2(ctk.CTkFrame):
         if not self._html:
             self._generate()
 
+        if self.main_window is None:
+            messagebox.showerror("Unavailable", "Bulk send requires the main app window.")
+            return
+
         dlg = ctk.CTkToplevel(self)
         dlg.title("Bulk Send Card")
-        dlg.geometry("500x460")
+        dlg.geometry("560x780")
         dlg.grab_set()
         dlg.configure(fg_color=T.BG_MAIN)
         dlg.grid_columnconfigure(0, weight=1)
 
-        ctk.CTkLabel(dlg, text="📤  Bulk Send Card",
+        ctk.CTkLabel(dlg, text="📤  Bulk Send Card (AI-personalized)",
                      font=ctk.CTkFont(size=18,weight="bold"),
                      text_color=T.TEXT_HEAD).grid(
             row=0,column=0,padx=20,pady=(20,4),sticky="w")
 
-        # Import contacts
+        def _step_header(parent, num, text):
+            row = ctk.CTkFrame(parent, fg_color="transparent")
+            row.grid(row=0, column=0, columnspan=2, padx=14, pady=(12, 6), sticky="w")
+            ctk.CTkLabel(row, text=str(num), fg_color=T.ACCENT, corner_radius=12,
+                         width=24, height=24, text_color=T.TEXT_HEAD,
+                         font=ctk.CTkFont(size=11, weight="bold")).pack(side="left")
+            ctk.CTkLabel(row, text=text, font=ctk.CTkFont(size=13, weight="bold"),
+                         text_color=T.TEXT_HEAD).pack(side="left", padx=(8, 0))
+
+        def _pill(parent, text, fg=None, text_color=None):
+            return ctk.CTkLabel(parent, text=text, fg_color=fg or T.BADGE_BG,
+                                 corner_radius=999, text_color=text_color or T.TEXT_MUTED,
+                                 font=ctk.CTkFont(size=11, weight="bold"), padx=10, pady=4)
+
+        # Step 1 — Import contacts
         cf = ctk.CTkFrame(dlg,fg_color=T.BG_SURFACE,corner_radius=14,
                            border_width=1,border_color=T.BG_BORDER)
         cf.grid(row=1,column=0,padx=20,pady=(0,10),sticky="ew")
         cf.grid_columnconfigure(0,weight=1)
-        ctk.CTkLabel(cf,text="👥 Import Contacts (CSV/Excel/HTML)",
-                     font=ctk.CTkFont(size=13,weight="bold"),
-                     text_color=T.TEXT_HEAD).grid(
-            row=0,column=0,padx=14,pady=(12,6),sticky="w")
+        _step_header(cf, 1, "Import Contacts (CSV/Excel/HTML)")
 
         count_var = ctk.StringVar(value="No contacts loaded")
         ctk.CTkLabel(cf,textvariable=count_var,text_color=T.TEXT_MUTED,
                      font=ctk.CTkFont(size=11)).grid(
             row=1,column=0,padx=14,pady=(0,6),sticky="w")
+
+        self._bulk_contacts: List[Contact] = []
+        self._bulk_messages: Dict[str, str] = {}
 
         def import_contacts():
             path = filedialog.askopenfilename(
@@ -1069,8 +1175,13 @@ class CardCreatorV2(ctk.CTkFrame):
                 return
             try:
                 result = UniversalDataImporter().import_file(path)
-                self._contacts = result.contacts
-                count_var.set(f"✅ {result.total} contacts loaded")
+                self._bulk_contacts = _rows_to_contacts(result.contacts)
+                self._bulk_messages = {}
+                skipped = len(result.contacts) - len(self._bulk_contacts)
+                count_var.set(
+                    f"✅ {len(self._bulk_contacts)} contacts loaded"
+                    + (f" ({skipped} skipped — no valid phone/email)" if skipped else ""))
+                _set_ai_status("Not generated yet")
             except Exception as ex:
                 messagebox.showerror("Error", str(ex), parent=dlg)
 
@@ -1085,98 +1196,223 @@ class CardCreatorV2(ctk.CTkFrame):
                            border_width=1,border_color=T.BG_BORDER)
         ch.grid(row=2,column=0,padx=20,pady=(0,10),sticky="ew")
         ch.grid_columnconfigure((0,1),weight=1)
-        ctk.CTkLabel(ch,text="📡 Send Channel",
-                     font=ctk.CTkFont(size=13,weight="bold"),
-                     text_color=T.TEXT_HEAD).grid(
-            row=0,column=0,columnspan=2,padx=14,pady=(12,8),sticky="w")
+        _step_header(ch, 2, "Channel & Consent")
 
         channel_var = ctk.StringVar(value="whatsapp")
         ctk.CTkRadioButton(ch,text="📱 WhatsApp",
                            variable=channel_var,value="whatsapp",
                            text_color=T.TEXT_MUTED).grid(
-            row=1,column=0,padx=14,pady=(0,12),sticky="w")
+            row=1,column=0,padx=14,pady=(0,8),sticky="w")
         ctk.CTkRadioButton(ch,text="📧 Email (HTML card)",
                            variable=channel_var,value="email",
                            text_color=T.TEXT_MUTED).grid(
-            row=1,column=1,padx=14,pady=(0,12),sticky="w")
+            row=1,column=1,padx=14,pady=(0,8),sticky="w")
 
-        # Progress
+        consent_var = ctk.BooleanVar(value=False)
+        ctk.CTkCheckBox(ch, text="I have consent from these contacts to message them",
+                         variable=consent_var, text_color=T.TEXT_MUTED,
+                         font=ctk.CTkFont(size=11)).grid(
+            row=2,column=0,columnspan=2,padx=14,pady=(0,12),sticky="w")
+
+        # Step 3 — AI personalization
+        af = ctk.CTkFrame(dlg,fg_color=T.BG_SURFACE,corner_radius=14,
+                           border_width=1,border_color=T.BG_BORDER)
+        af.grid(row=4,column=0,padx=20,pady=(0,10),sticky="ew")
+        af.grid_columnconfigure(0,weight=1)
+        _step_header(af, 3, "🤖 AI Personalization")
+        ai_status_pill = _pill(af, "Not generated yet")
+        ai_status_pill.grid(row=1,column=0,padx=14,pady=(0,10),sticky="w")
+
+        def _set_ai_status(text, fg=None, text_color=None):
+            ai_status_pill.configure(text=text, fg_color=fg or T.BADGE_BG,
+                                      text_color=text_color or T.TEXT_MUTED)
+
+        def generate_personalization():
+            if not self._bulk_contacts:
+                messagebox.showwarning("No Contacts","Import contacts first.",parent=dlg)
+                return
+            api_key = self.main_window._ai_api_key.get()
+            if not api_key:
+                messagebox.showwarning("No API key",
+                    "Add your Anthropic API key in Settings → AI Cards first.", parent=dlg)
+                return
+
+            desc_box = next(
+                (s["data"].get("_text_box") for s in self._sections if s["type"] == "text"), None)
+            features_box = next(
+                (s["data"].get("_box") for s in self._sections if s["type"] == "features"), None)
+            card_summary = {
+                "tagline": self._mtag.get(),
+                "description": desc_box.get("1.0", "end").strip() if desc_box else "",
+                "features": [
+                    line.strip(" ✅")
+                    for line in (features_box.get("1.0", "end") if features_box else "").splitlines()
+                    if line.strip()
+                ],
+            }
+            channel = channel_var.get()
+            contact_dicts = [
+                {"key": _contact_key(c), "name": c.name, "phone": c.phone,
+                 "email": c.email, "custom_fields": c.custom_fields}
+                for c in self._bulk_contacts if _contact_key(c)
+            ]
+
+            btn_ai.configure(state="disabled")
+            _set_ai_status("Personalizing messages…")
+
+            def _ai_failed(msg):
+                btn_ai.configure(state="normal")
+                _set_ai_status(f"⚠ {msg}", fg=T.BADGE_BG, text_color=T.DANGER_ON_BADGE)
+
+            def _ai_done(messages):
+                self._bulk_messages = messages
+                btn_ai.configure(state="normal")
+                missing = len(self._bulk_contacts) - len(messages)
+                if missing:
+                    _set_ai_status(
+                        f"✅ Personalized {len(messages)}/{len(self._bulk_contacts)} — "
+                        f"{missing} skipped (generation failed)",
+                        fg=T.BADGE_BG, text_color=T.DANGER_ON_BADGE)
+                else:
+                    _set_ai_status(
+                        f"✅ Personalized {len(messages)}/{len(self._bulk_contacts)} contacts",
+                        fg=T.BADGE_BG, text_color=T.SUCCESS)
+
+            def worker():
+                try:
+                    messages = ai_service.generate_personalized_messages(
+                        card_summary, contact_dicts, api_key, channel)
+                except AIServiceError as ex:
+                    dlg.after(0, lambda: _ai_failed(str(ex)))
+                    return
+                dlg.after(0, lambda: _ai_done(messages))
+
+            threading.Thread(target=worker, daemon=True).start()
+
+        btn_ai = ctk.CTkButton(af, text="✨ Generate personalized messages",
+                                fg_color=T.ACCENT, hover_color=T.ACCENT_HOVER,
+                                text_color=T.TEXT_HEAD,
+                                command=generate_personalization)
+        btn_ai.grid(row=2,column=0,padx=14,pady=(0,12),sticky="ew")
+
+        # Step 4 — Review & send
         pf = ctk.CTkFrame(dlg,fg_color=T.BG_SURFACE,corner_radius=14,
                            border_width=1,border_color=T.BG_BORDER)
-        pf.grid(row=3,column=0,padx=20,pady=(0,10),sticky="ew")
+        pf.grid(row=5,column=0,padx=20,pady=(0,10),sticky="ew")
         pf.grid_columnconfigure(0,weight=1)
+        _step_header(pf, 4, "Review & Send")
 
         prog = ctk.CTkProgressBar(pf,progress_color=T.SUCCESS)
-        prog.grid(row=0,column=0,padx=14,pady=(12,4),sticky="ew")
+        prog.grid(row=1,column=0,padx=14,pady=(0,4),sticky="ew")
         prog.set(0)
         prog_lbl = ctk.CTkLabel(pf,text="Ready.",
                                  text_color=T.TEXT_MUTED,font=ctk.CTkFont(size=11))
-        prog_lbl.grid(row=1,column=0,padx=14,pady=(0,12),sticky="w")
+        prog_lbl.grid(row=2,column=0,padx=14,pady=(0,12),sticky="w")
 
         stop_flag = threading.Event()
 
+        def log_entry(to, channel, status):
+            self._send_log.insert(0, {
+                "time": datetime.now().strftime("%H:%M:%S"),
+                "to": to, "channel": channel, "status": status, "read": False,
+            })
+
         def do_send():
-            if not self._contacts:
+            if not self._bulk_contacts:
                 messagebox.showwarning("No Contacts","Import contacts first.",parent=dlg)
                 return
+            if self.main_window.consent_required_var.get() and not consent_var.get():
+                messagebox.showwarning("Consent Required",
+                    "Confirm recipient consent before sending.", parent=dlg)
+                return
+            sendable = [c for c in self._bulk_contacts if _contact_key(c) in self._bulk_messages]
+            if not sendable:
+                messagebox.showwarning("No Messages",
+                    "Generate personalized messages first.", parent=dlg)
+                return
+            if len(sendable) > self.main_window.daily_limit_var.get():
+                messagebox.showwarning("Daily Limit",
+                    "Contacts to send exceed the configured daily limit "
+                    "(Settings → Campaign Safety).", parent=dlg)
+                return
             if not messagebox.askyesno("Confirm",
-                f"Send card to {len(self._contacts)} contacts via {channel_var.get()}?",
-                parent=dlg):
+                f"Send AI-personalized card to {len(sendable)} contacts via "
+                f"{channel_var.get()}?", parent=dlg):
                 return
 
             stop_flag.clear()
             btn_send.configure(state="disabled")
             btn_stop.configure(state="normal")
+            channel = channel_var.get()
+            total = len(sendable)
 
             def worker():
-                total  = len(self._contacts)
-                sent   = 0
-                failed = 0
+                sent = failed = 0
+                if channel == "whatsapp":
+                    messages = [self._bulk_messages[_contact_key(c)] for c in sendable]
 
-                for i,c in enumerate(self._contacts):
-                    if stop_flag.is_set():
-                        break
+                    def progress_cb(current, total_, description):
+                        def upd():
+                            prog.set(current / total_ if total_ else 0)
+                            prog_lbl.configure(text=f"{description} ({current}/{total_})")
+                        dlg.after(0, upd)
 
-                    name  = c.get("name","")
-                    phone = c.get("phone","")
-                    email = c.get("email","")
-                    ts    = datetime.now().strftime("%H:%M:%S")
+                    def event_cb(kind, payload):
+                        if kind == "message":
+                            log_entry(payload.get("phone", ""), "whatsapp",
+                                      payload.get("status", "unknown"))
 
-                    if channel_var.get() == "whatsapp":
-                        # WhatsApp web link (opens browser per contact)
-                        meta = self._collect_meta()
-                        msg = (f"*{meta['app_name']}* — {meta['org']}\n\n"
-                               f"Dear {name},\n\n"
-                               f"Please check this link for full details:\n"
-                               f"{meta.get('website','')}\n\n"
-                               f"📞 {meta['wa']}\n✉️ {meta['email']}")
-                        clean = phone.replace(" ","").replace("+","")
-                        url   = f"https://wa.me/{clean}?text={msg[:500]}"
-                        status = "sent"
-                    else:
-                        # Email: mark as sent (actual SMTP via email tab)
-                        status = "sent" if email else "skipped"
+                    try:
+                        result = self.main_window.whatsapp_sender.send_messages(
+                            contacts=sendable, messages=messages,
+                            delay=self.main_window.delay_var.get(),
+                            use_jitter=self.main_window.jitter_var.get(),
+                            max_messages=self.main_window.daily_limit_var.get(),
+                            progress_callback=progress_cb, event_callback=event_cb,
+                        )
+                        sent, failed = result.get("sent", 0), result.get("failed", 0)
+                    except Exception as ex:
+                        failed = total
+                        dlg.after(0, lambda: messagebox.showerror(
+                            "Send failed", str(ex), parent=dlg))
+                else:
+                    meta = self._collect_meta()
+                    recipients = []
+                    for c in sendable:
+                        body_text = self._bulk_messages[_contact_key(c)]
+                        html_body = (
+                            "<html><body style='font-family:sans-serif;line-height:1.6;"
+                            f"color:#222'><p>{safe_text(body_text).replace(chr(10), '<br>')}</p>"
+                            "<hr style='border:none;border-top:1px solid #ddd'>"
+                            f"<p style='font-size:12px;color:#888'>{safe_text(meta['app_name'])}"
+                            f" · {safe_text(meta['org'])}</p></body></html>"
+                        )
+                        subject = (f"{meta['app_name']} — {meta['tagline']}"
+                                   if meta['tagline'] else meta['app_name'])
+                        recipients.append((c, subject, html_body))
 
-                    self._send_log.insert(0, {
-                        "time":    ts,
-                        "to":      name or phone or email,
-                        "channel": channel_var.get(),
-                        "status":  status,
-                        "read":    False,
-                    })
-                    sent += 1
+                    def progress_cb(sent_n, total_, to_addr):
+                        def upd():
+                            prog.set(sent_n / total_ if total_ else 0)
+                            prog_lbl.configure(text=f"Sent → {to_addr} ({sent_n}/{total_})")
+                            log_entry(to_addr, "email", "sent")
+                        dlg.after(0, upd)
 
-                    def upd(s=sent,t=total,st=status,nm=name):
-                        prog.set(s/t)
-                        prog_lbl.configure(text=f"{st.upper()} → {nm} ({s}/{t})")
-                    dlg.after(0, upd)
-                    time.sleep(0.3)
+                    try:
+                        result = self.main_window._send_email_campaign(
+                            recipients, f"AI Card — {meta['app_name']}",
+                            progress_callback=progress_cb, stop_flag=stop_flag)
+                        sent, failed = result["sent"], result["failed"]
+                    except Exception as ex:
+                        failed = total
+                        dlg.after(0, lambda: messagebox.showerror(
+                            "Send failed", str(ex), parent=dlg))
 
                 def finish():
                     btn_send.configure(state="normal")
                     btn_stop.configure(state="disabled")
                     prog.set(1)
-                    prog_lbl.configure(text=f"Done! Sent: {sent}")
+                    prog_lbl.configure(text=f"Done! Sent: {sent}  Failed: {failed}")
                     self._refresh_stats()
                     messagebox.showinfo("Done",f"Sent: {sent}\nFailed: {failed}",parent=dlg)
                 dlg.after(0, finish)
@@ -1188,7 +1424,7 @@ class CardCreatorV2(ctk.CTkFrame):
             prog_lbl.configure(text="Stopping...")
 
         btn_row = ctk.CTkFrame(dlg,fg_color="transparent")
-        btn_row.grid(row=4,column=0,padx=20,pady=(0,20),sticky="ew")
+        btn_row.grid(row=6,column=0,padx=20,pady=(0,20),sticky="ew")
         btn_row.grid_columnconfigure(0,weight=1)
         btn_send = ctk.CTkButton(btn_row,text="🚀 Start Sending",
                                   fg_color=T.SUCCESS,hover_color=T.SUCCESS,
@@ -1236,6 +1472,62 @@ class CardCreatorV2(ctk.CTkFrame):
         c = colorchooser.askcolor(title="Pick color", color=self._accent)
         if c and c[1]:
             self._accent = c[1]
+
+    def _generate_card_with_ai(self) -> None:
+        if self.main_window is None:
+            messagebox.showwarning("Unavailable", "AI generation isn't available in this context.")
+            return
+        api_key = self.main_window._ai_api_key.get()
+        if not api_key:
+            messagebox.showwarning(
+                "No API key",
+                "Add your Anthropic API key in Settings → AI Cards before generating.")
+            return
+        description = self._ai_desc_box.get("1.0", "end").strip()
+        if not description:
+            messagebox.showwarning("Describe your product", "Enter a short product description first.")
+            return
+
+        self._ai_generate_btn.configure(state="disabled")
+        self._ai_status_var.set("Generating…")
+
+        def worker():
+            try:
+                data = ai_service.generate_card_copy(
+                    description, api_key, list(CARD_STYLE_TEMPLATES.keys()))
+            except AIServiceError as ex:
+                self.after(0, lambda: self._on_ai_generate_failed(str(ex)))
+                return
+            self.after(0, lambda: self._apply_ai_card_copy(data))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_ai_generate_failed(self, message: str) -> None:
+        self._ai_generate_btn.configure(state="normal")
+        self._ai_status_var.set("")
+        messagebox.showerror("AI generation failed", message)
+
+    def _apply_ai_card_copy(self, data: dict) -> None:
+        self._ai_generate_btn.configure(state="normal")
+        self._ai_status_var.set("✅ Generated — review and adjust below.")
+
+        features = data.get("features") or []
+        APP_PRESETS["Custom"] = {
+            "icon": data.get("icon") or "⭐",
+            "tagline": data.get("tagline", ""),
+            "accent": APP_PRESETS["Custom"].get("accent", "#6c63ff"),
+            "description": data.get("description", ""),
+            "features": "\n".join(f"✅ {f}" for f in features),
+            "price": data.get("price", ""),
+            "old_price": data.get("old_price", ""),
+            "price_note": data.get("price_note", ""),
+        }
+        self._load_preset("Custom")
+
+        style_name = data.get("style_name")
+        if style_name in CARD_STYLE_TEMPLATES:
+            self._template_var.set(style_name)
+            self._apply_card_template(style_name)
 
     def _load_preset(self, name: str):
         preset = APP_PRESETS.get(name, {})
@@ -1290,5 +1582,6 @@ def build_card_creator_view(main_window) -> None:
     frame = main_window._new_view_container("Cards", scrollable=False)
     frame.grid_rowconfigure(0, weight=1)
     frame.grid_columnconfigure(0, weight=1)
-    tab = CardCreatorV2(frame)
+    tab = CardCreatorV2(frame, main_window=main_window)
     tab.grid(row=0, column=0, sticky="nsew")
+    main_window.card_creator_tab = tab

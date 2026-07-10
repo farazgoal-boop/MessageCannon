@@ -47,6 +47,8 @@ from ..database.db_manager import DatabaseManager
 from ..models import Contact, Template, Campaign, MessageLog, MessageStatus
 from ..utils.constants import APP_NAME, APP_VERSION, WINDOW_HEIGHT, WINDOW_WIDTH
 from . import theme as T
+from ..core import ai_service
+from ..core.ai_service import AIServiceError
 from ..utils.crypto import encrypt_secret, decrypt_secret
 from ..utils.license_manager import LicenseManager
 from ..utils.logger import Logger
@@ -236,6 +238,7 @@ class MainWindow(ctk.CTk):
         self.contact_selection_vars: Dict[str, BooleanVar] = {}
         self.sidebar_buttons: Dict[str, ctk.CTkButton] = {}
         self.sidebar_accent_bars: Dict[str, ctk.CTkFrame] = {}
+        self.sidebar_btn_frames: Dict[str, tk.Frame] = {}
         self.view_frames: Dict[str, ctk.CTkFrame] = {}
         self.view_containers: Dict[str, object] = {}
         self.activity_items: List[str] = []
@@ -416,8 +419,25 @@ class MainWindow(ctk.CTk):
         if self.license_dialog is not None and self.license_dialog.winfo_exists():
             self._sync_widget_theme(self.license_dialog)
         if hasattr(self, "_compose_em_body"):
-            self._compose_em_body.configure(bg=T.BG_INNER, fg=T.TEXT_HEAD,
-                                            insertbackground=T.TEXT_HEAD)
+            self._compose_em_body.configure(
+                bg=T.resolve(T.BG_INNER), fg=T.resolve(T.TEXT_HEAD),
+                insertbackground=T.resolve(T.TEXT_HEAD))
+
+        # Raw tk.* widgets bypass CTk's automatic tuple-color resolution —
+        # re-apply resolved colors explicitly on every theme toggle.
+        active_view = getattr(self, "_active_view", None)
+        for name, frame in self.sidebar_btn_frames.items():
+            if frame.winfo_exists():
+                frame.configure(bg=T.resolve(T.BG_MAIN))
+        for name, bar in self.sidebar_accent_bars.items():
+            if bar.winfo_exists():
+                bar.configure(bg=T.resolve(T.ACCENT if name == active_view else T.BG_MAIN))
+        if hasattr(self, "_reports_chart_host") and self._reports_chart_host.winfo_exists():
+            self._reports_chart_host.configure(bg=T.resolve(T.BG_INNER))
+        card_creator = getattr(self, "card_creator_tab", None)
+        if card_creator is not None and hasattr(card_creator, "_preview_host"):
+            if card_creator._preview_host.winfo_exists():
+                card_creator._preview_host.configure(bg=T.resolve(T.BG_INNER))
 
     def _bind_scrollable_frame_mousewheel(self, scrollable_frame: ctk.CTkScrollableFrame) -> None:
         canvas = getattr(scrollable_frame, "_parent_canvas", None)
@@ -524,10 +544,10 @@ class MainWindow(ctk.CTk):
             ("Settings",  "⚙", "Settings"),
         ]
         for view_name, icon, label in nav_items:
-            btn_frame = tk.Frame(nav_frame, bg=T.BG_MAIN)
+            btn_frame = tk.Frame(nav_frame, bg=T.resolve(T.BG_MAIN))
             btn_frame.pack(fill="x", pady=2)
 
-            accent_bar = tk.Frame(btn_frame, width=4, bg=T.BG_MAIN)
+            accent_bar = tk.Frame(btn_frame, width=4, bg=T.resolve(T.BG_MAIN))
             accent_bar.pack(side="left", fill="y", padx=(0, 4))
 
             button = ctk.CTkButton(
@@ -547,6 +567,7 @@ class MainWindow(ctk.CTk):
 
             self.sidebar_buttons[view_name] = button
             self.sidebar_accent_bars[view_name] = accent_bar
+            self.sidebar_btn_frames[view_name] = btn_frame
 
         # ── TOP BAR (white) ────────────────────────────────────────────────
         self.content = ctk.CTkFrame(self, fg_color=T.BG_MAIN, corner_radius=0)
@@ -1313,8 +1334,8 @@ class MainWindow(ctk.CTk):
                          font=ctk.CTkFont(size=11)).grid(row=0, column=i + 1, padx=4)
 
         self._compose_em_body = tk.Text(
-            em_left, wrap="word", bg=T.BG_INNER, fg=T.TEXT_HEAD,
-            insertbackground=T.TEXT_HEAD, font=("Courier New", 10),
+            em_left, wrap="word", bg=T.resolve(T.BG_INNER), fg=T.resolve(T.TEXT_HEAD),
+            insertbackground=T.resolve(T.TEXT_HEAD), font=("Courier New", 10),
             borderwidth=0, highlightthickness=0, relief="flat")
         self._compose_em_body.insert("1.0",
             "<p>Dear <strong>{name}</strong>,</p>\n<p>Your message here.</p>")
@@ -1473,96 +1494,115 @@ class MainWindow(ctk.CTk):
         self.compose_progress.set(0)
         self.progress_status_var.set("Connecting to SMTP…")
 
+        subject_template = self._em_subj_var.get()
+
+        def sub(text, m):
+            for k, v in m.items():
+                text = text.replace(f"{{{k}}}", str(v))
+            return text
+
+        recipients = []
+        for contact in contacts:
+            vars_map = {
+                "name": contact.name, "email": contact.email,
+                "phone": contact.phone, "sender": self._em_from_name.get(),
+            }
+            vars_map.update(contact.custom_fields)
+            recipients.append(
+                (contact, sub(subject_template, vars_map), sub(html_template, vars_map)))
+
+        campaign_name = f"Email {datetime.now().strftime('%Y-%m-%d %H:%M')}"
+
         def worker():
+            def progress(sent, total, to_addr):
+                def _upd():
+                    self.progress_status_var.set(f"Sent: {sent} / {total} — {to_addr}")
+                    self.compose_progress.set(sent / total)
+                self.after(0, _upd)
+
             try:
-                ctx = ssl.create_default_context()
-                conn = smtplib.SMTP(
-                    self._em_host.get(), int(self._em_port.get() or 587), timeout=10)
-                conn.starttls(context=ctx)
-                conn.login(self._em_user.get(), self._em_pass.get())
+                result = self._send_email_campaign(
+                    recipients, campaign_name,
+                    progress_callback=progress, stop_flag=self._em_stop_flag)
             except Exception as ex:
                 self.after(0, lambda: self.progress_status_var.set(f"⚠ SMTP error: {ex}"))
                 return
 
-            db = DatabaseManager()
-            total = len(contacts)
-            campaign_record = Campaign(
-                name=f"Email {datetime.now().strftime('%Y-%m-%d %H:%M')}",
-                message_template=self._em_subj_var.get(),
-                total_contacts=total,
-                message_delay=int(float(self._em_delay.get() or 5)),
-                use_jitter=False,
-            )
-            campaign_id = db.add_campaign(campaign_record)
-            sent = 0
-
-            for contact in contacts:
-                if self._em_stop_flag.is_set():
-                    break
-                to_addr = contact.email.strip()
-                vars_map = {
-                    "name": contact.name, "email": contact.email,
-                    "phone": contact.phone, "sender": self._em_from_name.get(),
-                }
-                vars_map.update(contact.custom_fields)
-
-                def sub(text, m=vars_map):
-                    for k, v in m.items():
-                        text = text.replace(f"{{{k}}}", str(v))
-                    return text
-
-                html = sub(html_template)
-                try:
-                    msg = MIMEMultipart("alternative")
-                    msg["Subject"] = sub(self._em_subj_var.get())
-                    msg["From"] = f"{self._em_from_name.get()} <{self._em_from_addr.get()}>"
-                    msg["To"] = to_addr
-                    msg.attach(MIMEText(html, "html", "utf-8"))
-                    conn.sendmail(self._em_from_addr.get(), to_addr, msg.as_string())
-                    sent += 1
-                    db.add_message_log(MessageLog(
-                        campaign_id=campaign_id, contact_email=to_addr,
-                        contact_name=contact.name, subject=msg["Subject"],
-                        message_text=html, status=MessageStatus.SENT,
-                        sent_at=datetime.now(),
-                    ))
-                    progress = sent / total
-
-                    def _upd(s=sent, p=progress, e=to_addr):
-                        self.progress_status_var.set(f"Sent: {s} / {total} — {e}")
-                        self.compose_progress.set(p)
-
-                    self.after(0, _upd)
-                except Exception as ex:
-                    db.add_message_log(MessageLog(
-                        campaign_id=campaign_id, contact_email=to_addr,
-                        contact_name=contact.name, subject=self._em_subj_var.get(),
-                        message_text=html, status=MessageStatus.FAILED,
-                        error_message=str(ex),
-                    ))
-
-                time.sleep(float(self._em_delay.get() or 5))
-
-            try:
-                conn.quit()
-            except Exception:
-                pass
-
-            if campaign_id:
-                db.update_campaign(campaign_id, sent, total - sent)
-
-            failed = total - sent
-
             def finish():
                 self.compose_progress.set(1)
-                self.progress_status_var.set(f"Done — ✅ {sent} sent  ❌ {failed} failed")
+                self.progress_status_var.set(
+                    f"Done — ✅ {result['sent']} sent  ❌ {result['failed']} failed")
                 messagebox.showinfo("Email campaign complete",
-                                    f"Sent: {sent}\nFailed: {failed}")
+                                    f"Sent: {result['sent']}\nFailed: {result['failed']}")
 
             self.after(0, finish)
 
         self._em_send_thread = threading.Thread(target=worker, daemon=True)
         self._em_send_thread.start()
+
+    def _send_email_campaign(self, recipients, campaign_name: str,
+                              progress_callback=None, stop_flag=None) -> dict:
+        """Send pre-resolved (contact, subject, html_body) tuples over SMTP,
+        logging each to message_logs. Shared by Compose and AI Cards sends.
+
+        Returns {"sent": int, "failed": int, "campaign_id": Optional[int]}.
+        """
+        total = len(recipients)
+        ctx = ssl.create_default_context()
+        conn = smtplib.SMTP(self._em_host.get(), int(self._em_port.get() or 587), timeout=10)
+        conn.starttls(context=ctx)
+        conn.login(self._em_user.get(), self._em_pass.get())
+
+        db = DatabaseManager()
+        campaign_record = Campaign(
+            name=campaign_name,
+            message_template="",
+            total_contacts=total,
+            message_delay=int(float(self._em_delay.get() or 5)),
+            use_jitter=False,
+        )
+        campaign_id = db.add_campaign(campaign_record)
+        sent = 0
+
+        for contact, subject, html_body in recipients:
+            if stop_flag is not None and stop_flag.is_set():
+                break
+            to_addr = (contact.email or "").strip()
+            try:
+                msg = MIMEMultipart("alternative")
+                msg["Subject"] = subject
+                msg["From"] = f"{self._em_from_name.get()} <{self._em_from_addr.get()}>"
+                msg["To"] = to_addr
+                msg.attach(MIMEText(html_body, "html", "utf-8"))
+                conn.sendmail(self._em_from_addr.get(), to_addr, msg.as_string())
+                sent += 1
+                db.add_message_log(MessageLog(
+                    campaign_id=campaign_id, contact_email=to_addr,
+                    contact_name=contact.name, subject=subject,
+                    message_text=html_body, status=MessageStatus.SENT,
+                    sent_at=datetime.now(),
+                ))
+                if progress_callback:
+                    progress_callback(sent, total, to_addr)
+            except Exception as ex:
+                db.add_message_log(MessageLog(
+                    campaign_id=campaign_id, contact_email=to_addr,
+                    contact_name=contact.name, subject=subject,
+                    message_text=html_body, status=MessageStatus.FAILED,
+                    error_message=str(ex),
+                ))
+
+            time.sleep(float(self._em_delay.get() or 5))
+
+        try:
+            conn.quit()
+        except Exception:
+            pass
+
+        if campaign_id:
+            db.update_campaign(campaign_id, sent, total - sent)
+
+        return {"sent": sent, "failed": total - sent, "campaign_id": campaign_id}
 
     def _build_reports_view(self) -> None:
         frame = self._new_view_frame("Reports")
@@ -1677,7 +1717,7 @@ class MainWindow(ctk.CTk):
         ctk.CTkLabel(chart_frame, text="Read vs Unread",
                      font=ctk.CTkFont(size=13, weight="bold"),
                      text_color=T.TEXT_HEAD).pack(anchor="w", padx=14, pady=(10, 4))
-        self._reports_chart_host = tk.Frame(chart_frame, bg=T.BG_INNER, height=180)
+        self._reports_chart_host = tk.Frame(chart_frame, bg=T.resolve(T.BG_INNER), height=180)
         self._reports_chart_host.pack(fill="x", padx=8, pady=(0, 12))
         self._reports_chart = ReportsChart(self._reports_chart_host)
 
@@ -2119,6 +2159,24 @@ class MainWindow(ctk.CTk):
         ctk.CTkButton(ai_actions, text="Clear key", corner_radius=8,
                       fg_color=T.DANGER, hover_color=T.DANGER_HOVER, text_color=T.TEXT_HEAD,
                       command=_clear_ai_key).pack(side="left", padx=(0, 10))
+
+        def _test_ai_key():
+            api_key = self._ai_api_key.get()
+            if not api_key:
+                messagebox.showwarning("No API key", "Save an API key first.")
+                return
+
+            def worker():
+                try:
+                    ai_service.validate_api_key(api_key)
+                    self.after(0, lambda: messagebox.showinfo("AI key test", "Key is valid ✅"))
+                except AIServiceError as ex:
+                    self.after(0, lambda: messagebox.showerror("AI key test failed", str(ex)))
+            threading.Thread(target=worker, daemon=True).start()
+
+        ctk.CTkButton(ai_actions, text="Test key", corner_radius=8,
+                      fg_color=T.BG_INNER, hover_color=T.BG_BORDER, text_color=T.TEXT_HEAD,
+                      command=_test_ai_key).pack(side="left", padx=(0, 10))
         ctk.CTkLabel(ai_actions, textvariable=self._ai_key_status_var,
                      text_color=T.TEXT_MUTED, font=ctk.CTkFont(size=12)).pack(side="left")
 
@@ -2160,7 +2218,7 @@ class MainWindow(ctk.CTk):
             )
             if name in self.sidebar_accent_bars:
                 self.sidebar_accent_bars[name].configure(
-                    bg=T.ACCENT if is_active else T.BG_MAIN
+                    bg=T.resolve(T.ACCENT if is_active else T.BG_MAIN)
                 )
         if view_name == "Campaigns":
             self._refresh_campaigns_home()
