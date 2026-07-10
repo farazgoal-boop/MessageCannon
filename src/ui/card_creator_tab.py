@@ -1391,10 +1391,10 @@ class CardCreatorV2(ctk.CTkFrame):
                                    if meta['tagline'] else meta['app_name'])
                         recipients.append((c, subject, html_body))
 
-                    def progress_cb(sent_n, total_, to_addr):
+                    def progress_cb(sent_n, failed_n, total_, to_addr):
                         def upd():
-                            prog.set(sent_n / total_ if total_ else 0)
-                            prog_lbl.configure(text=f"Sent → {to_addr} ({sent_n}/{total_})")
+                            prog.set((sent_n + failed_n) / total_ if total_ else 0)
+                            prog_lbl.configure(text=f"Sent → {to_addr} ({sent_n + failed_n}/{total_})")
                             log_entry(to_addr, "email", "sent")
                         dlg.after(0, upd)
 

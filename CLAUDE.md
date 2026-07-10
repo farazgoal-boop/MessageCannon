@@ -252,5 +252,66 @@ Template dialog rendering with the right pre-filled category. **Not verified**: 
 successful AI generation against the real Anthropic API (needs your key) and delivery of a real
 message (needs real SMTP/WhatsApp session, already covered by Phase 1).
 
-Phases 4-5 (bulletproof bulk send, app-wide polish) and the signature transition animation not
-yet started.
+### Phase 4 — Bulletproof Bulk Send (complete, branch `phase-4-bulk-send`)
+
+Both send channels (WhatsApp via `_execute_whatsapp_send`, Email via `_execute_email_send`) now
+share one pattern, implemented in `src/ui/send_dialogs.py`
+(`SendConfirmationDialog`/`SendReportDialog`) and wired from `main_window.py`:
+
+- **Pre-send confirmation**: `show_send_confirmation(...)` — recipient count, per-message delay,
+  computed ETA, and a real rendered preview of the first 3 actual messages (not placeholder text)
+  before anything sends.
+- **Live progress**: rich `"{sent} sent · {failed} failed · {ETA} remaining ({n}/{total})"` status
+  during the send, for both channels.
+- **Pause/resume**: WhatsApp already had `pause_event`/`stop_event` in `WhatsAppSender`; Email
+  gained the same via a new `self._em_pause_event` (`threading.Event`, checked with
+  `pause_event.wait()` once per contact in `_send_email_campaign`'s loop, alongside the existing
+  `stop_flag`). `_toggle_pause()` branches on `self._compose_channel_var.get() == "Email"` to
+  target the right event.
+- **Failure tracking with reasons**: both `_execute_whatsapp_send`'s `on_event` closure and
+  `_send_email_campaign`'s `except` branch capture `(label, reason)` pairs and the original
+  `(contact, message)`/`(contact, subject, body)` so a failure list can be shown and re-sent.
+- **Post-send report + retry**: `SendReportDialog` shows sent/failed/delivery-rate plus a
+  per-contact failure reason list, a "Retry Failed Only (N)" button that re-invokes the same
+  `_execute_*_send` method with just the failed recipients (so retry-of-a-retry works too,
+  verified), and an Export button. WhatsApp's export reuses the existing report export; Email's
+  export is a new lightweight CSV writer (`_show_email_report`'s `export_csv`) since no
+  `message_logs` CSV export existed before this phase — scoped as CSV only, no PDF, consistent
+  with how "Keep Both" duplicate resolution was scoped down in Phase 2.
+
+**Real bugs found and fixed while verifying with a mocked-network driver (not just noted — fixed
+at the root cause):**
+1. `_send_email_campaign`'s return dict was never updated to include the new `failed_items` list
+   after the failure-tracking rewrite — the report dialog's Retry button silently never appeared
+   (`on_retry_failed` always evaluated to `None` because `result.get("failed_items", [])` was
+   always empty). Caught by driving a real failing send (mocked SMTP, deterministic 1-in-3
+   failure) end-to-end and noticing "Found retry button: False" in the verification script rather
+   than trusting the code read. Fixed by adding `"failed_items": failed_items` to the return dict
+   and switching `"failed"` to `len(failed_items)` (more accurate than the old `total - sent`,
+   which double-counted contacts skipped by an early `stop_flag` as "failed").
+2. `card_creator_tab.py`'s AI Cards bulk-send `progress_cb` still used the pre-Phase-4 3-argument
+   signature (`sent, total, to_addr`); `_send_email_campaign`'s `progress_callback` now passes 4
+   args (`sent, failed, total, to_addr`) after the failure-tracking rewrite. Would have thrown
+   `TypeError` on the very first progress tick of any AI Cards email send. Found by grepping for
+   every caller of `_send_email_campaign` before considering the phase done, not just checking the
+   call site that was being actively edited. Fixed by updating `progress_cb`'s signature to match.
+
+Verified end-to-end via two mocked-network programmatic drivers + screenshots (real UI/business
+logic code path throughout — only `smtplib.SMTP` and `WhatsAppSender.send_messages` were replaced
+with deterministic fakes that fail every 3rd send, since neither a real SMTP server nor a real
+WhatsApp Web session is available in this sandbox): pre-send confirmation dialog with accurate
+recipient/delay/ETA and real message preview for both channels; live progress text; pause
+correctly halting the send loop (`pause_event.is_set()` confirmed `False` mid-send) and resume
+continuing it; a report dialog with correct sent/failed counts and per-contact reasons; "Retry
+Failed Only" correctly re-sending just the failed subset; a second report after retry (proving
+retry-of-a-retry works, since one retried contact failed again by the same deterministic rule).
+Test campaign/message_log rows written to the real local database during verification were
+identified and deleted afterward (WhatsApp's fake sender never touched the DB, so only email-side
+cleanup was needed).
+
+**Not verified by Claude** (needs real credentials/session, consistent with what Phase 1 already
+flagged as user-only): an actual successful SMTP send, a real WhatsApp Web session, and rate-limit
+behavior against real provider throttling — the mocked drivers prove the send/pause/retry/report
+*wiring* is correct, not real-world deliverability.
+
+Phase 5 (app-wide polish) and the signature transition animation not yet started.

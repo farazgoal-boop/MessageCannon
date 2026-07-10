@@ -318,6 +318,8 @@ class MainWindow(ctk.CTk):
         self._ai_key_visible   = BooleanVar(value=False)
         self._ai_key_status_var = StringVar(value="No API key saved")
         self._em_stop_flag = threading.Event()
+        self._em_pause_event = threading.Event()
+        self._em_pause_event.set()  # set = running; cleared = paused
         self._em_contacts_list: list = []
         self._em_count_var = StringVar(value="No email contacts imported")
         self._em_compose_count_var = StringVar(value="0 contacts with email")
@@ -1480,8 +1482,26 @@ class MainWindow(ctk.CTk):
                       corner_radius=8, command=self._dispatch_stop).grid(
             row=0, column=2, padx=8, pady=(14, 8))
 
+        # ── Rate limit — editable right here, not just in Settings ─────────────
+        rate_row = ctk.CTkFrame(controls, fg_color="transparent")
+        rate_row.grid(row=1, column=0, columnspan=4, padx=16, pady=(0, 8), sticky="ew")
+        rate_row.grid_columnconfigure(1, weight=1)
+        ctk.CTkLabel(rate_row, text="Delay between sends", text_color=T.TEXT_MUTED,
+                     font=ctk.CTkFont(size=11)).grid(row=0, column=0, padx=(0, 10), sticky="w")
+        self._compose_delay_slider = ctk.CTkSlider(
+            rate_row, from_=10, to=120, number_of_steps=110,
+            command=self._on_compose_delay_change, progress_color=T.ACCENT)
+        self._compose_delay_slider.set(self.delay_var.get())
+        self._compose_delay_slider.grid(row=0, column=1, sticky="ew", padx=(0, 10))
+        self._compose_delay_label = ctk.CTkLabel(rate_row, text=f"{self.delay_var.get()} sec",
+                                                  text_color=T.TEXT_HEAD, width=50)
+        self._compose_delay_label.grid(row=0, column=2, sticky="e")
+        self._send_rate_warning_var = StringVar(value="")
+        ctk.CTkLabel(rate_row, textvariable=self._send_rate_warning_var, text_color=T.DANGER_ON_BADGE,
+                     font=ctk.CTkFont(size=10)).grid(row=1, column=0, columnspan=3, sticky="w", pady=(2, 0))
+
         prog_row = ctk.CTkFrame(controls, fg_color="transparent")
-        prog_row.grid(row=1, column=0, columnspan=4, padx=16, pady=(0, 12), sticky="ew")
+        prog_row.grid(row=2, column=0, columnspan=4, padx=16, pady=(0, 12), sticky="ew")
         prog_row.grid_columnconfigure(0, weight=1)
         ctk.CTkLabel(prog_row, textvariable=self.progress_status_var,
                      text_color=T.TEXT_MUTED, font=ctk.CTkFont(size=11), anchor="w").grid(
@@ -1490,6 +1510,7 @@ class MainWindow(ctk.CTk):
                                                     progress_color=T.ACCENT, fg_color=T.BG_SURFACE)
         self.compose_progress.grid(row=1, column=0, sticky="ew", pady=(4, 0))
         self.compose_progress.set(0)
+        self._update_send_rate_warning()
 
     def _on_channel_switch(self, channel: str) -> None:
         if channel == "WhatsApp":
@@ -1499,7 +1520,7 @@ class MainWindow(ctk.CTk):
         else:
             self._wa_compose_frame.grid_remove()
             self._em_compose_frame.grid()
-            self._compose_pause_btn.configure(state="disabled")
+            self._compose_pause_btn.configure(state="normal")
             self._refresh_compose_email_recipients()
 
     def _dispatch_send(self) -> None:
@@ -1546,15 +1567,6 @@ class MainWindow(ctk.CTk):
         if not html_template.strip():
             self.progress_status_var.set("⚠ Email body is empty.")
             return
-        if not messagebox.askyesno("Confirm send",
-                f"Send email to {len(contacts)} contacts?\n\n"
-                "Make sure you have their consent (legal requirement)."):
-            return
-
-        self._em_stop_flag.clear()
-        self.compose_progress.set(0)
-        self.progress_status_var.set("Connecting to SMTP…")
-
         subject_template = self._em_subj_var.get()
 
         def sub(text, m):
@@ -1572,19 +1584,35 @@ class MainWindow(ctk.CTk):
             recipients.append(
                 (contact, sub(subject_template, vars_map), sub(html_template, vars_map)))
 
+        preview_lines = [f"To: {c.name or c.email}\nSubject: {subj}\n{body}"
+                          for c, subj, body in recipients[:3]]
+
+        from .send_dialogs import show_send_confirmation
+        show_send_confirmation(
+            self, "email", len(recipients), float(self._em_delay.get() or 5), preview_lines,
+            on_confirm=lambda: self._execute_email_send(recipients))
+
+    def _execute_email_send(self, recipients: list) -> None:
+        """Real send for a specific list of (contact, subject, html_body)
+        tuples — used both for the initial campaign and Retry Failed Only."""
+        self._em_stop_flag.clear()
+        self._em_pause_event.set()
+        self.compose_progress.set(0)
+        self.progress_status_var.set("Connecting to SMTP…")
         campaign_name = f"Email {datetime.now().strftime('%Y-%m-%d %H:%M')}"
 
         def worker():
-            def progress(sent, total, to_addr):
+            def progress(sent, failed, total, to_addr):
                 def _upd():
-                    self.progress_status_var.set(f"Sent: {sent} / {total} — {to_addr}")
-                    self.compose_progress.set(sent / total)
+                    self.progress_status_var.set(
+                        f"{sent} sent · {failed} failed — {to_addr} ({sent + failed}/{total})")
+                    self.compose_progress.set((sent + failed) / total if total else 0)
                 self.after(0, _upd)
 
             try:
                 result = self._send_email_campaign(
-                    recipients, campaign_name,
-                    progress_callback=progress, stop_flag=self._em_stop_flag)
+                    recipients, campaign_name, progress_callback=progress,
+                    stop_flag=self._em_stop_flag, pause_event=self._em_pause_event)
             except Exception as ex:
                 self.after(0, lambda: self.progress_status_var.set(f"⚠ SMTP error: {ex}"))
                 return
@@ -1593,20 +1621,49 @@ class MainWindow(ctk.CTk):
                 self.compose_progress.set(1)
                 self.progress_status_var.set(
                     f"Done — ✅ {result['sent']} sent  ❌ {result['failed']} failed")
-                messagebox.showinfo("Email campaign complete",
-                                    f"Sent: {result['sent']}\nFailed: {result['failed']}")
+                self._show_email_report(result)
 
             self.after(0, finish)
 
         self._em_send_thread = threading.Thread(target=worker, daemon=True)
         self._em_send_thread.start()
 
+    def _show_email_report(self, result: dict) -> None:
+        from .send_dialogs import show_send_report
+        failed_details = [(c.name or c.email, reason) for c, _s, _b, reason in result.get("failed_items", [])]
+        failed_recipients = [(c, s, b) for c, s, b, _r in result.get("failed_items", [])]
+
+        def retry_failed() -> None:
+            self._execute_email_send(failed_recipients)
+
+        def export_csv() -> None:
+            path = filedialog.asksaveasfilename(
+                title="Export Email Report", defaultextension=".csv",
+                filetypes=[("CSV files", "*.csv")], initialfile="email_campaign_report.csv")
+            if not path:
+                return
+            import csv as csv_module
+            with open(path, "w", newline="", encoding="utf-8-sig") as handle:
+                writer = csv_module.writer(handle)
+                writer.writerow(["contact", "email", "status", "reason"])
+                for label, reason in failed_details:
+                    writer.writerow([label, "", "failed", reason])
+                writer.writerow([f"{result['sent']} sent total", "", "sent", ""])
+            messagebox.showinfo("Exported", f"Saved to:\n{path}", parent=self)
+
+        show_send_report(
+            self, "email", result.get("sent", 0), result.get("failed", 0), failed_details,
+            on_retry_failed=retry_failed if failed_recipients else None,
+            on_export=export_csv,
+        )
+
     def _send_email_campaign(self, recipients, campaign_name: str,
-                              progress_callback=None, stop_flag=None) -> dict:
+                              progress_callback=None, stop_flag=None, pause_event=None) -> dict:
         """Send pre-resolved (contact, subject, html_body) tuples over SMTP,
         logging each to message_logs. Shared by Compose and AI Cards sends.
 
-        Returns {"sent": int, "failed": int, "campaign_id": Optional[int]}.
+        Returns {"sent": int, "failed": int, "campaign_id": Optional[int],
+        "failed_items": [(contact, subject, html_body, reason), ...]}.
         """
         total = len(recipients)
         ctx = ssl.create_default_context()
@@ -1624,10 +1681,13 @@ class MainWindow(ctk.CTk):
         )
         campaign_id = db.add_campaign(campaign_record)
         sent = 0
+        failed_items = []
 
         for contact, subject, html_body in recipients:
             if stop_flag is not None and stop_flag.is_set():
                 break
+            if pause_event is not None:
+                pause_event.wait()
             to_addr = (contact.email or "").strip()
             try:
                 msg = MIMEMultipart("alternative")
@@ -1644,14 +1704,17 @@ class MainWindow(ctk.CTk):
                     sent_at=datetime.now(),
                 ))
                 if progress_callback:
-                    progress_callback(sent, total, to_addr)
+                    progress_callback(sent, len(failed_items), total, to_addr)
             except Exception as ex:
+                failed_items.append((contact, subject, html_body, str(ex)))
                 db.add_message_log(MessageLog(
                     campaign_id=campaign_id, contact_email=to_addr,
                     contact_name=contact.name, subject=subject,
                     message_text=html_body, status=MessageStatus.FAILED,
                     error_message=str(ex),
                 ))
+                if progress_callback:
+                    progress_callback(sent, len(failed_items), total, to_addr)
 
             time.sleep(float(self._em_delay.get() or 5))
 
@@ -1663,7 +1726,8 @@ class MainWindow(ctk.CTk):
         if campaign_id:
             db.update_campaign(campaign_id, sent, total - sent)
 
-        return {"sent": sent, "failed": total - sent, "campaign_id": campaign_id}
+        return {"sent": sent, "failed": len(failed_items), "campaign_id": campaign_id,
+                 "failed_items": failed_items}
 
     def _test_smtp_connection(self, on_result=None) -> None:
         """Real SMTP connect+login test against the current _em_* fields.
@@ -2567,8 +2631,24 @@ class MainWindow(ctk.CTk):
         rounded = int(round(value))
         self.delay_var.set(rounded)
         self.delay_label.configure(text=f"{rounded} sec")
+        if hasattr(self, "_compose_delay_slider"):
+            self._compose_delay_slider.set(rounded)
+            self._compose_delay_label.configure(text=f"{rounded} sec")
+            self._update_send_rate_warning()
         self._update_compose_summary()
         self._save_settings()
+
+    def _on_compose_delay_change(self, value: float) -> None:
+        rounded = int(round(value))
+        self._compose_delay_label.configure(text=f"{rounded} sec")
+        self._on_delay_change(value)
+
+    def _update_send_rate_warning(self) -> None:
+        if self.delay_var.get() < 15:
+            self._send_rate_warning_var.set(
+                "⚠ Very short delay increases the risk of your account being flagged — 30s+ is safer.")
+        else:
+            self._send_rate_warning_var.set("")
 
     def _on_daily_limit_change(self, value: float) -> None:
         rounded = int(round(value))
@@ -3045,27 +3125,57 @@ class MainWindow(ctk.CTk):
             rendered, _ = self.message_processor.substitute_variables(template, contact)
             messages.append(rendered)
 
+        preview_lines = [
+            f"To: {c.name or c.phone}\n{m}"
+            for c, m in list(zip(selected_contacts, messages))[:3]
+        ]
+
+        from .send_dialogs import show_send_confirmation
+        show_send_confirmation(
+            self, "whatsapp", len(selected_contacts), self.delay_var.get(), preview_lines,
+            on_confirm=lambda: self._execute_whatsapp_send(selected_contacts, messages))
+
+    def _execute_whatsapp_send(self, contacts: List[Contact], messages: List[str]) -> None:
+        """Real send for a specific (contacts, messages) pair — used both for
+        the initial campaign and for "Retry Failed Only" with a subset."""
+        self._send_failed_details: List[tuple] = []   # (label, reason) for the report dialog
+        self._send_failed_pairs: List[tuple] = []      # (Contact, message) for retry
+        self._send_start_time = time.time()
+
+        contacts_by_phone = {c.phone: c for c in contacts}
+        messages_by_phone = dict(zip((c.phone for c in contacts), messages))
+
         self.compose_progress.set(0)
         self.progress_status_var.set("Preparing campaign...")
-        self._log_activity(f"Campaign queued for {len(selected_contacts)} contacts")
+        self._log_activity(f"Campaign queued for {len(contacts)} contacts")
+
+        def on_event(kind: str, payload: Dict[str, object]) -> None:
+            if kind == "message" and payload.get("status") == "failed":
+                phone = str(payload.get("phone", ""))
+                contact = contacts_by_phone.get(phone)
+                label = (contact.name if contact and contact.name else phone) or "Unknown"
+                reason = str(payload.get("error") or "Unknown error")
+                self._send_failed_details.append((label, reason))
+                if contact is not None:
+                    self._send_failed_pairs.append((contact, messages_by_phone.get(phone, "")))
+            self._handle_sender_event(kind, payload)
 
         def worker() -> None:
             try:
                 result = self.whatsapp_sender.send_messages(
-                    contacts=selected_contacts,
+                    contacts=contacts,
                     messages=messages,
                     delay=self.delay_var.get(),
                     use_jitter=self.jitter_var.get(),
                     max_messages=self.daily_limit_var.get(),
                     progress_callback=self._handle_send_progress,
-                    event_callback=self._handle_sender_event,
+                    event_callback=on_event,
                 )
-                self.after(0, lambda: self.progress_status_var.set(
-                    f"Completed: {result.get('sent', 0)} sent, {result.get('failed', 0)} failed"
-                ))
-                self._log_activity(
-                    f"Campaign completed with {result.get('sent', 0)} sent and {result.get('failed', 0)} failed"
-                )
+                sent = result.get("sent", 0)
+                failed = result.get("failed", 0)
+                self.after(0, lambda: self.progress_status_var.set(f"Completed: {sent} sent, {failed} failed"))
+                self._log_activity(f"Campaign completed with {sent} sent and {failed} failed")
+                self.after(0, lambda: self._show_whatsapp_report(sent, failed))
             except Exception as exc:
                 Logger.error(f"Campaign send failed: {exc}")
                 self.after(0, lambda: self.progress_status_var.set("Campaign failed"))
@@ -3076,7 +3186,31 @@ class MainWindow(ctk.CTk):
         self.send_thread = threading.Thread(target=worker, daemon=True)
         self.send_thread.start()
 
+    def _show_whatsapp_report(self, sent: int, failed: int) -> None:
+        from .send_dialogs import show_send_report
+        failed_pairs = list(getattr(self, "_send_failed_pairs", []))
+        failed_details = list(getattr(self, "_send_failed_details", []))
+
+        def retry_failed() -> None:
+            self._execute_whatsapp_send([c for c, _m in failed_pairs], [m for _c, m in failed_pairs])
+
+        show_send_report(
+            self, "whatsapp", sent, failed, failed_details,
+            on_retry_failed=retry_failed if failed_pairs else None,
+            on_export=self._export_report,
+        )
+
     def _toggle_pause(self) -> None:
+        if self._compose_channel_var.get() == "Email":
+            if self._em_pause_event.is_set():
+                self._em_pause_event.clear()
+                self.progress_status_var.set("Paused")
+                self._log_activity("Email campaign paused")
+            else:
+                self._em_pause_event.set()
+                self.progress_status_var.set("Resumed")
+                self._log_activity("Email campaign resumed")
+            return
         status = self.whatsapp_sender.get_status()
         if not status.get("is_sending"):
             return
@@ -3098,8 +3232,15 @@ class MainWindow(ctk.CTk):
         self.after(0, lambda: self._update_send_progress(current, total, status_text))
 
     def _update_send_progress(self, current: int, total: int, status_text: str) -> None:
+        from .send_dialogs import format_eta
         self.compose_progress.set(current / total if total else 0)
-        self.progress_status_var.set(f"{status_text} ({current}/{total})")
+        failed_count = len(getattr(self, "_send_failed_details", []))
+        sent_count = max(0, current - failed_count)
+        elapsed = time.time() - getattr(self, "_send_start_time", time.time())
+        avg_per_item = (elapsed / current) if current else float(self.delay_var.get())
+        eta = max(0, total - current) * avg_per_item
+        self.progress_status_var.set(
+            f"{sent_count} sent · {failed_count} failed · {format_eta(eta)} remaining ({current}/{total})")
 
     def _handle_sender_event(self, event_type: str, payload: Dict[str, object]) -> None:
         self.after(0, lambda: self._apply_sender_event(event_type, payload))
