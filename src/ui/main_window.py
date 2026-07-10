@@ -950,9 +950,15 @@ class MainWindow(ctk.CTk):
         self.after(0, self._on_close)
 
     def _build_campaigns_home_view(self) -> None:
-        frame = self._new_view_frame("Campaigns")
+        # Scrollable outer container: the hero card + recent-campaigns preview +
+        # activity log can together exceed window height, especially on smaller
+        # screens. A fixed-height frame with an inner weight=1 row silently
+        # squeezes that row to ~0px when content overflows (found and fixed
+        # during Phase 5 polish — real campaign data was being rendered but
+        # was visually invisible). Scrolling the whole view, like Settings/
+        # History/Contacts already do, guarantees every section stays visible.
+        frame = self._new_view_container("Campaigns", scrollable=True)
         frame.grid_columnconfigure(0, weight=1)
-        frame.grid_rowconfigure(2, weight=1)
 
         # ── Hero: new campaign + 2 summary stats ──────────────────────────────
         hero = ctk.CTkFrame(frame, fg_color=T.BG_SURFACE, corner_radius=14,
@@ -1030,15 +1036,17 @@ class MainWindow(ctk.CTk):
 
         list_card = ctk.CTkFrame(frame, fg_color=T.BG_SURFACE, corner_radius=14,
                                  border_width=1, border_color=T.BG_BORDER)
-        list_card.grid(row=2, column=0, sticky="nsew")
-        list_card.grid_rowconfigure(0, weight=1)
+        list_card.grid(row=2, column=0, sticky="ew")
         list_card.grid_columnconfigure(0, weight=1)
 
-        self.home_campaigns_scroll = ctk.CTkScrollableFrame(
-            list_card, fg_color="transparent", corner_radius=0)
-        self.home_campaigns_scroll.grid(row=0, column=0, sticky="nsew", padx=12, pady=12)
+        # Plain frame, not a nested CTkScrollableFrame: the outer view now
+        # scrolls as a whole (see _new_view_container(scrollable=True) above),
+        # and this preview is already capped at 10 rows via
+        # get_recent_campaigns_summary(limit=10) — "View all" opens the real,
+        # independently-scrollable History list for anything beyond that.
+        self.home_campaigns_scroll = ctk.CTkFrame(list_card, fg_color="transparent", corner_radius=0)
+        self.home_campaigns_scroll.grid(row=0, column=0, sticky="ew", padx=12, pady=12)
         self.home_campaigns_scroll.grid_columnconfigure(0, weight=1)
-        self._bind_scrollable_frame_mousewheel(self.home_campaigns_scroll)
 
         # Activity log — visible at row 3
         act_hdr = ctk.CTkFrame(frame, fg_color="transparent")
