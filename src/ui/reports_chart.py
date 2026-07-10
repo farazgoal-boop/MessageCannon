@@ -27,11 +27,12 @@ class ReportsChart:
 
     @staticmethod
     def _bg() -> str:
-        return T.BG_SURFACE if ctk.get_appearance_mode().lower() == "light" else T.BG_MAIN
+        token = T.BG_SURFACE if ctk.get_appearance_mode().lower() == "light" else T.BG_MAIN
+        return T.resolve(token)
 
     @staticmethod
     def _text_color() -> str:
-        return T.TEXT_MUTED
+        return T.resolve(T.TEXT_MUTED)
 
     def update(self, read_count: int, unread_count: int) -> bool:
         """Redraw only when values change. Returns True if a redraw occurred."""
@@ -53,7 +54,7 @@ class ReportsChart:
                 self.ax.pie(
                     [read_count, unread_count],
                     labels=["Read", "Unread"],
-                    colors=[T.SUCCESS, T.ACCENT],
+                    colors=[T.resolve(T.SUCCESS), T.resolve(T.ACCENT)],
                     autopct="%1.0f%%",
                     textprops={"color": txt, "fontsize": 9},
                 )
