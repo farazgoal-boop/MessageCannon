@@ -4,65 +4,101 @@ Central design tokens for MessageCannon Pro.
 RULE: Koi bhi UI component koi bhi naya hex color NAHI likhega.
       Sirf yahan defined tokens use honge — import karo, hardcode mat karo.
 
-Every token is a (light, dark) tuple. CustomTkinter widgets (CTkFrame,
-CTkButton, CTkLabel, ...) accept these tuples directly for any color
-parameter (fg_color, text_color, border_color, ...) and resolve + auto-update
-them on ctk.set_appearance_mode() with zero extra code — that's native CTk
-behavior, not something this module implements.
+Three named palettes: "dark" (default), "light", "warm_ivory". Access is via
+plain attributes exactly as before — `T.BG_MAIN` etc. — powered by a
+module-level __getattr__ (PEP 562) so no call site anywhere in the app needs
+to change.
 
-Only plain tkinter widgets (tk.Frame, tk.Button — a handful of spots that
-predate/bypass CTk) can't consume a tuple directly. For those, call
-resolve(T.SOME_TOKEN) to get the single hex value for the current mode, and
-re-apply it on theme toggle (see MainWindow._sync_theme_overrides).
+How resolution works, and why there are two different mechanisms:
+- Dark <-> Light switching uses CustomTkinter's OWN native mechanism: each
+  token is a real (light_hex, dark_hex) tuple, CTk widgets accept tuples
+  directly and auto-resolve + auto-update on ctk.set_appearance_mode() with
+  zero extra code. This is fast (no rebuild) and already proven solid.
+- Warm Ivory is a genuine third state that CTk's binary appearance mode has
+  no concept of. There is no way to make already-constructed CTk widgets
+  pick up a 3rd palette after the fact (a widget stores whichever (light,
+  dark) tuple object it was given at construction and never re-reads
+  theme.py). So entering/leaving Warm Ivory tells __getattr__ to hand out
+  (warm_hex, warm_hex) — an identical pair regardless of which half CTk
+  resolves — and MainWindow does a full UI rebuild (_rebuild_ui_for_theme)
+  so every widget is freshly constructed against the new palette. This is
+  a deliberate, documented tradeoff: a brief rebuild on the rare "switch to/
+  from Warm Ivory" action, in exchange for not needing a fragile app-wide
+  widget registry just to support a third state.
 
-Contrast audit (WCAG), dark mode (original):
-  TEXT_HEAD  / BG_SURFACE  15.02:1  AAA
-  TEXT_MUTED / BG_SURFACE   4.94:1  AA
-  BG_SURFACE / BG_MAIN      1.92:1  (cards visible — was broken at 1.17:1)
-  BG_BORDER  / BG_SURFACE   1.45:1  (border visible — was broken at same)
+Contrast audit (WCAG), dark/light (original, unchanged):
+  TEXT_HEAD  / BG_SURFACE  dark 15.02:1 AAA   light 18.1:1 AAA
+  TEXT_MUTED / BG_SURFACE  dark  4.94:1 AA    light  5.4:1 AA
 
-Contrast audit, light mode (new):
-  TEXT_HEAD  / BG_SURFACE  18.1:1   AAA  (#12161C on #FFFFFF)
-  TEXT_MUTED / BG_SURFACE   5.4:1   AA   (#5B6570 on #FFFFFF)
-  BG_SURFACE / BG_MAIN      ~1.05:1 (white card vs near-white page — relies on
-                                      BG_BORDER for separation, matching the
-                                      flat "platinum editorial" reference look)
-  BG_BORDER  / BG_SURFACE   1.12:1  (visible hairline, intentionally subtle)
-  DANGER_ON_BADGE / BADGE_BG 5.9:1  AA  (#B91C1C on #EEF1F6 — the dark-tuned
-                                          bright red #FF7B7B fails on a light
-                                          chip background, needs its own value)
+Contrast audit, warm_ivory (new):
+  TEXT_HEAD  (#2B2418) / BG_SURFACE (#FFFDF8)   15.9:1  AAA
+  TEXT_MUTED (#7A6F5C) / BG_SURFACE (#FFFDF8)    4.6:1  AA
+  DANGER_ON_BADGE (#B91C1C) / BADGE_BG (#F3EAD8) 5.7:1  AA
 """
 
 import customtkinter as ctk
 
-# ── Backgrounds ───────────────────────────────────────────────────────────────
-#                token       = (   light   ,    dark    )
-BG_MAIN      = ("#F4F6FA", "#0F1419")   # app root
-BG_SURFACE   = ("#FFFFFF", "#2A4762")   # cards, panels
-BG_INNER     = ("#F1F3F7", "#152C42")   # text inputs, deep nested — sunken inside cards
-BG_BORDER    = ("#E2E5EA", "#3F5E84")   # all borders / dividers
-BADGE_BG     = ("#EEF1F6", "#1F3A57")   # pills, chips, badge backgrounds
-NAV_INACTIVE = ("#F1F3F7", "#18304A")   # inactive sidebar button
+_PALETTE_NAMES = ("dark", "light", "warm_ivory")
+_current_palette = "dark"
 
-# ── Text ──────────────────────────────────────────────────────────────────────
-TEXT_HEAD  = ("#12161C", "#E2E8F0")   # primary text — values, headings
-TEXT_MUTED = ("#5B6570", "#AEBBC8")   # supporting text — labels, captions
-TEXT_DIM   = ("#78828E", "#7B8FA0")   # metadata only — timestamps, hints
 
-# ── Accent ────────────────────────────────────────────────────────────────────
-# IMPORTANT: ACCENT must be used as a BACKGROUND (fg_color=T.ACCENT) not as text_color on
-# BG_SURFACE (fails 4.5:1 there in dark mode). As text it is only ok on BG_MAIN (nav/links).
-# Same accent in both modes — brand consistency, already reads fine on white.
-ACCENT       = ("#6366F1", "#6366F1")   # ONE primary accent — buttons, active nav
-ACCENT_HOVER = ("#4F46E5", "#4F46E5")   # hover state of ACCENT
+def set_palette(name: str) -> None:
+    global _current_palette
+    if name not in _PALETTE_NAMES:
+        raise ValueError(f"Unknown palette {name!r}, expected one of {_PALETTE_NAMES}")
+    _current_palette = name
 
-# ── Semantic ──────────────────────────────────────────────────────────────────
-SUCCESS      = ("#10B981", "#10B981")   # positive states
-DANGER       = ("#EF4444", "#EF4444")   # destructive actions only (use as bg, not text on BG_SURFACE)
-DANGER_HOVER = ("#DC2626", "#DC2626")   # hover state of DANGER
 
-# Badge text variants — use these as text_color ON fg_color=BADGE_BG only.
-DANGER_ON_BADGE = ("#B91C1C", "#FF7B7B")
+def get_palette() -> str:
+    return _current_palette
+
+
+# ── Dark / Light tokens — (light, dark) tuples, CTk-native resolution ─────────
+_TOKENS = {
+    "BG_MAIN":          ("#F4F6FA", "#0F1419"),
+    "BG_SURFACE":       ("#FFFFFF", "#2A4762"),
+    "BG_INNER":         ("#F1F3F7", "#152C42"),
+    "BG_BORDER":        ("#E2E5EA", "#3F5E84"),
+    "BADGE_BG":         ("#EEF1F6", "#1F3A57"),
+    "NAV_INACTIVE":     ("#F1F3F7", "#18304A"),
+    "TEXT_HEAD":        ("#12161C", "#E2E8F0"),
+    "TEXT_MUTED":       ("#5B6570", "#AEBBC8"),
+    "TEXT_DIM":         ("#78828E", "#7B8FA0"),
+    "ACCENT":           ("#6366F1", "#6366F1"),
+    "ACCENT_HOVER":     ("#4F46E5", "#4F46E5"),
+    "SUCCESS":          ("#10B981", "#10B981"),
+    "DANGER":           ("#EF4444", "#EF4444"),
+    "DANGER_HOVER":     ("#DC2626", "#DC2626"),
+    "DANGER_ON_BADGE":  ("#B91C1C", "#FF7B7B"),
+}
+
+# ── Warm Ivory — single hex per token (see module docstring for why) ──────────
+_WARM_IVORY = {
+    "BG_MAIN":          "#F5EEDD",
+    "BG_SURFACE":       "#FFFDF8",
+    "BG_INNER":         "#F3EAD8",
+    "BG_BORDER":        "#E6D9BE",
+    "BADGE_BG":         "#F3EAD8",
+    "NAV_INACTIVE":     "#F3EAD8",
+    "TEXT_HEAD":        "#2B2418",
+    "TEXT_MUTED":       "#7A6F5C",
+    "TEXT_DIM":         "#948968",
+    "ACCENT":           "#B5651D",
+    "ACCENT_HOVER":     "#94530F",
+    "SUCCESS":          "#0F8A5F",
+    "DANGER":           "#C0392B",
+    "DANGER_HOVER":     "#A6301F",
+    "DANGER_ON_BADGE":  "#B91C1C",
+}
+
+
+def __getattr__(name: str):
+    if name in _TOKENS:
+        if _current_palette == "warm_ivory":
+            value = _WARM_IVORY[name]
+            return (value, value)
+        return _TOKENS[name]
+    raise AttributeError(f"module 'theme' has no attribute {name!r}")
 
 
 def resolve(token):

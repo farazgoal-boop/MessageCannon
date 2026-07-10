@@ -1976,7 +1976,7 @@ class MainWindow(ctk.CTk):
                      text_color=T.TEXT_HEAD).grid(row=2, column=0, padx=16, pady=(0, 6), sticky="w")
         ctk.CTkOptionMenu(
             system_card,
-            values=["Dark", "Light", "System"],
+            values=["Dark", "Light", "Warm Ivory", "System"],
             variable=self.theme_var,
             command=self._on_theme_selected,
             fg_color=T.BG_SURFACE, button_color=T.BG_SURFACE,
@@ -2372,9 +2372,40 @@ class MainWindow(ctk.CTk):
         self._refresh_stats(update_text_feeds=True, update_dashboard_periods=True)
 
     def _apply_theme(self, selected_theme: str) -> None:
-        ctk.set_appearance_mode(selected_theme)
-        if hasattr(self, "view_host"):
+        prev_palette = T.get_palette()
+        if selected_theme == "Warm Ivory":
+            T.set_palette("warm_ivory")
+            ctk.set_appearance_mode("Light")
+        else:
+            ctk.set_appearance_mode(selected_theme)  # "Dark" / "Light" / "System"
+            T.set_palette("light" if ctk.get_appearance_mode() == "Light" else "dark")
+        new_palette = T.get_palette()
+
+        if not hasattr(self, "view_host"):
+            return  # still inside __init__, before _create_ui() — nothing to refresh yet
+
+        # Warm Ivory is a genuine 3rd palette CTk's binary appearance mode can't
+        # represent — already-built widgets can't pick it up in place, so a full
+        # rebuild is required entering or leaving it (see theme.py docstring).
+        entering_or_leaving_warm = (prev_palette == "warm_ivory") != (new_palette == "warm_ivory")
+        if entering_or_leaving_warm:
+            self.after_idle(self._rebuild_ui_for_theme)
+        else:
             self.after_idle(self._sync_theme_overrides)
+
+    def _rebuild_ui_for_theme(self) -> None:
+        """Full sidebar+content rebuild — the only way to apply Warm Ivory
+        (or leave it) to already-constructed widgets. Rare action (theme
+        switch), so the rebuild cost is an acceptable, documented tradeoff."""
+        prev_view = getattr(self, "_active_view", "Campaigns")
+        self.sidebar.destroy()
+        self.content.destroy()
+        self._create_ui()
+        self._sync_theme_overrides()
+        self._reload_contacts()
+        self._refresh_stats(update_text_feeds=True, update_dashboard_periods=True)
+        self._refresh_preview()
+        self._show_view(prev_view)
 
     def _on_theme_selected(self, selected_theme: str) -> None:
         self.theme_var.set(selected_theme)
