@@ -47,6 +47,7 @@ from ..database.db_manager import DatabaseManager
 from ..models import Contact, Template, Campaign, MessageLog, MessageStatus
 from ..utils.constants import APP_NAME, APP_VERSION, WINDOW_HEIGHT, WINDOW_WIDTH
 from . import theme as T
+from ..utils.crypto import encrypt_secret, decrypt_secret
 from ..utils.license_manager import LicenseManager
 from ..utils.logger import Logger
 
@@ -302,6 +303,9 @@ class MainWindow(ctk.CTk):
         self._em_delay     = StringVar(value="5")
         self._em_subj_var  = StringVar(value="Hello {name}!")
         self._em_tpl_var   = StringVar(value="(none)")
+        self._ai_api_key       = StringVar()
+        self._ai_key_visible   = BooleanVar(value=False)
+        self._ai_key_status_var = StringVar(value="No API key saved")
         self._em_stop_flag = threading.Event()
         self._em_contacts_list: list = []
         self._em_count_var = StringVar(value="No email contacts imported")
@@ -2058,6 +2062,66 @@ class MainWindow(ctk.CTk):
                       command=_test_smtp).grid(
             row=10, column=0, columnspan=2, padx=16, pady=(10, 16), sticky="w")
 
+        # ── AI Cards — BYO API key ────────────────────────────────────────────
+        ai_card = ctk.CTkFrame(frame, fg_color=T.BG_SURFACE, corner_radius=14,
+                               border_width=1, border_color=T.BG_BORDER)
+        ai_card.grid(row=4, column=0, columnspan=2, sticky="ew", pady=(10, 0))
+        ai_card.grid_columnconfigure(1, weight=1)
+
+        ctk.CTkLabel(ai_card, text="AI Cards — API Key",
+                     font=ctk.CTkFont(size=15, weight="bold"),
+                     text_color=T.TEXT_HEAD).grid(
+            row=0, column=0, columnspan=3, padx=16, pady=(16, 4), sticky="w")
+        ctk.CTkLabel(ai_card,
+                     text="Bring your own API key to unlock AI-assisted card copy and "
+                          "per-contact personalization. Stored encrypted on this device "
+                          "only — never sent anywhere except direct calls to your provider.",
+                     text_color=T.TEXT_MUTED, font=ctk.CTkFont(size=12),
+                     wraplength=700, justify="left").grid(
+            row=1, column=0, columnspan=3, padx=16, pady=(0, 12), sticky="w")
+
+        ctk.CTkLabel(ai_card, text="API key", text_color=T.TEXT_HEAD).grid(
+            row=2, column=0, padx=16, pady=6, sticky="w")
+        self._ai_key_entry = ctk.CTkEntry(
+            ai_card, textvariable=self._ai_api_key, show="●",
+            fg_color=T.BG_INNER, border_color=T.BG_BORDER, text_color=T.TEXT_HEAD)
+        self._ai_key_entry.grid(row=2, column=1, padx=(4, 8), pady=6, sticky="ew")
+
+        def _toggle_ai_key_visible():
+            visible = not self._ai_key_visible.get()
+            self._ai_key_visible.set(visible)
+            self._ai_key_entry.configure(show="" if visible else "●")
+            self._ai_key_toggle_btn.configure(text="Hide" if visible else "Show")
+
+        self._ai_key_toggle_btn = ctk.CTkButton(
+            ai_card, text="Show", width=70, corner_radius=8,
+            fg_color=T.BG_INNER, hover_color=T.BG_BORDER, text_color=T.TEXT_HEAD,
+            command=_toggle_ai_key_visible)
+        self._ai_key_toggle_btn.grid(row=2, column=2, padx=(0, 16), pady=6, sticky="e")
+
+        def _save_ai_key():
+            self._save_settings()
+            self._ai_key_status_var.set(
+                "API key saved (encrypted)" if self._ai_api_key.get() else "No API key saved")
+
+        def _clear_ai_key():
+            self._ai_api_key.set("")
+            _save_ai_key()
+
+        self._ai_key_entry.bind("<FocusOut>", lambda _e: _save_ai_key())
+        self._ai_key_entry.bind("<Return>",   lambda _e: _save_ai_key())
+
+        ai_actions = ctk.CTkFrame(ai_card, fg_color="transparent")
+        ai_actions.grid(row=3, column=0, columnspan=3, padx=16, pady=(0, 16), sticky="ew")
+        ctk.CTkButton(ai_actions, text="Save key", corner_radius=8,
+                      fg_color=T.ACCENT, hover_color=T.ACCENT_HOVER, text_color=T.TEXT_HEAD,
+                      command=_save_ai_key).pack(side="left", padx=(0, 10))
+        ctk.CTkButton(ai_actions, text="Clear key", corner_radius=8,
+                      fg_color=T.DANGER, hover_color=T.DANGER_HOVER, text_color=T.TEXT_HEAD,
+                      command=_clear_ai_key).pack(side="left", padx=(0, 10))
+        ctk.CTkLabel(ai_actions, textvariable=self._ai_key_status_var,
+                     text_color=T.TEXT_MUTED, font=ctk.CTkFont(size=12)).pack(side="left")
+
         self._update_settings_summary()
         self._update_daily_limit_warning()
 
@@ -2176,6 +2240,11 @@ class MainWindow(ctk.CTk):
         self._em_from_addr.set(str(settings.get("smtp_from_addr", "")))
         self._em_delay.set(str(settings.get("smtp_delay", "5")))
 
+        # AI Cards API key — encrypted at rest, decrypted only into memory here
+        ai_key = decrypt_secret(str(settings.get("ai_api_key_enc", "")))
+        self._ai_api_key.set(ai_key)
+        self._ai_key_status_var.set("API key saved (encrypted)" if ai_key else "No API key saved")
+
     def _save_settings(self) -> None:
         self.db.set_setting_json(
             self.SETTINGS_KEY,
@@ -2194,6 +2263,8 @@ class MainWindow(ctk.CTk):
                 "smtp_from_name":  self._em_from_name.get(),
                 "smtp_from_addr":  self._em_from_addr.get(),
                 "smtp_delay":      self._em_delay.get(),
+                # AI Cards
+                "ai_api_key_enc":  encrypt_secret(self._ai_api_key.get()),
             },
         )
         self._update_settings_summary()
