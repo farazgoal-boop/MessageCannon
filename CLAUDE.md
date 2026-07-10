@@ -51,6 +51,8 @@ src/
   main.py                    entry point, splash screen, dev/frozen-exe import bootstrap
   ui/
     main_window.py           THE app shell: nav, views, live email+WhatsApp send workers
+    setup_wizard.py          First-run setup wizard (Welcome → channel choice → per-channel
+                              creds/connect/test-send) — see "Setup Wizard" below
     card_creator_tab.py      HTML card builder (Card Creator V2) — see "Card Creator" below
     campaigns_tab.py         read-only campaign history list (build_campaigns_view)
     reports_chart.py         matplotlib pie chart (read vs unread), embedded via FigureCanvasTkAgg
@@ -106,3 +108,43 @@ Direction locked in 2026-07: AI-assisted card creation as an unlockable **premiu
 - **Scope**: AI generates card copy/design (headline, features, tagline, style pick) AND per-contact personalization of the outgoing message — real tailored phrasing using each imported contact's columns (not just `{name}` substitution), not just a single static card blasted to everyone.
 - **Must send for real.** Any AI-generated card campaign must go through the LIVE send pipelines above (`_start_email_from_compose` / `WhatsAppSender`), not a new mock. Do not replicate the Card Creator bulk-send simulation pattern.
 - Preserve the existing "no cloud, no subscription" positioning of the base app — the AI tier is opt-in and user-funded (their own API key), so the core product's privacy/pricing story stays intact.
+
+## UX overhaul — 5-phase plan, one phase at a time
+
+Direction locked 2026-07-11: a 5-phase UX pass (setup wizard → contact import validation →
+AI content variations → bulletproof bulk send → app-wide polish), each phase on its own branch
+off `main`, each proven with real execution (not claimed) before moving to the next.
+
+### Phase 1 — First-run Setup Wizard (complete, branch `phase-1-setup-wizard`)
+
+`src/ui/setup_wizard.py` — `SetupWizard(ctk.CTkToplevel)` / `show_setup_wizard(main_window, force_restart=False)`.
+
+- Flow: Welcome → channel choice (Email/WhatsApp/Both) → per selected channel in sequence:
+  credentials (Email only) → real test/connect → real test send → Done. "Both" walks the Email
+  sequence then the WhatsApp sequence back-to-back rather than a combined form.
+- Email step reuses `main_window`'s own `_em_*` StringVars directly (no separate storage) and
+  a newly-extracted `main_window._test_smtp_connection(on_result=None)` — same method Settings'
+  own "Test connection" button calls, so wizard and Settings can never drift apart.
+- WhatsApp step calls `whatsapp_sender.initialize()` in a background thread (same pattern as
+  the existing boot-time `_start_session_bootstrap`) — opens a real Chrome window for the user
+  to scan a QR code; no async/QR-image callback exists in `WhatsAppSender`, so this is the only
+  integration point available.
+- Progress persists in the existing `ui_preferences` settings blob (`setup_wizard_completed`,
+  `setup_wizard_skipped`, `setup_wizard_channels`, `setup_wizard_channel_index`,
+  `setup_wizard_substep`) via `main_window._save_wizard_progress(**kwargs)`. Closing the wizard
+  mid-flow just persists wherever it was — next launch resumes at that exact substep instead of
+  restarting (verified). "Skip for now" sticks (wizard won't auto-reopen) but surfaces a
+  dismissible "Finish setup" banner on the Campaigns/Dashboard view
+  (`MainWindow._refresh_setup_banner()`, called both at view-build time and live after Skip,
+  since the view is only constructed once at startup). Settings has a "Re-run Setup Wizard"
+  button (System Experience card) for redoing setup anytime, unrelated to the auto-open logic.
+- Verified end-to-end via a programmatic driver (direct method/button-command invocation +
+  screenshot capture, not mouse simulation — mouse-click automation proved unreliable in this
+  sandbox): fresh auto-open, real SMTP failure surfaced from an actual Gmail connection attempt
+  with wrong credentials (not a mock), resume-after-close-mid-wizard, skip-persists +
+  banner-appears-live. **Not verified by Claude**: a successful SMTP send (needs real
+  credentials) and the WhatsApp QR-scan step (needs a phone) — left for the user to confirm
+  live, per their own choice.
+
+Phases 2-5 (contact import validation, AI content variations, bulletproof bulk send, app-wide
+polish) not yet started.

@@ -335,6 +335,7 @@ class MainWindow(ctk.CTk):
         self._show_view("Campaigns")
 
         self.after(800, self._start_session_bootstrap)
+        self.after(900, self._maybe_show_setup_wizard)
         self.after(10000, self._periodic_refresh)
         self.after(2000, self._heartbeat_check)
 
@@ -982,6 +983,14 @@ class MainWindow(ctk.CTk):
             self.dashboard_cards[var_key] = val_lbl
             self.dashboard_card_meta[var_key] = meta_lbl
 
+        # Placeholder row, always present — populated/cleared by
+        # _refresh_setup_banner() since setup_wizard_skipped can flip to True
+        # *during* this session (wizard closed after the view was already built).
+        self.setup_banner_container = ctk.CTkFrame(hero, fg_color="transparent")
+        self.setup_banner_container.grid(row=2, column=0, sticky="ew")
+        self.setup_banner_container.grid_columnconfigure(0, weight=1)
+        self._refresh_setup_banner()
+
         # Compat stubs so _refresh_stats doesn't crash on old card keys
         for stub_key in ("Active Session", "License State"):
             self.dashboard_cards.setdefault(stub_key, ctk.CTkLabel(frame, text=""))
@@ -1604,6 +1613,37 @@ class MainWindow(ctk.CTk):
 
         return {"sent": sent, "failed": total - sent, "campaign_id": campaign_id}
 
+    def _test_smtp_connection(self, on_result=None) -> None:
+        """Real SMTP connect+login test against the current _em_* fields.
+
+        on_result(success: bool, message: str), called on the main thread.
+        Defaults to the Settings page's own messagebox popups when omitted —
+        callers like the setup wizard pass their own inline-status callback.
+        """
+        def default_result(success: bool, message: str) -> None:
+            if success:
+                messagebox.showinfo("SMTP test", message)
+            else:
+                messagebox.showerror("Connection failed", message)
+
+        callback = on_result or default_result
+
+        def worker():
+            try:
+                conn = smtplib.SMTP(
+                    self._em_host.get(), int(self._em_port.get()), timeout=10)
+                conn.starttls(context=ssl.create_default_context())
+                conn.login(self._em_user.get(), self._em_pass.get())
+                conn.quit()
+                self.after(0, lambda: callback(True, "Connection successful ✅"))
+            except smtplib.SMTPAuthenticationError:
+                self.after(0, lambda: callback(
+                    False, "Wrong username/password.\nFor Gmail use an App Password."))
+            except Exception as ex:
+                self.after(0, lambda: callback(False, str(ex)))
+
+        threading.Thread(target=worker, daemon=True).start()
+
     def _build_reports_view(self) -> None:
         frame = self._new_view_frame("Reports")
         frame.grid_rowconfigure(3, weight=1)
@@ -1958,7 +1998,12 @@ class MainWindow(ctk.CTk):
                       fg_color=T.DANGER, hover_color=T.DANGER_HOVER,
                       text_color=T.TEXT_HEAD,
                       command=self._reset_session).grid(
-            row=5, column=0, padx=16, pady=(0, 16), sticky="w")
+            row=5, column=0, padx=16, pady=(0, 8), sticky="w")
+        ctk.CTkButton(system_card, text="Re-run Setup Wizard", corner_radius=8,
+                      fg_color=T.ACCENT, hover_color=T.ACCENT_HOVER,
+                      text_color=T.TEXT_HEAD,
+                      command=self._reopen_setup_wizard).grid(
+            row=6, column=0, padx=16, pady=(0, 16), sticky="w")
 
         license_card = ctk.CTkFrame(frame, fg_color=T.BG_SURFACE, corner_radius=14,
                                     border_width=1, border_color=T.BG_BORDER)
@@ -2080,26 +2125,10 @@ class MainWindow(ctk.CTk):
             entry.bind("<FocusOut>", lambda _e: self._save_settings())
             entry.bind("<Return>",   lambda _e: self._save_settings())
 
-        def _test_smtp():
-            def worker():
-                try:
-                    conn = smtplib.SMTP(
-                        self._em_host.get(), int(self._em_port.get()), timeout=10)
-                    conn.starttls(context=ssl.create_default_context())
-                    conn.login(self._em_user.get(), self._em_pass.get())
-                    conn.quit()
-                    self.after(0, lambda: messagebox.showinfo("SMTP test", "Connection successful ✅"))
-                except smtplib.SMTPAuthenticationError:
-                    self.after(0, lambda: messagebox.showerror(
-                        "Auth failed", "Wrong username/password.\nFor Gmail use an App Password."))
-                except Exception as ex:
-                    self.after(0, lambda: messagebox.showerror("Connection failed", str(ex)))
-            threading.Thread(target=worker, daemon=True).start()
-
         ctk.CTkButton(smtp_card, text="Test connection",
                       fg_color=T.ACCENT, hover_color=T.ACCENT_HOVER, corner_radius=8,
                       text_color=T.TEXT_HEAD,
-                      command=_test_smtp).grid(
+                      command=self._test_smtp_connection).grid(
             row=10, column=0, columnspan=2, padx=16, pady=(10, 16), sticky="w")
 
         # ── AI Cards — BYO API key ────────────────────────────────────────────
@@ -2303,6 +2332,14 @@ class MainWindow(ctk.CTk):
         self._ai_api_key.set(ai_key)
         self._ai_key_status_var.set("API key saved (encrypted)" if ai_key else "No API key saved")
 
+        # First-run setup wizard progress (plain attrs, not Tk Variables —
+        # nothing binds to these continuously, only read/written at step transitions)
+        self.setup_wizard_completed = bool(settings.get("setup_wizard_completed", False))
+        self.setup_wizard_skipped = bool(settings.get("setup_wizard_skipped", False))
+        self.setup_wizard_channels = list(settings.get("setup_wizard_channels", []))
+        self.setup_wizard_channel_index = int(settings.get("setup_wizard_channel_index", 0))
+        self.setup_wizard_substep = str(settings.get("setup_wizard_substep", ""))
+
     def _save_settings(self) -> None:
         self.db.set_setting_json(
             self.SETTINGS_KEY,
@@ -2323,6 +2360,12 @@ class MainWindow(ctk.CTk):
                 "smtp_delay":      self._em_delay.get(),
                 # AI Cards
                 "ai_api_key_enc":  encrypt_secret(self._ai_api_key.get()),
+                # Setup wizard progress
+                "setup_wizard_completed":     self.setup_wizard_completed,
+                "setup_wizard_skipped":       self.setup_wizard_skipped,
+                "setup_wizard_channels":      self.setup_wizard_channels,
+                "setup_wizard_channel_index": self.setup_wizard_channel_index,
+                "setup_wizard_substep":       self.setup_wizard_substep,
             },
         )
         self._update_settings_summary()
@@ -2745,6 +2788,58 @@ class MainWindow(ctk.CTk):
                 self._log_activity(f"Session bootstrap failed: {exc}")
 
         threading.Thread(target=worker, daemon=True).start()
+
+    def _save_wizard_progress(self, **kwargs) -> None:
+        """Update setup-wizard progress fields and persist immediately, so
+        progress survives even if the app closes right after a step."""
+        for key in ("setup_wizard_completed", "setup_wizard_skipped",
+                    "setup_wizard_channels", "setup_wizard_channel_index",
+                    "setup_wizard_substep"):
+            if key in kwargs:
+                setattr(self, key, kwargs[key])
+        self._save_settings()
+
+    def _maybe_show_setup_wizard(self) -> None:
+        """Auto-open the first-run setup wizard, but only if the user has
+        never completed OR explicitly skipped it — skipping must stick."""
+        if self.setup_wizard_completed or self.setup_wizard_skipped:
+            return
+        from .setup_wizard import show_setup_wizard
+        show_setup_wizard(self)
+
+    def _reopen_setup_wizard(self) -> None:
+        """Explicit re-run, e.g. from a Settings button — always starts
+        from Welcome regardless of any saved progress."""
+        from .setup_wizard import show_setup_wizard
+        show_setup_wizard(self, force_restart=True)
+
+    def _resume_setup_wizard(self) -> None:
+        """Reopen from wherever the user left off — used by the Dashboard
+        'skipped setup' reminder banner (not a forced restart)."""
+        from .setup_wizard import show_setup_wizard
+        show_setup_wizard(self)
+
+    def _refresh_setup_banner(self) -> None:
+        """Rebuild the Dashboard's 'finish setup' reminder banner. Called at
+        Campaigns-view build time and again whenever wizard state changes
+        mid-session (e.g. the wizard is closed after Skip), since the view
+        itself is only built once at startup."""
+        if not hasattr(self, "setup_banner_container"):
+            return
+        for w in self.setup_banner_container.winfo_children():
+            w.destroy()
+        if not (self.setup_wizard_skipped and not self.setup_wizard_completed):
+            return
+        banner = ctk.CTkFrame(self.setup_banner_container, fg_color=T.BADGE_BG, corner_radius=10)
+        banner.grid(row=0, column=0, padx=20, pady=(0, 16), sticky="ew")
+        banner.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(banner, text="Finish setup to send email or WhatsApp campaigns →",
+                     text_color=T.ACCENT, font=ctk.CTkFont(size=12, weight="bold")).grid(
+            row=0, column=0, padx=14, pady=10, sticky="w")
+        ctk.CTkButton(banner, text="Resume setup", width=110, height=28, corner_radius=6,
+                      fg_color=T.ACCENT, hover_color=T.ACCENT_HOVER, text_color=T.TEXT_HEAD,
+                      font=ctk.CTkFont(size=11), command=self._resume_setup_wizard).grid(
+            row=0, column=1, padx=(0, 14), pady=10, sticky="e")
 
     def _reset_session(self) -> None:
         if not messagebox.askyesno("Reset Session", "Clear the saved WhatsApp session and require a fresh QR scan?"):
