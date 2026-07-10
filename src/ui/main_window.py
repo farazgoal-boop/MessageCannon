@@ -54,6 +54,8 @@ from ..database.db_manager import DatabaseManager
 from ..models import Contact, Template, Campaign, MessageLog, MessageStatus
 from ..utils.constants import APP_NAME, APP_VERSION, WINDOW_HEIGHT, WINDOW_WIDTH
 from . import theme as T
+from .toast import show_toast
+from .confirm_dialogs import show_danger_confirm
 from ..core import ai_service
 from ..core.ai_service import AIServiceError
 from ..utils.crypto import encrypt_secret, decrypt_secret
@@ -934,7 +936,7 @@ class MainWindow(ctk.CTk):
             self.license_dialog.grab_release()
             self.license_dialog.destroy()
         self.license_dialog = None
-        messagebox.showinfo("Activated", "Paid license activated successfully.")
+        show_toast(self, "Paid license activated successfully.", kind="success")
         self._log_activity("Commercial license activated")
         self._update_license_ui()
         self._start_session_bootstrap()
@@ -1649,7 +1651,7 @@ class MainWindow(ctk.CTk):
                 for label, reason in failed_details:
                     writer.writerow([label, "", "failed", reason])
                 writer.writerow([f"{result['sent']} sent total", "", "sent", ""])
-            messagebox.showinfo("Exported", f"Saved to:\n{path}", parent=self)
+            show_toast(self, f"Report exported to {os.path.basename(path)}", kind="success")
 
         show_send_report(
             self, "email", result.get("sent", 0), result.get("failed", 0), failed_details,
@@ -2005,7 +2007,7 @@ class MainWindow(ctk.CTk):
                 for camp in campaigns:
                     writer.writerow({k: camp.get(k, "") for k in writer.fieldnames})
             self._log_activity(f"Campaign history exported to CSV ({len(campaigns)} rows)")
-            messagebox.showinfo("Exported", f"Saved {len(campaigns)} campaigns to:\n{path}")
+            show_toast(self, f"Saved {len(campaigns)} campaigns to {os.path.basename(path)}", kind="success")
         except Exception as exc:
             messagebox.showerror("Export failed", str(exc))
 
@@ -2065,8 +2067,9 @@ class MainWindow(ctk.CTk):
                                         text_color=T.TEXT_MUTED)
         self.limit_label.grid(row=3, column=2, padx=(0, 16), pady=10, sticky="e")
 
-        self.limit_warning_label = ctk.CTkLabel(card, text="", text_color=T.DANGER)
-        self.limit_warning_label.grid(row=4, column=1, padx=16, pady=(0, 12), sticky="w")
+        self.limit_warning_label = ctk.CTkLabel(card, text="", text_color=T.DANGER_ON_BADGE,
+                                                font=ctk.CTkFont(size=11), wraplength=360, justify="left")
+        self.limit_warning_label.grid(row=4, column=0, columnspan=3, padx=16, pady=(0, 12), sticky="w")
 
         ctk.CTkSwitch(card, text="Random jitter", variable=self.jitter_var,
                       text_color=T.TEXT_HEAD, command=self._save_settings).grid(
@@ -2110,16 +2113,11 @@ class MainWindow(ctk.CTk):
         ctk.CTkLabel(session_strip, textvariable=self.session_status_var,
                      text_color=T.TEXT_MUTED, wraplength=360, justify="left").pack(
             anchor="w", padx=14, pady=(0, 12))
-        ctk.CTkButton(system_card, text="Reset Session", corner_radius=8,
-                      fg_color=T.DANGER, hover_color=T.DANGER_HOVER,
-                      text_color=T.TEXT_HEAD,
-                      command=self._reset_session).grid(
-            row=5, column=0, padx=16, pady=(0, 8), sticky="w")
         ctk.CTkButton(system_card, text="Re-run Setup Wizard", corner_radius=8,
                       fg_color=T.ACCENT, hover_color=T.ACCENT_HOVER,
                       text_color=T.TEXT_HEAD,
                       command=self._reopen_setup_wizard).grid(
-            row=6, column=0, padx=16, pady=(0, 16), sticky="w")
+            row=5, column=0, padx=16, pady=(0, 16), sticky="w")
 
         license_card = ctk.CTkFrame(frame, fg_color=T.BG_SURFACE, corner_radius=14,
                                     border_width=1, border_color=T.BG_BORDER)
@@ -2324,6 +2322,55 @@ class MainWindow(ctk.CTk):
                       command=_test_ai_key).pack(side="left", padx=(0, 10))
         ctk.CTkLabel(ai_actions, textvariable=self._ai_key_status_var,
                      text_color=T.TEXT_MUTED, font=ctk.CTkFont(size=12)).pack(side="left")
+
+        danger_card = ctk.CTkFrame(frame, fg_color=T.BG_SURFACE, corner_radius=14,
+                                   border_width=1, border_color=T.DANGER)
+        danger_card.grid(row=5, column=0, columnspan=2, sticky="ew", pady=(10, 0))
+        danger_card.grid_columnconfigure((0, 1, 2), weight=1)
+        ctk.CTkLabel(danger_card, text="Danger Zone",
+                     font=ctk.CTkFont(size=15, weight="bold"),
+                     text_color=T.DANGER_ON_BADGE).grid(
+            row=0, column=0, columnspan=3, padx=16, pady=(16, 4), sticky="w")
+        ctk.CTkLabel(danger_card,
+                     text="These actions permanently delete data and cannot be undone.",
+                     text_color=T.TEXT_MUTED, font=ctk.CTkFont(size=12)).grid(
+            row=1, column=0, columnspan=3, padx=16, pady=(0, 14), sticky="w")
+
+        def _danger_row(col: int, label: str, desc: str, command) -> None:
+            cell = ctk.CTkFrame(danger_card, fg_color=T.BG_INNER, corner_radius=10,
+                                border_width=1, border_color=T.BG_BORDER)
+            cell.grid(row=2, column=col, padx=16, pady=(0, 16), sticky="new")
+            ctk.CTkLabel(cell, text=label, text_color=T.TEXT_HEAD,
+                         font=ctk.CTkFont(size=13, weight="bold")).pack(
+                anchor="w", padx=14, pady=(12, 2))
+            ctk.CTkLabel(cell, text=desc, text_color=T.TEXT_MUTED, font=ctk.CTkFont(size=11),
+                         wraplength=170, justify="left").pack(anchor="w", padx=14, pady=(0, 10))
+            ctk.CTkButton(cell, text=label, corner_radius=8, height=30,
+                          fg_color=T.DANGER, hover_color=T.DANGER_HOVER, text_color=T.TEXT_HEAD,
+                          font=ctk.CTkFont(size=11), command=command).pack(
+                anchor="w", padx=14, pady=(0, 12))
+
+        _danger_row(
+            0, "Reset Session", "Clears the saved WhatsApp login — you'll need to scan a QR code again.",
+            lambda: show_danger_confirm(
+                self, "Reset WhatsApp Session",
+                "This clears your saved WhatsApp login. You'll need to scan a QR code again "
+                "before sending any WhatsApp messages.",
+                "RESET", "Reset Session", self._do_reset_session))
+        _danger_row(
+            1, "Delete All Contacts", "Permanently removes every saved contact from this app.",
+            lambda: show_danger_confirm(
+                self, "Delete All Contacts",
+                f"This permanently deletes all {len(self.contacts)} saved contacts. "
+                "This cannot be undone — export a backup first if you're not sure.",
+                "DELETE", "Delete All Contacts", self._do_delete_all_contacts))
+        _danger_row(
+            2, "Clear Campaign History", "Permanently removes all past campaign and send records.",
+            lambda: show_danger_confirm(
+                self, "Clear Campaign History",
+                "This permanently deletes every campaign and message log record. "
+                "This cannot be undone.",
+                "DELETE", "Clear History", self._do_clear_campaign_history))
 
         self._update_settings_summary()
         self._update_daily_limit_warning()
@@ -2950,8 +2997,7 @@ class MainWindow(ctk.CTk):
                 return
             self._load_templates()
             dlg.destroy()
-            messagebox.showinfo("Saved", f'Template "{name}" saved — pick it from the '
-                                          f'Template dropdown any time.')
+            show_toast(self, f'Template "{name}" saved.', kind="success")
 
         ctk.CTkButton(dlg, text="Save Template", fg_color=T.ACCENT, hover_color=T.ACCENT_HOVER,
                       text_color=T.TEXT_HEAD, font=ctk.CTkFont(size=13, weight="bold"),
@@ -3010,7 +3056,7 @@ class MainWindow(ctk.CTk):
                         "phone": contact.phone or "",
                         "tags": contact.tags or "",
                     })
-            messagebox.showinfo("Export Complete", f"Exported {len(contacts)} contacts to:\n{path}")
+            show_toast(self, f"Exported {len(contacts)} contacts to {os.path.basename(path)}", kind="success")
             self._log_activity(f"Exported {len(contacts)} contacts to CSV")
         except Exception as exc:
             Logger.error(f"Export failed: {exc}")
@@ -3089,9 +3135,28 @@ class MainWindow(ctk.CTk):
     def _reset_session(self) -> None:
         if not messagebox.askyesno("Reset Session", "Clear the saved WhatsApp session and require a fresh QR scan?"):
             return
+        self._do_reset_session()
+
+    def _do_reset_session(self) -> None:
         self.whatsapp_sender.reset_session()
         self._set_session_status("Session expired - please scan QR")
         self._log_activity("Saved WhatsApp session cleared")
+        show_toast(self, "WhatsApp session cleared.", kind="success")
+
+    def _do_delete_all_contacts(self) -> None:
+        count = self.db.delete_all_contacts()
+        self._reload_contacts()
+        self._log_activity(f"Deleted all {count} contacts")
+        show_toast(self, f"Deleted {count} contacts.", kind="success")
+
+    def _do_clear_campaign_history(self) -> None:
+        count = self.db.clear_campaign_history()
+        self._refresh_stats(update_text_feeds=True, update_dashboard_periods=True)
+        if hasattr(self, "_history_scroll"):
+            self._history_campaigns = self.db.get_recent_campaigns_summary(limit=100)
+            self._render_history_rows()
+        self._log_activity(f"Cleared campaign history ({count} rows)")
+        show_toast(self, "Campaign history cleared.", kind="success")
 
     def _start_sending(self) -> None:
         if self.license_locked:

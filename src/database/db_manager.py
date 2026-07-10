@@ -456,7 +456,35 @@ class DatabaseManager:
         except Exception as e:
             Logger.error(f"Error deleting contact: {e}")
             return False
-    
+
+    def delete_all_contacts(self) -> int:
+        """Delete every contact. Returns the number of rows removed."""
+        try:
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("DELETE FROM contacts")
+                conn.commit()
+                return cursor.rowcount
+        except Exception as e:
+            Logger.error(f"Error deleting all contacts: {e}")
+            return 0
+
+    def clear_campaign_history(self) -> int:
+        """Delete every campaign and message log row. Returns rows removed
+        (campaigns + message_logs combined)."""
+        try:
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("DELETE FROM message_logs")
+                removed = cursor.rowcount
+                cursor.execute("DELETE FROM campaigns")
+                removed += cursor.rowcount
+                conn.commit()
+                return removed
+        except Exception as e:
+            Logger.error(f"Error clearing campaign history: {e}")
+            return 0
+
     def get_contact_count(self) -> int:
         """
         Get total number of contacts.

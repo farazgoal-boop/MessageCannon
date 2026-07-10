@@ -25,6 +25,7 @@ from ..models import Contact
 from ..modules.data_importer import UniversalDataImporter
 from ..utils.validators import DataValidator, PhoneValidator
 from . import theme as T
+from .toast import show_toast
 
 logger = logging.getLogger(__name__)
 
@@ -1414,7 +1415,8 @@ class CardCreatorV2(ctk.CTkFrame):
                     prog.set(1)
                     prog_lbl.configure(text=f"Done! Sent: {sent}  Failed: {failed}")
                     self._refresh_stats()
-                    messagebox.showinfo("Done",f"Sent: {sent}\nFailed: {failed}",parent=dlg)
+                    show_toast(self.main_window, f"Campaign done — {sent} sent, {failed} failed.",
+                               kind="success" if failed == 0 else "error")
                 dlg.after(0, finish)
 
             threading.Thread(target=worker,daemon=True).start()
