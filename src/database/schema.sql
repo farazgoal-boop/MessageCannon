@@ -11,7 +11,8 @@ CREATE TABLE IF NOT EXISTS contacts (
     name TEXT,
     tags TEXT,
     custom_fields TEXT,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    opted_out INTEGER DEFAULT 0
 );
 
 -- Campaigns table

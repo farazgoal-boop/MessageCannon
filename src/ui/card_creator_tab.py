@@ -1331,6 +1331,24 @@ class CardCreatorV2(ctk.CTkFrame):
                 messagebox.showwarning("No Messages",
                     "Generate personalized messages first.", parent=dlg)
                 return
+            # This bulk-send flow imports contacts directly from a file
+            # (bypassing the DB), so opted_out never gets set on these
+            # in-memory Contact objects — cross-check against the real,
+            # DB-backed contact list by phone/email so someone who already
+            # unsubscribed via the main app can never be re-contacted here.
+            opted_out_phones = {c.phone for c in self.main_window.contacts if c.opted_out and c.phone}
+            opted_out_emails = {c.email.lower() for c in self.main_window.contacts if c.opted_out and c.email}
+            before_count = len(sendable)
+            sendable = [c for c in sendable
+                        if c.phone not in opted_out_phones
+                        and (c.email or "").lower() not in opted_out_emails]
+            skipped_opt_out = before_count - len(sendable)
+            if skipped_opt_out:
+                logger.info(f"AI Cards bulk send: skipped {skipped_opt_out} opted-out contact(s)")
+            if not sendable:
+                messagebox.showwarning("No Messages",
+                    "All matching contacts have opted out.", parent=dlg)
+                return
             if len(sendable) > self.main_window.daily_limit_var.get():
                 messagebox.showwarning("Daily Limit",
                     "Contacts to send exceed the configured daily limit "

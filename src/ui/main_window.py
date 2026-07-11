@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import random
 import re
 import sys
 import threading
@@ -52,7 +53,7 @@ from ..core.message_processor import MessageProcessor
 from ..core.whatsapp_sender import WhatsAppSender
 from ..database.db_manager import DatabaseManager
 from ..models import Contact, Template, Campaign, MessageLog, MessageStatus
-from ..utils.constants import APP_NAME, APP_VERSION, WINDOW_HEIGHT, WINDOW_WIDTH
+from ..utils.constants import APP_NAME, APP_VERSION, WINDOW_HEIGHT, WINDOW_WIDTH, JITTER_RANGE
 from . import theme as T
 from .toast import show_toast
 from .confirm_dialogs import show_danger_confirm
@@ -1567,7 +1568,7 @@ class MainWindow(ctk.CTk):
             messagebox.showinfo("Campaign Running", "An email campaign is already in progress.")
             return
 
-        contacts = [c for c in self.contacts if c.email]
+        contacts = [c for c in self.contacts if c.email and not c.opted_out]
         if not contacts:
             self.progress_status_var.set(
                 "⚠ No contacts with email. Import contacts in the Contacts tab first.")
@@ -1676,6 +1677,29 @@ class MainWindow(ctk.CTk):
             on_export=export_csv,
         )
 
+    def _add_unsubscribe_footer(self, html_body: str) -> str:
+        """Append a compliance footer to every outgoing email, no exceptions
+        — this is what keeps the sending domain's reputation safe at high
+        volume (CAN-SPAM/GDPR expectation). Always appended regardless of
+        what the user's own template contains, rather than trying to detect
+        an existing unsubscribe mention, since a fragile heuristic here is
+        worse than an occasional harmless duplicate footer."""
+        sender_name = self._em_from_name.get() or "this sender"
+        sender_email = self._em_from_addr.get() or ""
+        footer = (
+            '<hr style="border:none;border-top:1px solid #ddd;margin:24px 0 12px 0">'
+            '<p style="font-size:11px;color:#999;text-align:center;font-family:sans-serif">'
+            f"You're receiving this email from {sender_name}"
+            f"{' (' + sender_email + ')' if sender_email else ''}.<br>"
+            "Don't want these emails? Reply <b>STOP</b> to unsubscribe."
+            "</p>"
+        )
+        lower = html_body.lower()
+        idx = lower.rfind("</body>")
+        if idx != -1:
+            return html_body[:idx] + footer + html_body[idx:]
+        return html_body + footer
+
     def _send_email_campaign(self, recipients, campaign_name: str,
                               progress_callback=None, stop_flag=None, pause_event=None) -> dict:
         """Send pre-resolved (contact, subject, html_body) tuples over SMTP,
@@ -1708,6 +1732,7 @@ class MainWindow(ctk.CTk):
             if pause_event is not None:
                 pause_event.wait()
             to_addr = (contact.email or "").strip()
+            html_body = self._add_unsubscribe_footer(html_body)
             try:
                 msg = MIMEMultipart("alternative")
                 msg["Subject"] = subject
@@ -1735,7 +1760,12 @@ class MainWindow(ctk.CTk):
                 if progress_callback:
                     progress_callback(sent, len(failed_items), total, to_addr)
 
-            time.sleep(float(self._em_delay.get() or 5))
+            base_delay = float(self._em_delay.get() or 5)
+            if self.jitter_var.get():
+                delay = max(1.0, base_delay + random.randint(-JITTER_RANGE, JITTER_RANGE))
+            else:
+                delay = base_delay
+            time.sleep(delay)
 
         try:
             conn.quit()
@@ -2145,11 +2175,28 @@ class MainWindow(ctk.CTk):
         ctk.CTkLabel(session_strip, textvariable=self.session_status_var,
                      text_color=T.TEXT_MUTED, wraplength=360, justify="left").pack(
             anchor="w", padx=14, pady=(0, 12))
+
+        wa_risk_banner = ctk.CTkFrame(system_card, fg_color=T.BADGE_BG, corner_radius=10,
+                                      border_width=1, border_color=T.DANGER)
+        wa_risk_banner.grid(row=5, column=0, padx=16, pady=(0, 12), sticky="ew")
+        ctk.CTkLabel(wa_risk_banner, text="⚠ WhatsApp ban risk at high volume",
+                     font=ctk.CTkFont(size=12, weight="bold"),
+                     text_color=T.DANGER_ON_BADGE).pack(anchor="w", padx=12, pady=(10, 2))
+        ctk.CTkLabel(
+            wa_risk_banner,
+            text="Unofficial/automated WhatsApp sending at high volume (hundreds-to-thousands "
+                 "per day) on a personal number is very likely to get that number banned — this "
+                 "is a WhatsApp policy and detection reality, not something any app's code can "
+                 "fully prevent. Keep daily volume conservative, use real delays between "
+                 "messages, and treat a connected number as replaceable, not permanent.",
+            text_color=T.TEXT_MUTED, font=ctk.CTkFont(size=11),
+            wraplength=380, justify="left").pack(anchor="w", padx=12, pady=(0, 10))
+
         ctk.CTkButton(system_card, text="Re-run Setup Wizard", corner_radius=8,
                       fg_color=T.ACCENT, hover_color=T.ACCENT_HOVER,
                       text_color=T.TEXT_HEAD,
                       command=self._reopen_setup_wizard).grid(
-            row=5, column=0, padx=16, pady=(0, 16), sticky="w")
+            row=6, column=0, padx=16, pady=(0, 16), sticky="w")
 
         license_card = ctk.CTkFrame(frame, fg_color=T.BG_SURFACE, corner_radius=14,
                                     border_width=1, border_color=T.BG_BORDER)
@@ -2838,7 +2885,12 @@ class MainWindow(ctk.CTk):
         self._save_settings()
 
     def _update_daily_limit_warning(self) -> None:
-        if self.daily_limit_var.get() > 50:
+        limit = self.daily_limit_var.get()
+        if limit > 300:
+            self.limit_warning_label.configure(
+                text=f"High risk: {limit}/day is well above what unofficial WhatsApp automation "
+                     "can sustain without triggering a ban — see the warning in System Experience.")
+        elif limit > 50:
             self.limit_warning_label.configure(text="Warning: limits above 50 increase account risk.")
         else:
             self.limit_warning_label.configure(text="")
@@ -2950,11 +3002,18 @@ class MainWindow(ctk.CTk):
             ctk.CTkLabel(top, text=contact.name or "Unnamed Contact",
                          font=ctk.CTkFont(size=13, weight="bold"),
                          text_color=T.TEXT_HEAD).pack(anchor="w", side="left")
-            ctk.CTkLabel(top, text="Active",
-                         fg_color=T.BADGE_BG, corner_radius=999,
-                         padx=8, pady=3,
-                         text_color=T.ACCENT, font=ctk.CTkFont(size=10, weight="bold"),
-                         ).pack(anchor="e", side="right")
+            if contact.opted_out:
+                ctk.CTkLabel(top, text="Unsubscribed",
+                             fg_color=T.BADGE_BG, corner_radius=999,
+                             padx=8, pady=3,
+                             text_color=T.DANGER_ON_BADGE, font=ctk.CTkFont(size=10, weight="bold"),
+                             ).pack(anchor="e", side="right")
+            else:
+                ctk.CTkLabel(top, text="Active",
+                             fg_color=T.BADGE_BG, corner_radius=999,
+                             padx=8, pady=3,
+                             text_color=T.ACCENT, font=ctk.CTkFont(size=10, weight="bold"),
+                             ).pack(anchor="e", side="right")
             ctk.CTkLabel(card, text=contact.phone, text_color=T.TEXT_MUTED,
                          font=ctk.CTkFont(size=12)).pack(anchor="w", padx=16, pady=(0, 3))
             footer = ctk.CTkFrame(card, fg_color="transparent")
@@ -2963,11 +3022,43 @@ class MainWindow(ctk.CTk):
                          text=f"ID {contact.id if contact.id is not None else '—'}",
                          text_color=T.TEXT_MUTED, font=ctk.CTkFont(size=11),
                          ).pack(side="left")
-            ctk.CTkLabel(footer, text="Ready for campaign",
-                         text_color=T.SUCCESS, font=ctk.CTkFont(size=10, weight="bold"),
-                         ).pack(side="right")
+            if contact.opted_out:
+                ctk.CTkLabel(footer, text="Excluded from all sends",
+                             text_color=T.DANGER_ON_BADGE, font=ctk.CTkFont(size=10, weight="bold"),
+                             ).pack(side="left", padx=(10, 0))
+                ctk.CTkButton(footer, text="Resubscribe", width=90, height=22, corner_radius=6,
+                              fg_color=T.BADGE_BG, hover_color=T.BG_BORDER, text_color=T.ACCENT,
+                              font=ctk.CTkFont(size=10),
+                              command=lambda c=contact: self._toggle_contact_opt_out(c, False),
+                              ).pack(side="right")
+            else:
+                ctk.CTkLabel(footer, text="Ready for campaign",
+                             text_color=T.SUCCESS, font=ctk.CTkFont(size=10, weight="bold"),
+                             ).pack(side="left", padx=(10, 0))
+                ctk.CTkButton(footer, text="Unsubscribe", width=90, height=22, corner_radius=6,
+                              fg_color=T.BADGE_BG, hover_color=T.BG_BORDER, text_color=T.DANGER_ON_BADGE,
+                              font=ctk.CTkFont(size=10),
+                              command=lambda c=contact: self._toggle_contact_opt_out(c, True),
+                              ).pack(side="right")
 
         self._bind_scrollable_frame_mousewheel(self.contacts_directory)
+
+    def _toggle_contact_opt_out(self, contact: Contact, opted_out: bool) -> None:
+        if contact.id is None:
+            return
+        ok = self.db.set_contact_opted_out(contact.id, opted_out)
+        if not ok:
+            show_toast(self, "Could not update contact.", kind="error")
+            return
+        contact.opted_out = opted_out
+        self._log_activity(
+            f"{'Unsubscribed' if opted_out else 'Resubscribed'}: {contact.name or contact.phone}")
+        show_toast(
+            self,
+            f"{contact.name or contact.phone} {'unsubscribed — excluded from all future sends' if opted_out else 'resubscribed'}.",
+            kind="success")
+        self._render_contacts_directory()
+        self._render_compose_contacts()
 
     def _render_compose_contacts(self) -> None:
         for child in self.compose_contacts_frame.winfo_children():
@@ -2983,6 +3074,18 @@ class MainWindow(ctk.CTk):
 
         for index, contact in enumerate(self.contacts):
             key = self._contact_key(contact, index)
+            if contact.opted_out:
+                self.contact_selection_vars[key].set(False)
+                ctk.CTkCheckBox(
+                    self.compose_contacts_frame,
+                    text=f"{contact.name or 'Unnamed'}  |  {contact.phone}  —  Unsubscribed",
+                    variable=self.contact_selection_vars[key],
+                    state="disabled",
+                    fg_color=T.TEXT_DIM, border_color=T.TEXT_DIM,
+                    text_color=T.TEXT_DIM,
+                    corner_radius=4,
+                ).pack(fill="x", padx=10, pady=6, anchor="w")
+                continue
             ctk.CTkCheckBox(
                 self.compose_contacts_frame,
                 text=f"{contact.name or 'Unnamed'}  |  {contact.phone}",
@@ -2998,8 +3101,13 @@ class MainWindow(ctk.CTk):
 
     def _toggle_select_all(self) -> None:
         selected = self.select_all_var.get()
-        for variable in self.contact_selection_vars.values():
-            variable.set(selected)
+        for index, contact in enumerate(self.contacts):
+            if contact.opted_out:
+                continue  # never auto-select opted-out contacts
+            key = self._contact_key(contact, index)
+            variable = self.contact_selection_vars.get(key)
+            if variable is not None:
+                variable.set(selected)
         self._update_compose_summary()
         self._refresh_preview()
 
@@ -3154,6 +3262,8 @@ class MainWindow(ctk.CTk):
     def _get_selected_contacts(self) -> List[Contact]:
         selected: List[Contact] = []
         for index, contact in enumerate(self.contacts):
+            if contact.opted_out:
+                continue  # opted-out contacts are never eligible for any future send
             key = self._contact_key(contact, index)
             variable = self.contact_selection_vars.get(key)
             if variable and variable.get():

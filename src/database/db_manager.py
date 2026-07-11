@@ -24,7 +24,8 @@ CREATE TABLE IF NOT EXISTS contacts (
     name TEXT,
     tags TEXT,
     custom_fields TEXT,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    opted_out INTEGER DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS campaigns (
@@ -150,6 +151,13 @@ class DatabaseManager:
                         Logger.info("Added email column to contacts table")
                     except Exception as e:
                         Logger.error(f"Migration error (contacts.email): {e}")
+                if "opted_out" not in cols:
+                    try:
+                        cursor.execute("ALTER TABLE contacts ADD COLUMN opted_out INTEGER DEFAULT 0")
+                        conn.commit()
+                        Logger.info("Added opted_out column to contacts table")
+                    except Exception as e:
+                        Logger.error(f"Migration error (contacts.opted_out): {e}")
 
                 # Check message_logs columns
                 cursor.execute("PRAGMA table_info(message_logs)")
@@ -364,6 +372,11 @@ class DatabaseManager:
                         email_val = row['email'] or ''
                     except (IndexError, sqlite3.OperationalError):
                         pass
+                    opted_out_val = False
+                    try:
+                        opted_out_val = bool(row['opted_out'])
+                    except (IndexError, sqlite3.OperationalError):
+                        pass
 
                     contact = Contact(
                         id=row['id'],
@@ -372,10 +385,11 @@ class DatabaseManager:
                         name=row['name'] or '',
                         tags=row['tags'].split(',') if row['tags'] else [],
                         custom_fields=json.loads(row['custom_fields']) if row['custom_fields'] else {},
-                        created_at=datetime.fromisoformat(row['created_at'])
+                        created_at=datetime.fromisoformat(row['created_at']),
+                        opted_out=opted_out_val,
                     )
                     contacts.append(contact)
-                
+
                 return contacts
         except Exception as e:
             Logger.error(f"Error getting contacts: {e}")
@@ -421,6 +435,7 @@ class DatabaseManager:
                     email_val = ""
                     if "email" in cols:
                         email_val = row['email'] or ''
+                    opted_out_val = bool(row['opted_out']) if "opted_out" in cols else False
 
                     contact = Contact(
                         id=row['id'],
@@ -429,9 +444,10 @@ class DatabaseManager:
                         name=row['name'] or '',
                         tags=row['tags'].split(',') if row['tags'] else [],
                         custom_fields=json.loads(row['custom_fields']) if row['custom_fields'] else {},
+                        opted_out=opted_out_val,
                     )
                     contacts.append(contact)
-                
+
                 return contacts
         except Exception as e:
             Logger.error(f"Error searching contacts: {e}")
@@ -455,6 +471,22 @@ class DatabaseManager:
                 return cursor.rowcount > 0
         except Exception as e:
             Logger.error(f"Error deleting contact: {e}")
+            return False
+
+    def set_contact_opted_out(self, contact_id: int, opted_out: bool) -> bool:
+        """Mark a contact as opted-out (or resubscribed). Opted-out contacts
+        must be excluded from every future send, both channels — enforced at
+        the point contacts are selected for sending, not here."""
+        try:
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "UPDATE contacts SET opted_out = ? WHERE id = ?",
+                    (1 if opted_out else 0, contact_id))
+                conn.commit()
+                return cursor.rowcount > 0
+        except Exception as e:
+            Logger.error(f"Error setting contact opted_out state: {e}")
             return False
 
     def delete_all_contacts(self) -> int:

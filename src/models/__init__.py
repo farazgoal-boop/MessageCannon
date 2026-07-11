@@ -30,14 +30,15 @@ class Contact:
     tags: List[str] = field(default_factory=list)
     custom_fields: Dict[str, Any] = field(default_factory=dict)
     created_at: datetime = field(default_factory=datetime.now)
-    
+    opted_out: bool = False
+
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary."""
         data = asdict(self)
         data['tags'] = ','.join(self.tags)
         data['created_at'] = self.created_at.isoformat()
         return data
-    
+
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> 'Contact':
         """Create from dictionary."""
@@ -48,10 +49,11 @@ class Contact:
         contact.name = data.get('name', '')
         contact.tags = data.get('tags', '').split(',') if data.get('tags') else []
         contact.custom_fields = data.get('custom_fields', {})
-        
+        contact.opted_out = bool(data.get('opted_out', False))
+
         if isinstance(data.get('created_at'), str):
             contact.created_at = datetime.fromisoformat(data['created_at'])
-        
+
         return contact
 
 
