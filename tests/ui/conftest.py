@@ -107,6 +107,20 @@ def app():
     window = MainWindow()
     _close_any_toplevel(window)
     window.update()
+
+    # MainWindow.__init__ schedules self.after(900, self._maybe_show_setup_wizard)
+    # — a real, one-time delayed reopen (the real app's DB in this environment
+    # has setup_wizard_completed=False, left that way deliberately per Phase 1
+    # for the user's own first-run testing). Left alone, that timer can fire
+    # in the middle of an unrelated test, mid-assertion, rather than at fixture
+    # setup where it's expected. Wait past the 900ms mark once here and close
+    # whatever it opens, so every test starts from a known, wizard-free state.
+    deadline = time.time() + 1.2
+    while time.time() < deadline:
+        window.update()
+    _close_any_toplevel(window)
+    window.update()
+
     yield window
     try:
         if window.winfo_exists():
