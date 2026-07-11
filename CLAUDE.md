@@ -421,4 +421,38 @@ both a real-data screenshot (5 inserted campaigns, all visible, page scrolls) an
 screenshot (unchanged, still renders correctly) — test rows deleted after, real DB confirmed back
 to its actual state (9 contacts, 0 campaigns) throughout.
 
-**Next: CHECKPOINT: Step 1 (Signature Animation) — not yet started.**
+**CHECKPOINT: Step 1 (Signature Animation) complete.**
+
+Built a slide-up-into-place navigation transition (`MainWindow._animate_view_in`, wired from
+`_show_view`), applied uniformly to every main nav item. **Deliberately downgraded from
+shatter-out/3D-flip** — told the user why before implementing (this checkpoint entry is that
+record): CustomTkinter/Tk has no per-widget alpha compositing, only whole-`Toplevel` `-alpha`, so
+neither a true shatter effect nor a cross-fade between two live widget trees is achievable without
+first rendering both to images (screen-capture-based, fragile, platform-specific, and risks the
+exact flicker/glitches this feature exists to avoid). The outgoing view is hidden instantly
+instead of animated out, for the same reason.
+
+Two real performance iterations, not guessed numbers: v1 also animated `relwidth`/`relheight` for
+a scale effect and measured 700ms-1.8s on complex views (Settings, Cards) — changing a `place()`'d
+container's *size* forces Tk to re-run grid/pack layout for every nested child on every frame.
+Switched to position-only animation (fixed `relwidth=relheight=1.0`, only `rely` changes) since
+repositioning a container doesn't change its children's available size and so triggers no
+relayout — cut times to 240-590ms immediately. Tightened `steps` (7→4) and `duration_ms`
+(150→90) to bring the worst case (Cards) under the 500ms budget. A hard 220ms wall-clock deadline
+inside the animation loop is kept as a safety net regardless of step count — same defensive
+pattern as the close-button fix's 4s hard deadline — so a slower machine degrades to "snaps into
+place slightly early" rather than ever blocking longer than promised.
+
+Verified: all 6 nav points measured 159.7-400.6ms end-to-end in this environment; rapid
+re-entrant navigation (3 views fired back-to-back, no waiting) settles cleanly with no exceptions
+and lands on the correct final view; the close-button fix is unaffected (16.4ms, unchanged);
+a mid-slide screenshot confirms clean rendering (previous view's edge briefly visible at the top
+as the new one slides up, no garbling).
+
+**Not verified / explicit limitation**: no video/screen-recording capability exists in this
+environment — only static PNG screenshots via `PIL.ImageGrab`, so the "screen recording of the
+transition" proof this document asked for could not be produced. Timing was measured only in
+this sandbox, not on the user's own "realistic hardware" as explicitly requested. Both need the
+user's own live confirmation.
+
+**Next: CHECKPOINT: Step 2 (High-Volume Sending Strategy) — not yet started.**
