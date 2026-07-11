@@ -455,4 +455,58 @@ transition" proof this document asked for could not be produced. Timing was meas
 this sandbox, not on the user's own "realistic hardware" as explicitly requested. Both need the
 user's own live confirmation.
 
-**Next: CHECKPOINT: Step 2 (High-Volume Sending Strategy) — not yet started.**
+**CHECKPOINT: Step 2 (High-Volume Sending Strategy) — compliance/safety core complete, rest
+scoped to roadmap by user decision.**
+
+Before building, checked the actual code rather than trusting the document's framing — it assumed
+several things were "already planned"/"already required per the earlier polish pass" that turned
+out not to exist at all: no opt-out mechanism anywhere in the codebase, and email sends had zero
+jitter (fixed `time.sleep` only) despite WhatsApp already having it. Flagged this to the user
+before proceeding; given the scope was bigger than expected (9 sub-items, several needing to be
+built from scratch), the user chose **"Compliance/safety core first"**: build the highest-risk
+items now, defer the rest to a documented roadmap rather than attempt all 9 shallowly.
+
+**Built this pass:**
+- `contacts.opted_out` column (migration-safe, and — importantly — added to **both**
+  `DEFAULT_SCHEMA_SQL` *and* the real `schema.sql` file that's actually loaded at runtime; these
+  two have drifted before and caused a real bug in Phase 2, so this time both were updated
+  together) + `db_manager.set_contact_opted_out()`.
+- Opt-out **enforced** (not just recorded) at every point contacts get selected for sending:
+  WhatsApp's `_get_selected_contacts()`, email's recipient filter in
+  `_start_email_from_compose()`, and — since the AI Cards bulk-send dialog imports contacts
+  straight from a file, bypassing the DB entirely (a pre-existing characteristic, see the Card
+  Creator caveat above) — a phone/email cross-check against the real DB-backed opted-out list, so
+  someone who unsubscribed through the main app can't be re-contacted through that separate flow.
+- Contacts directory: "Unsubscribed" badge + a Resubscribe/Unsubscribe toggle button per row.
+- `_send_email_campaign` now appends a compliance footer ("Reply STOP to unsubscribe") to **every**
+  outgoing email unconditionally, inserted before `</body>` if present else appended.
+- Email sends now use the same jitter pattern WhatsApp already had (`JITTER_RANGE=±5s`) instead of
+  a perfectly even fixed delay, gated by the existing "Random jitter" switch.
+- Daily-limit warning gained a second tier: >300/day now shows an explicit high-ban-risk message,
+  not just the pre-existing generic >50 warning.
+- New always-visible WhatsApp ban-risk warning banner in Settings → System Experience.
+
+**Verified** with a throwaway test contact (inserted, toggled, excluded from both channels,
+deleted after — real 9-contact DB confirmed untouched throughout, per the same discipline used
+all session): opt-out toggle flips DB state and UI correctly; a previously-selected contact is
+excluded from `_get_selected_contacts()` and the email-eligible list immediately after opting out;
+a real send through a mocked SMTP produced a message whose **base64-decoded** HTML body (the first
+check against the raw pre-encode string gave a false negative — `MIMEText`'s utf-8 default is
+base64-encoded, not a footer bug) contains the unsubscribe footer positioned correctly.
+
+**Deferred to roadmap, not built this pass** (explicit user choice, not silently dropped):
+- Warm-up scheduler (ramping daily cap over 1-2 weeks for new/unproven sending accounts).
+- List hygiene / bounce-risk pre-send warnings.
+- Reputation dashboard (bounce rate / spam-complaint rate indicator).
+- Multi-number WhatsApp rotation (the document itself hedged this as "if feasible" — it would need
+  real architecture changes to `WhatsAppSender`'s single-session model, and can't be built blind
+  without a live WhatsApp session to test against, which this sandbox doesn't have).
+- "Recommended safe volume today" indicator based on account age/warm-up/recent bounce signals.
+- Automatic STOP-reply *detection* for either channel — what's built is enforcement of the
+  `opted_out` flag once set, plus a manual toggle; actually detecting a reply requires either IMAP
+  polling (email — no such capability exists in this app) or scraping WhatsApp Web's incoming
+  message thread via Selenium (WhatsApp — technically possible but a substantial new capability
+  that needs testing against a real, live WhatsApp Web session this sandbox cannot provide).
+  Scoped down deliberately rather than half-build a detection path with no way to verify it works.
+
+**Next: CHECKPOINT: Step 3 (Resume Final Testing document, Parts 1, 3-7) — not yet started.**
