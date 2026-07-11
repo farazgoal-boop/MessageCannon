@@ -266,7 +266,7 @@ class MainWindow(ctk.CTk):
         self.brand_logo = self._load_brand_image((58, 58))
         self.header_brand_logo = self._load_brand_image((34, 34))
 
-        self.theme_var = StringVar(value="Dark")
+        self.theme_var = StringVar(value="Warm Ivory")
         self.delay_var = IntVar(value=30)
         self.daily_limit_var = IntVar(value=50)
         self.jitter_var = BooleanVar(value=True)
@@ -693,6 +693,20 @@ class MainWindow(ctk.CTk):
         self._build_campaign_history_view()
         self._build_settings_view()
         build_card_creator_view(self)
+
+        # Compose has the heaviest widget tree in the app (dual WA/Email
+        # panels + a live contact checkbox list) — Tk's layout cost for its
+        # first-ever hidden->visible transition measured 500-670ms on its
+        # own, independent of navigation animation logic (confirmed by
+        # isolating grid()/update_idletasks() calls directly). Rather than
+        # make the user pay that on their first real click to Compose, pay
+        # it once here, hidden behind the ~1.1s startup splash screen that
+        # already exists (see main.py's _show_startup_splash).
+        compose_container = self.view_containers.get("Compose")
+        if compose_container is not None:
+            compose_container.grid()
+            compose_container.update_idletasks()
+            compose_container.grid_remove()
 
         self.bind("<Control-n>", lambda _event: self._show_view("Compose"))
         self.bind("<Control-i>", lambda _event: self._open_import_review())
@@ -2483,6 +2497,15 @@ class MainWindow(ctk.CTk):
             self._bind_scrollable_frame_mousewheel(frame)
         return frame
 
+    # Views whose widget tree is expensive enough that Tk's own redraw cost
+    # (not this animation's logic — measured directly, see CLAUDE.md) blows
+    # the transition time budget on every hidden->visible switch regardless
+    # of animation step count: an instant grid() swap is used for these
+    # instead of _animate_view_in(). Currently just Compose (dual WA/Email
+    # panels + a live contact checkbox list); re-measure before removing a
+    # view from this set if its content is ever substantially simplified.
+    _HEAVY_VIEWS_NO_ANIMATION = {"Compose"}
+
     def _show_view(self, view_name: str) -> None:
         self._active_view = view_name
         self._apply_view_chrome(view_name)
@@ -2493,7 +2516,10 @@ class MainWindow(ctk.CTk):
                 continue
             frame.grid_remove()
         if incoming is not None:
-            self._animate_view_in(incoming)
+            if view_name in self._HEAVY_VIEWS_NO_ANIMATION:
+                incoming.grid()
+            else:
+                self._animate_view_in(incoming)
         for name, button in self.sidebar_buttons.items():
             is_active = name == view_name
             button.configure(
@@ -2651,9 +2677,9 @@ class MainWindow(ctk.CTk):
     def _load_settings(self) -> None:
         settings = self.db.get_setting_json(
             self.SETTINGS_KEY,
-            {"theme": "Dark", "delay": 30, "daily_limit": 50, "jitter": True, "consent_required": True},
+            {"theme": "Warm Ivory", "delay": 30, "daily_limit": 50, "jitter": True, "consent_required": True},
         )
-        self.theme_var.set(str(settings.get("theme", "Dark")))
+        self.theme_var.set(str(settings.get("theme", "Warm Ivory")))
         self.delay_var.set(int(settings.get("delay", 30)))
         self.daily_limit_var.set(int(settings.get("daily_limit", 50)))
         self.jitter_var.set(bool(settings.get("jitter", True)))
