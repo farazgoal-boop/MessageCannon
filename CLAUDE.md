@@ -509,4 +509,49 @@ base64-encoded, not a footer bug) contains the unsubscribe footer positioned cor
   that needs testing against a real, live WhatsApp Web session this sandbox cannot provide).
   Scoped down deliberately rather than half-build a detection path with no way to verify it works.
 
-**Next: CHECKPOINT: Step 3 (Resume Final Testing document, Parts 1, 3-7) — not yet started.**
+**CHECKPOINT: Step 3, Parts 1 and 3 complete. Parts 4-7 next.**
+
+**Part 1 (automated UI test suite)** — built `tests/ui/` (pytest, 15 tests), but NOT with
+pywinauto as the document specified. Verified directly, before writing any tests, that pywinauto
+cannot drive this app: connected to a real running instance via both the "uia" and "win32"
+backends and enumerated every descendant control — CustomTkinter draws all its widgets on a Tk
+Canvas rather than as native Win32/UWP controls, so neither backend exposes an accessible name or
+role for a single real button or nav item (only anonymous "Pane"/"Image" or "TkChild"/"Static"
+elements). Full evidence in `tests/ui/README.md` and `conftest.py`'s docstring. Tests instead call
+the same command callables/methods a real click invokes, directly in-process — the technique used
+for manual verification all session, formalized into a reusable suite.
+
+Two real infrastructure problems found and fixed while building it:
+1. More than ~2-3 sequential `tkinter.Tk()` root creations in one process is unreliable
+   (intermittent "Can't find a usable init.tcl"). Fixed via `pytest-xdist` running each test file
+   in its own OS process (`-n <file-count> --dist loadfile`).
+2. A busy-wait poll loop measured transitions at ~2x their real duration vs proper
+   `after()`-scheduled polling (381.7ms vs 163.8ms for the identical transition, confirmed side by
+   side). All timing tests use the fixed `wait_for_view_animation` helper.
+
+Chasing a real, reproducible Compose timing outlier (~600ms, not flaky) led to two genuine fixes
+to the Step 1 animation feature itself — `MainWindow._HEAVY_VIEWS_NO_ANIMATION` exempts Compose
+from the slide animation (its dual-panel + live-contact-list widget tree costs Tk 350-670ms to lay
+out on its own, isolated and confirmed independent of animation logic), and its layout is now
+pre-warmed once at startup behind the existing splash screen. Neither fully eliminates the cost
+(it recurs, reduced, every visit) — logged as a documented exception (700ms budget vs 500ms
+elsewhere) rather than chased further; a full fix needs simplifying Compose's own widget tree.
+
+Also found: running the suite with 5 parallel xdist workers causes flaky timing-test failures from
+resource contention (5 simultaneous `MainWindow()`s competing for CPU), not real regressions —
+confirmed by re-running the same file alone (7/7 every time) vs parallel (different tests fail
+each run). Documented as a two-command running pattern in the README: functional tests parallel,
+timing tests alone. All 15 tests pass when run exactly as documented — re-verified as the final
+step before committing.
+
+**Part 3 (light theme default)** — confirmed the concern was real and fixed it: a fresh install
+previously defaulted to Dark (both `theme_var`'s initial value and `_load_settings()`'s
+no-saved-settings fallback said "Dark"), not the required Warm Ivory light theme. Fixed both,
+verified with a dedicated test against a genuinely fresh, isolated database (the real app DB has
+saved preferences from prior use and would never have exposed this).
+
+**Data safety note**: real user data (9 contacts) confirmed untouched throughout. One earlier
+*manual* verification script from Step 2 (not this pytest suite) had left 2 real campaign/
+message_log rows in the production DB — found and cleaned up during this pass's final check.
+
+**Next: CHECKPOINT: Step 3, Parts 4-7 — not yet started.**
