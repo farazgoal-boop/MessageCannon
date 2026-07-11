@@ -554,4 +554,48 @@ saved preferences from prior use and would never have exposed this).
 *manual* verification script from Step 2 (not this pytest suite) had left 2 real campaign/
 message_log rows in the production DB — found and cleaned up during this pass's final check.
 
-**Next: CHECKPOINT: Step 3, Parts 4-7 — not yet started.**
+**CHECKPOINT: Step 3, Parts 4-7 — complete to the extent possible without resources this
+environment doesn't have; rest documented as roadmap.**
+
+**Part 4 (AI content quality)** — cannot be verified in this environment: no real Anthropic API
+key available, so no real model output exists to judge for quality. What IS true and already
+built (Phase 3, this session): the prompt in `ai_service.generate_message_variations()` explicitly
+requires 3 genuinely different angles/tones/structures (not reworded copies of one idea), is told
+exactly which `{variable}` names exist in the real imported contact data so it can't invent ones
+that don't exist, and the channel is passed through so WhatsApp vs email framing can differ.
+Real output quality across different briefs needs the user's own key — flagged, not faked.
+
+**Part 5 (real send reliability)** — cannot be verified in this environment: no real SMTP
+credentials or live WhatsApp session (Chrome bootstrap fails every time here, confirmed
+throughout this whole session's logs). What IS verified: the pause/resume/retry mechanics
+(Phase 4) and rate-limiting/jitter (Step 2) against mocked-network drivers that deliberately fail
+a fraction of sends, which exercises the same failure-handling code path a real network drop
+would hit — a failed send during Phase 4/Step 2 testing correctly logs an error, doesn't stop the
+batch, and shows up in the retry list; nothing was observed to duplicate-send or lose track of
+progress. A *real* batch send and a *real* network-drop-mid-send need the user's own credentials.
+
+**Part 6 (setup/settings friendliness)** — re-checked with fresh eyes: added tooltips to the two
+remaining Settings fields that didn't have one yet (Theme selector, SMTP Provider preset) —
+every field now has a plain-language tooltip. Confirmed via code review that nothing requires
+manually editing a config file (all settings are DB-backed and UI-driven through Setup Wizard +
+Settings). Setup Wizard flow (Phase 1) already covers non-technical first-run setup end to end.
+
+**Part 7 (world-class recommendations)** — implemented where feasible this pass:
+- Unsubscribe link + opt-out enforcement — done in Step 2.
+- SMTP password now encrypted at rest (found it was explicitly still plaintext, unlike the AI
+  key which already used the same Fernet pattern — closed the gap, verified against the real
+  live database with a backup taken first).
+- Keyboard shortcuts already exist (Ctrl+N compose, Ctrl+I import, Ctrl+G cards) — found via
+  code review, not newly built; worth mentioning to the user since they may not know.
+- Spam-trigger-word / subject-length deliverability hints already exist (Phase 3).
+
+**Deferred to roadmap, not built** (explicit scope limit given remaining session time, not
+silently dropped): open/click tracking (needs a backend this app doesn't have), scheduled
+"Send Later" campaigns (the `campaigns.scheduled_time` column already exists in the schema but
+nothing reads/acts on it), auto-backup of contacts/campaigns/templates, A/B variant testing for
+AI content, an analytics dashboard beyond the existing sent/delivered stats, and a first-run
+interactive product tour of the main UI (distinct from the Setup Wizard, which covers channel
+setup, not a tour of Campaigns/Contacts/Composer navigation).
+
+Step 3 complete. All 5 UX-overhaul phases, the signature animation, the high-volume compliance
+core, and this final testing pass are now done to the extent verifiable in this environment.
