@@ -2167,8 +2167,11 @@ class MainWindow(ctk.CTk):
         ctk.CTkLabel(system_card, text="Theme, session state, and workspace recovery controls.",
                      text_color=T.TEXT_MUTED, font=ctk.CTkFont(size=12)).grid(
             row=1, column=0, padx=16, pady=(0, 14), sticky="w")
-        ctk.CTkLabel(system_card, text="Theme selector",
-                     text_color=T.TEXT_HEAD).grid(row=2, column=0, padx=16, pady=(0, 6), sticky="w")
+        theme_lbl = ctk.CTkLabel(system_card, text="Theme selector", text_color=T.TEXT_HEAD)
+        theme_lbl.grid(row=2, column=0, padx=16, pady=(0, 6), sticky="w")
+        add_tooltip(theme_lbl, "Dark and Light follow your choice everywhere in the app. "
+                                "System matches your Windows setting automatically. Warm Ivory "
+                                "is a warmer, paper-like light theme as a third option.")
         ctk.CTkOptionMenu(
             system_card,
             values=["Dark", "Light", "Warm Ivory", "System"],
@@ -2304,8 +2307,11 @@ class MainWindow(ctk.CTk):
             self._em_port.set(p)
             self._save_settings()
 
-        ctk.CTkLabel(smtp_card, text="Provider", text_color=T.TEXT_HEAD).grid(
-            row=2, column=0, padx=16, pady=6, sticky="w")
+        provider_lbl = ctk.CTkLabel(smtp_card, text="Provider", text_color=T.TEXT_HEAD)
+        provider_lbl.grid(row=2, column=0, padx=16, pady=6, sticky="w")
+        add_tooltip(provider_lbl, "Pick your email provider to auto-fill the Host and Port "
+                                   "below. Choose Custom if you use a different provider or "
+                                   "your own mail server.")
         ctk.CTkOptionMenu(smtp_card, values=list(SMTP_PRESETS.keys()),
                           variable=self._em_provider, command=_on_preset,
                           fg_color=T.BG_SURFACE, button_color=T.BG_SURFACE,
@@ -2685,12 +2691,19 @@ class MainWindow(ctk.CTk):
         self.jitter_var.set(bool(settings.get("jitter", True)))
         self.consent_required_var.set(bool(settings.get("consent_required", True)))
 
-        # SMTP — stored in same JSON blob (plaintext in local SQLite, AppData only)
+        # SMTP — host/user/etc are low-sensitivity and stay plain; the password
+        # is encrypted at rest with the same Fernet key as the AI API key.
+        # Falls back to the old plaintext "smtp_pass" key for anyone upgrading
+        # from a version that saved it that way, so existing users don't have
+        # to re-enter their password after this change.
         self._em_provider.set(str(settings.get("smtp_provider", "Gmail")))
         self._em_host.set(str(settings.get("smtp_host", "smtp.gmail.com")))
         self._em_port.set(str(settings.get("smtp_port", "587")))
         self._em_user.set(str(settings.get("smtp_user", "")))
-        self._em_pass.set(str(settings.get("smtp_pass", "")))
+        smtp_pass = decrypt_secret(str(settings.get("smtp_pass_enc", "")))
+        if not smtp_pass:
+            smtp_pass = str(settings.get("smtp_pass", ""))  # legacy plaintext fallback
+        self._em_pass.set(smtp_pass)
         self._em_from_name.set(str(settings.get("smtp_from_name", "My Business")))
         self._em_from_addr.set(str(settings.get("smtp_from_addr", "")))
         self._em_delay.set(str(settings.get("smtp_delay", "5")))
@@ -2722,7 +2735,7 @@ class MainWindow(ctk.CTk):
                 "smtp_host":       self._em_host.get(),
                 "smtp_port":       self._em_port.get(),
                 "smtp_user":       self._em_user.get(),
-                "smtp_pass":       self._em_pass.get(),
+                "smtp_pass_enc":   encrypt_secret(self._em_pass.get()),
                 "smtp_from_name":  self._em_from_name.get(),
                 "smtp_from_addr":  self._em_from_addr.get(),
                 "smtp_delay":      self._em_delay.get(),
