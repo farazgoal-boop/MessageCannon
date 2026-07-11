@@ -323,6 +323,9 @@ class MainWindow(ctk.CTk):
         self._em_stop_flag = threading.Event()
         self._em_pause_event = threading.Event()
         self._em_pause_event.set()  # set = running; cleared = paused
+        self._view_anim_run_id = 0
+        self._view_anim_after_id = None
+        self._view_anim_container = None
         self._em_contacts_list: list = []
         self._em_count_var = StringVar(value="No email contacts imported")
         self._em_compose_count_var = StringVar(value="0 contacts with email")
@@ -2437,11 +2440,13 @@ class MainWindow(ctk.CTk):
         self._active_view = view_name
         self._apply_view_chrome(view_name)
         self.header_title.configure(text=view_name)
+        incoming = self.view_containers.get(view_name)
         for name, frame in self.view_containers.items():
             if name == view_name:
-                frame.grid()
-            else:
-                frame.grid_remove()
+                continue
+            frame.grid_remove()
+        if incoming is not None:
+            self._animate_view_in(incoming)
         for name, button in self.sidebar_buttons.items():
             is_active = name == view_name
             button.configure(
@@ -2468,6 +2473,90 @@ class MainWindow(ctk.CTk):
             )
         if view_name == "Compose":
             self._refresh_preview()
+
+    def _animate_view_in(self, container: ctk.CTkFrame) -> None:
+        """Signature navigation transition: the incoming view slides up into
+        place from a slight vertical offset, eased out, over ~150ms. This is
+        a deliberately scoped-down "own interpretation" of a shatter/3D-flip
+        transition — CustomTkinter/Tk has no per-widget alpha compositing
+        (only whole-Toplevel -alpha), so a true shatter or a cross-fade
+        between two live widget trees isn't achievable without rendering both
+        to images first (fragile, platform-specific, and risks exactly the
+        flicker/glitches this feature is supposed to avoid). The outgoing
+        view is hidden instantly rather than animated out, for the same
+        reason. See CLAUDE.md for the full writeup of this decision.
+
+        Position-only (relx/rely), size held fixed at relwidth=relheight=1.0:
+        an earlier version also animated relwidth/relheight for a scale
+        effect, but measured 700ms-1.8s on complex views (Settings, Cards)
+        because changing a place()'d container's SIZE forces Tk to re-run
+        grid/pack layout for every nested child on every single frame.
+        Changing only its on-screen POSITION does not — children never see a
+        different available size, so there's nothing to relayout, just a
+        cheap re-blit. A hard wall-clock deadline is kept as a safety net
+        regardless, so a slow machine degrades to "snaps into place a little
+        early" rather than ever blocking longer than the promised budget.
+        """
+        anim_id = getattr(self, "_view_anim_run_id", 0) + 1
+        self._view_anim_run_id = anim_id
+        # If a previous animation is still in flight (rapid nav clicking),
+        # cancel its pending step and snap its container to its resting grid
+        # state immediately so it doesn't finish animating into view later.
+        prev_after_id = getattr(self, "_view_anim_after_id", None)
+        if prev_after_id is not None:
+            try:
+                self.after_cancel(prev_after_id)
+            except Exception:
+                pass
+            self._view_anim_after_id = None
+        prev_container = getattr(self, "_view_anim_container", None)
+        if prev_container is not None and prev_container is not container:
+            try:
+                prev_container.place_forget()
+                prev_container.grid()
+            except Exception:
+                pass
+        self._view_anim_container = container
+
+        steps = 4
+        duration_ms = 90
+        interval = max(8, duration_ms // steps)
+        start_dy = 0.04
+        hard_deadline = time.time() + 0.22  # never block longer than this, any hardware
+
+        def ease_out_cubic(t: float) -> float:
+            return 1 - (1 - t) ** 3
+
+        container.grid()
+        container.update_idletasks()
+
+        def finalize() -> None:
+            self._view_anim_after_id = None
+            try:
+                container.place_forget()
+                container.grid()
+            except Exception:
+                pass
+
+        def step(i: int) -> None:
+            if self._view_anim_run_id != anim_id:
+                return  # superseded by a newer navigation
+            if time.time() > hard_deadline:
+                finalize()
+                return
+            t = i / steps
+            eased = ease_out_cubic(t)
+            dy = start_dy * (1 - eased)
+            try:
+                container.place(relx=0, rely=dy, relwidth=1.0, relheight=1.0)
+            except Exception:
+                return
+            if i < steps:
+                self._view_anim_after_id = self.after(interval, lambda: step(i + 1))
+            else:
+                finalize()
+
+        step(0)
 
     def _apply_view_chrome(self, view_name: str) -> None:
         view_meta = {
