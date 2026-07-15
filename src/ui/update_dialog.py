@@ -121,7 +121,13 @@ class UpdateDialog(ctk.CTkToplevel):
         show_toast(self.main_window, f"Update download failed: {message}", kind="error")
 
     def _on_download_succeeded(self, installer_path: str) -> None:
-        self._status_var.set("Downloaded. Restarting to finish installing...")
+        # Accurate, not aspirational: the installer runs /VERYSILENT, which
+        # skips Inno Setup's own post-install "launch app" step (setup.iss's
+        # [Run] entry has Flags: skipifsilent) — MessageCannon does not
+        # relaunch itself. Closing now is a real, necessary step (Inno Setup
+        # can't overwrite the running .exe otherwise), but the user has to
+        # reopen the app by hand once the install finishes in the background.
+        self._status_var.set("Downloaded. Closing MessageCannon to install — reopen it afterward.")
         self.main_window.after(600, lambda: self.main_window._apply_downloaded_update(installer_path))
         self.destroy()
 

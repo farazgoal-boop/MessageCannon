@@ -586,14 +586,6 @@ class MainWindow(ctk.CTk):
         )
         self.sidebar_license_badge.pack(side="bottom", anchor="w", padx=12, pady=(0, 14))
 
-        self.sidebar_reset_btn = ctk.CTkButton(
-            _bot, text="Reset Session", height=30, corner_radius=6,
-            fg_color=T.DANGER, hover_color=T.DANGER_HOVER,
-            text_color=T.TEXT_HEAD, font=ctk.CTkFont(size=11),
-            command=self._reset_session,
-        )
-        self.sidebar_reset_btn.pack(side="bottom", fill="x", padx=10, pady=(0, 6))
-
         self.sidebar_session_status_label = ctk.CTkLabel(
             _bot, textvariable=self.session_status_var,
             wraplength=190, justify="left",
@@ -2622,8 +2614,7 @@ class MainWindow(ctk.CTk):
         # Brand wordmark + every informational (non-actionable) bottom
         # widget hide entirely when collapsed -- none of them fit
         # meaningfully at 72px, and none are things a user needs to act on
-        # at a glance. Reset Session survives (icon-only) since it's a real
-        # action; the collapse toggle itself always stays reachable.
+        # at a glance. The collapse toggle itself always stays reachable.
         for widget in (self._brand_title_label, self._brand_subtitle_label):
             if collapsed:
                 widget.grid_remove()
@@ -2646,8 +2637,6 @@ class MainWindow(ctk.CTk):
             self._update_badge_slot.pack(side="top", fill="x")
             if self._update_info is not None:
                 self._refresh_update_badge()
-
-        self.sidebar_reset_btn.configure(text="⟲" if collapsed else "Reset Session")
 
         for view_name, (icon, label) in self.sidebar_nav_meta.items():
             button = self.sidebar_buttons.get(view_name)
@@ -3717,11 +3706,6 @@ class MainWindow(ctk.CTk):
                       fg_color=T.ACCENT, hover_color=T.ACCENT_HOVER, text_color=T.TEXT_HEAD,
                       font=ctk.CTkFont(size=11), command=self._resume_setup_wizard).grid(
             row=0, column=1, padx=(0, 14), pady=10, sticky="e")
-
-    def _reset_session(self) -> None:
-        if not messagebox.askyesno("Reset Session", "Clear the saved WhatsApp session and require a fresh QR scan?"):
-            return
-        self._do_reset_session()
 
     def _do_reset_session(self) -> None:
         self.whatsapp_sender.reset_session()
