@@ -37,6 +37,26 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 os.chdir(PROJECT_ROOT)
 
+# The real MainWindow.__init__ schedules a background GitHub Releases check
+# (self.after(1200, self._start_update_check)) that does a real DNS+TLS+HTTP
+# call. Patched to a no-op here, at import time, so it applies no matter which
+# test file constructs its own MainWindow() (several do, not just the `app`
+# fixture below) — a real external network call has no business running in
+# an automated suite regardless of timing: it's slow, flaky offline/in CI,
+# and was measured to push test_navigation_timing.py's Contacts/Cards
+# transitions ~10-20ms over their 500ms budget from pure CPU/GIL contention
+# with the request, the same class of interference already documented above
+# for the WhatsApp session-bootstrap thread — confirmed by reverting this
+# patch and re-running: the same two tests failed, reproducibly.
+import src.ui.main_window as _main_window_module  # noqa: E402
+
+
+def _no_op_update_check(*_args, **_kwargs):
+    return None
+
+
+_main_window_module.check_for_update = _no_op_update_check
+
 
 def _close_any_toplevel(app) -> None:
     """Close the setup wizard (or any other startup Toplevel) if one opened,

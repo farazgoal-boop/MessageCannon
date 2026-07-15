@@ -23,6 +23,8 @@ import customtkinter as ctk
 from PIL import Image
 from ..ui.card_creator_tab import build_card_creator_view
 from ..ui.reports_chart import ReportsChart
+from ..ui.update_dialog import show_update_dialog
+from ..core.update_checker import check_for_update, spawn_detached, launch_silent_install_and_get_command
 
 try:
     from tkinterdnd2 import TkinterDnD
@@ -249,8 +251,12 @@ class MainWindow(ctk.CTk):
         self.templates: List[Template] = []
         self.contact_selection_vars: Dict[str, BooleanVar] = {}
         self.sidebar_buttons: Dict[str, ctk.CTkButton] = {}
-        self.sidebar_accent_bars: Dict[str, ctk.CTkFrame] = {}
+        self.sidebar_accent_bars: Dict[str, tk.Canvas] = {}
         self.sidebar_btn_frames: Dict[str, tk.Frame] = {}
+        self.sidebar_nav_meta: Dict[str, tuple] = {}
+        self._nav_accent_anim_after_id = None
+        self._update_info = None
+        self._sidebar_collapsed = False
         self.view_frames: Dict[str, ctk.CTkFrame] = {}
         self.view_containers: Dict[str, object] = {}
         self.activity_items: List[str] = []
@@ -359,6 +365,7 @@ class MainWindow(ctk.CTk):
 
         self.after(800, self._start_session_bootstrap)
         self.after(900, self._maybe_show_setup_wizard)
+        self.after(1200, self._start_update_check)
         self.after(10000, self._periodic_refresh)
         self.after(2000, self._heartbeat_check)
 
@@ -455,7 +462,7 @@ class MainWindow(ctk.CTk):
                 frame.configure(bg=T.resolve(T.BG_MAIN))
         for name, bar in self.sidebar_accent_bars.items():
             if bar.winfo_exists():
-                bar.configure(bg=T.resolve(T.ACCENT if name == active_view else T.BG_MAIN))
+                self._draw_nav_accent(bar, active=(name == active_view))
         if hasattr(self, "_reports_chart_host") and self._reports_chart_host.winfo_exists():
             self._reports_chart_host.configure(bg=T.resolve(T.BG_INNER))
         card_creator = getattr(self, "card_creator_tab", None)
@@ -493,9 +500,14 @@ class MainWindow(ctk.CTk):
 
         bind_tree(scrollable_frame)
 
+    SIDEBAR_WIDTH_EXPANDED = 220
+    SIDEBAR_WIDTH_COLLAPSED = 72
+
     def _create_ui(self) -> None:
         # ── SIDEBAR — uses pack() internally to avoid CTkFrame grid row bugs ──
-        self.grid_columnconfigure(0, minsize=220)
+        self.grid_columnconfigure(
+            0, minsize=self.SIDEBAR_WIDTH_COLLAPSED if self._sidebar_collapsed
+            else self.SIDEBAR_WIDTH_EXPANDED)
         self.sidebar = ctk.CTkFrame(self, corner_radius=0, fg_color=T.BG_MAIN)
         self.sidebar.grid(row=0, column=0, sticky="nsew")
 
@@ -506,12 +518,58 @@ class MainWindow(ctk.CTk):
         if self.brand_logo is not None:
             ctk.CTkLabel(brand_panel, text="", image=self.brand_logo).grid(
                 row=0, column=0, rowspan=2, padx=(0, 10), sticky="w")
-        ctk.CTkLabel(brand_panel, text="MessageCannon",
-                     font=ctk.CTkFont(size=14, weight="bold"),
-                     text_color=T.TEXT_HEAD).grid(row=0, column=1, sticky="w")
-        ctk.CTkLabel(brand_panel, text="Pro  |  Campaign Suite",
-                     text_color=T.ACCENT, font=ctk.CTkFont(size=10, weight="bold"),
-                     ).grid(row=1, column=1, sticky="w")
+        self._brand_title_label = ctk.CTkLabel(
+            brand_panel, text="MessageCannon",
+            font=ctk.CTkFont(size=14, weight="bold"),
+            text_color=T.TEXT_HEAD)
+        self._brand_title_label.grid(row=0, column=1, sticky="w")
+        self._brand_subtitle_label = ctk.CTkLabel(
+            brand_panel, text="Pro  |  Campaign Suite",
+            text_color=T.ACCENT, font=ctk.CTkFont(size=10, weight="bold"))
+        self._brand_subtitle_label.grid(row=1, column=1, sticky="w")
+
+        # Collapse/expand toggle — a real, always-visible manual control
+        # (unlike either reference app: Career Copilot has no sidebar to
+        # fold at all, and Career Copilot/JobMind Match's own "collapsed"
+        # states are pure CSS responsive breakpoints with no click-to-toggle
+        # anywhere in their code — verified by reading both directly, not
+        # assumed. Built as its own real feature since the user asked for a
+        # foldable sidebar three times regardless of what either reference
+        # literally does.)
+        self.sidebar_collapse_btn = ctk.CTkButton(
+            brand_panel, text="«", width=26, height=26, corner_radius=8,
+            fg_color=T.NAV_INACTIVE, hover_color=T.BG_SURFACE,
+            text_color=T.TEXT_MUTED, font=ctk.CTkFont(size=13, weight="bold"),
+            command=self._toggle_sidebar_collapsed,
+        )
+        self.sidebar_collapse_btn.grid(row=0, column=2, rowspan=2, sticky="e")
+
+        # Hidden until _start_update_check finds a real newer GitHub release —
+        # see CLAUDE.md "In-app update checker" for why there's no reference
+        # pattern from Career Copilot to match here.
+        #
+        # The badge itself is packed/unpacked based on update state, but a
+        # widget's pack() call always appends it to the END of its parent's
+        # current top-to-bottom stacking order — packing it late (only once
+        # an update is actually found, well after nav_frame and everything
+        # else already packed) put it below the nav items, right above
+        # "Premium Access", instead of here under the brand block. Wrapping it
+        # in a slot frame that's packed exactly once, immediately, at this
+        # position fixes it: the slot's position never changes, only its one
+        # child's presence inside it does.
+        self._update_badge_slot = ctk.CTkFrame(self.sidebar, fg_color="transparent")
+        self._update_badge_slot.pack(side="top", fill="x")
+
+        self.update_badge_var = ctk.StringVar(value="")
+        self.sidebar_update_badge = ctk.CTkButton(
+            self._update_badge_slot, textvariable=self.update_badge_var,
+            fg_color=T.BADGE_BG, hover_color=T.BG_SURFACE,
+            text_color=T.ACCENT, corner_radius=999, height=26,
+            font=ctk.CTkFont(size=10, weight="bold"),
+            command=self._show_update_dialog,
+        )
+        if self._update_info is not None:
+            self._refresh_update_badge()
 
         ctk.CTkFrame(self.sidebar, height=1, fg_color=T.BG_BORDER, corner_radius=0
                      ).pack(side="top", fill="x")
@@ -528,17 +586,19 @@ class MainWindow(ctk.CTk):
         )
         self.sidebar_license_badge.pack(side="bottom", anchor="w", padx=12, pady=(0, 14))
 
-        ctk.CTkButton(
+        self.sidebar_reset_btn = ctk.CTkButton(
             _bot, text="Reset Session", height=30, corner_radius=6,
             fg_color=T.DANGER, hover_color=T.DANGER_HOVER,
             text_color=T.TEXT_HEAD, font=ctk.CTkFont(size=11),
             command=self._reset_session,
-        ).pack(side="bottom", fill="x", padx=10, pady=(0, 6))
+        )
+        self.sidebar_reset_btn.pack(side="bottom", fill="x", padx=10, pady=(0, 6))
 
-        ctk.CTkLabel(_bot, textvariable=self.session_status_var,
-                     wraplength=190, justify="left",
-                     text_color=T.TEXT_MUTED, font=ctk.CTkFont(size=11),
-                     ).pack(side="bottom", fill="x", padx=12, pady=(4, 3))
+        self.sidebar_session_status_label = ctk.CTkLabel(
+            _bot, textvariable=self.session_status_var,
+            wraplength=190, justify="left",
+            text_color=T.TEXT_MUTED, font=ctk.CTkFont(size=11))
+        self.sidebar_session_status_label.pack(side="bottom", fill="x", padx=12, pady=(4, 3))
 
         self.sidebar_premium_panel = ctk.CTkFrame(
             _bot, fg_color=T.BG_SURFACE, corner_radius=10,
@@ -571,18 +631,24 @@ class MainWindow(ctk.CTk):
             btn_frame = tk.Frame(nav_frame, bg=T.resolve(T.BG_MAIN))
             btn_frame.pack(fill="x", pady=2)
 
-            accent_bar = tk.Frame(btn_frame, width=4, bg=T.resolve(T.BG_MAIN))
+            # Canvas (not Frame) so the active item can carry a two-stop
+            # ACCENT->SUCCESS gradient rather than a flat fill — the closest
+            # Tk-native analog to Career Copilot's pill-nav gradient underline
+            # (see CLAUDE.md "Sidebar redesign" section for the full mapping).
+            accent_bar = tk.Canvas(btn_frame, width=4, height=40, highlightthickness=0,
+                                    bg=T.resolve(T.BG_MAIN))
             accent_bar.pack(side="left", fill="y", padx=(0, 4))
 
             button = ctk.CTkButton(
                 btn_frame,
-                text=f"{icon}  {label}",
-                anchor="w",
+                text=icon if self._sidebar_collapsed else f"{icon}  {label}",
+                anchor="center" if self._sidebar_collapsed else "w",
                 height=40,
-                corner_radius=8,
+                corner_radius=10,
                 fg_color=T.NAV_INACTIVE,
                 hover_color=T.BG_SURFACE,
-                border_width=0,
+                border_width=1,
+                border_color=T.NAV_INACTIVE,
                 text_color=T.TEXT_HEAD,
                 font=ctk.CTkFont(size=13),
                 command=lambda name=view_name: self._show_view(name),
@@ -592,6 +658,10 @@ class MainWindow(ctk.CTk):
             self.sidebar_buttons[view_name] = button
             self.sidebar_accent_bars[view_name] = accent_bar
             self.sidebar_btn_frames[view_name] = btn_frame
+            self.sidebar_nav_meta[view_name] = (icon, label)
+            self._draw_nav_accent(accent_bar, active=False)
+
+        self._apply_sidebar_collapsed_visuals()
 
         # ── TOP BAR (white) ────────────────────────────────────────────────
         self.content = ctk.CTkFrame(self, fg_color=T.BG_MAIN, corner_radius=0)
@@ -702,11 +772,29 @@ class MainWindow(ctk.CTk):
         # make the user pay that on their first real click to Compose, pay
         # it once here, hidden behind the ~1.1s startup splash screen that
         # already exists (see main.py's _show_startup_splash).
+        #
+        # Cards (Card Creator — Card Identity panel, live HTML preview,
+        # Send Summary) turned out to need the exact same treatment, found
+        # while verifying the view-stacking fix above: isolated measurement
+        # (grid()+update_idletasks() alone, no animation logic) showed its
+        # first-ever render costs ~350-500ms, dropping to ~70-85ms on every
+        # later render — the same cold-first-render/warm-after shape as
+        # Compose, just never given the same pre-warm treatment, so it sat
+        # right at the edge of test_navigation_timing.py's 500ms budget.
+        #
+        # Unlike Compose, pre-warming Cards synchronously right here measured
+        # as a no-op (0.0ms) — card_creator_tab.py populates its live preview
+        # via `self.after(800, self._schedule_preview)`, so its expensive
+        # content genuinely doesn't exist yet at this point in _create_ui().
+        # Warming it here would just grid()/idletasks() an empty shell.
+        # Deferred to `_prewarm_heavy_views` below, scheduled comfortably
+        # after that 800ms timer.
         compose_container = self.view_containers.get("Compose")
         if compose_container is not None:
             compose_container.grid()
             compose_container.update_idletasks()
             compose_container.grid_remove()
+        self.after(1000, self._prewarm_heavy_views)
 
         self.bind("<Control-n>", lambda _event: self._show_view("Compose"))
         self.bind("<Control-i>", lambda _event: self._open_import_review())
@@ -2512,6 +2600,63 @@ class MainWindow(ctk.CTk):
     # view from this set if its content is ever substantially simplified.
     _HEAVY_VIEWS_NO_ANIMATION = {"Compose"}
 
+    def _toggle_sidebar_collapsed(self) -> None:
+        self._sidebar_collapsed = not self._sidebar_collapsed
+        self._apply_sidebar_collapsed_visuals()
+        self._save_settings()
+
+    def _apply_sidebar_collapsed_visuals(self) -> None:
+        """Snap instantly between expanded/icon-only, no width animation —
+        the same cost lesson already learned and documented for
+        _animate_view_in applies here too: changing a grid column's minsize
+        forces every child in that column to relayout, and doing that
+        smoothly frame-by-frame would carry the same real cost already
+        measured and avoided elsewhere in this file. An instant toggle is
+        the honest, consistent choice rather than faking a smooth animation
+        Tk can't cheaply do."""
+        collapsed = self._sidebar_collapsed
+        self.grid_columnconfigure(
+            0, minsize=self.SIDEBAR_WIDTH_COLLAPSED if collapsed else self.SIDEBAR_WIDTH_EXPANDED)
+        self.sidebar_collapse_btn.configure(text="»" if collapsed else "«")
+
+        # Brand wordmark + every informational (non-actionable) bottom
+        # widget hide entirely when collapsed -- none of them fit
+        # meaningfully at 72px, and none are things a user needs to act on
+        # at a glance. Reset Session survives (icon-only) since it's a real
+        # action; the collapse toggle itself always stays reachable.
+        for widget in (self._brand_title_label, self._brand_subtitle_label):
+            if collapsed:
+                widget.grid_remove()
+            else:
+                widget.grid()
+
+        for widget, pack_kwargs in (
+            (self.sidebar_premium_panel, dict(side="bottom", fill="x", padx=10, pady=(0, 6))),
+            (self.sidebar_session_status_label, dict(side="bottom", fill="x", padx=12, pady=(4, 3))),
+            (self.sidebar_license_badge, dict(side="bottom", anchor="w", padx=12, pady=(0, 14))),
+        ):
+            if collapsed:
+                widget.pack_forget()
+            else:
+                widget.pack(**pack_kwargs)
+
+        if collapsed:
+            self._update_badge_slot.pack_forget()
+        else:
+            self._update_badge_slot.pack(side="top", fill="x")
+            if self._update_info is not None:
+                self._refresh_update_badge()
+
+        self.sidebar_reset_btn.configure(text="⟲" if collapsed else "Reset Session")
+
+        for view_name, (icon, label) in self.sidebar_nav_meta.items():
+            button = self.sidebar_buttons.get(view_name)
+            if button is not None:
+                button.configure(
+                    text=icon if collapsed else f"{icon}  {label}",
+                    anchor="center" if collapsed else "w",
+                )
+
     def _show_view(self, view_name: str) -> None:
         self._active_view = view_name
         self._apply_view_chrome(view_name)
@@ -2531,14 +2676,17 @@ class MainWindow(ctk.CTk):
             button.configure(
                 fg_color=T.ACCENT if is_active else T.NAV_INACTIVE,
                 hover_color=T.ACCENT_HOVER if is_active else T.BG_SURFACE,
-                border_width=0,
+                border_width=1,
+                border_color=T.ACCENT if is_active else T.NAV_INACTIVE,
                 text_color=T.TEXT_HEAD,
                 font=ctk.CTkFont(size=13, weight="bold" if is_active else "normal"),
             )
             if name in self.sidebar_accent_bars:
-                self.sidebar_accent_bars[name].configure(
-                    bg=T.resolve(T.ACCENT if is_active else T.BG_MAIN)
-                )
+                bar = self.sidebar_accent_bars[name]
+                if is_active:
+                    self._animate_nav_accent_in(bar)
+                else:
+                    self._draw_nav_accent(bar, active=False)
         if view_name == "Campaigns":
             self._refresh_campaigns_home()
         elif view_name in ("Contacts", "History"):
@@ -2552,6 +2700,83 @@ class MainWindow(ctk.CTk):
             )
         if view_name == "Compose":
             self._refresh_preview()
+
+    # Matches the fixed height= the accent-bar Canvas is constructed with in
+    # _create_ui — used as a constant instead of querying winfo_height() live,
+    # see _draw_nav_accent's docstring for why that query was actually removed.
+    _NAV_ACCENT_HEIGHT = 40
+    _NAV_ACCENT_WIDTH = 4
+
+    def _draw_nav_accent(self, canvas: tk.Canvas, active: bool, reveal_frac: float = 1.0) -> None:
+        """Paint the sidebar nav accent bar. Inactive: flat background (item
+        not selected). Active: a top-to-bottom ACCENT->SUCCESS gradient,
+        Career Copilot's blue->teal pill-nav underline reinterpreted as a
+        vertical bar since our sidebar is vertical, not a horizontal pill row
+        (see CLAUDE.md "Sidebar redesign" for the full pattern mapping) —
+        built only from existing theme.py tokens, no new hex values.
+        `reveal_frac` (0..1) paints only the top fraction of the bar, used by
+        _animate_nav_accent_in for a short grow-in instead of an instant snap.
+
+        Uses the known-fixed canvas height/width as constants rather than
+        `canvas.update_idletasks()` + `winfo_height()` — an earlier version
+        queried live geometry here and it was a real, measured regression:
+        `update_idletasks()` flushes *all* pending Tk idle tasks app-wide, not
+        just this ~4px canvas, and since this runs from inside `_show_view`
+        (right as a new, possibly heavy view like Cards/Compose/Settings is
+        being laid out), it forced that view's layout to complete synchronously
+        right at the worst possible moment — measured pushing Cards' transition
+        from ~250ms to 870-1740ms in tests/ui/test_navigation_timing.py before
+        being caught and fixed here."""
+        bg = T.resolve(T.BG_MAIN)
+        canvas.configure(bg=bg)
+        canvas.delete("all")
+        if not active:
+            return
+        height = self._NAV_ACCENT_HEIGHT
+        width = self._NAV_ACCENT_WIDTH
+        painted = max(1, int(height * max(0.0, min(1.0, reveal_frac))))
+        top_r, top_g, top_b = (c >> 8 for c in canvas.winfo_rgb(T.resolve(T.ACCENT)))
+        bot_r, bot_g, bot_b = (c >> 8 for c in canvas.winfo_rgb(T.resolve(T.SUCCESS)))
+        for y in range(painted):
+            t = y / max(height - 1, 1)
+            r = int(top_r + (bot_r - top_r) * t)
+            g = int(top_g + (bot_g - top_g) * t)
+            b = int(top_b + (bot_b - top_b) * t)
+            canvas.create_line(0, y, width, y, fill=f"#{r:02x}{g:02x}{b:02x}")
+
+    def _animate_nav_accent_in(self, canvas: tk.Canvas) -> None:
+        """Short grow-in reveal for the active nav item's accent bar, standing
+        in for Copilot's 180ms CSS transition on its pill-nav active state —
+        Tk has no CSS transitions, so this steps reveal_frac 0->1 by hand.
+        Same discipline as _animate_view_in: cheap because only this ~4px-wide
+        canvas redraws (no sibling relayout), tight step count, and a hard
+        wall-clock deadline so a slow machine just finishes slightly early
+        rather than ever blocking."""
+        if self._nav_accent_anim_after_id is not None:
+            try:
+                self.after_cancel(self._nav_accent_anim_after_id)
+            except Exception:
+                pass
+            self._nav_accent_anim_after_id = None
+
+        steps = 5
+        duration_ms = 120
+        start = time.time()
+        deadline = start + 0.22
+
+        def step(i: int) -> None:
+            if not canvas.winfo_exists() or time.time() > deadline:
+                self._draw_nav_accent(canvas, active=True, reveal_frac=1.0)
+                self._nav_accent_anim_after_id = None
+                return
+            frac = (i + 1) / steps
+            self._draw_nav_accent(canvas, active=True, reveal_frac=frac)
+            if i + 1 >= steps:
+                self._nav_accent_anim_after_id = None
+                return
+            self._nav_accent_anim_after_id = self.after(duration_ms // steps, lambda: step(i + 1))
+
+        step(0)
 
     def _animate_view_in(self, container: ctk.CTkFrame) -> None:
         """Signature navigation transition: the incoming view slides up into
@@ -2591,8 +2816,40 @@ class MainWindow(ctk.CTk):
         prev_container = getattr(self, "_view_anim_container", None)
         if prev_container is not None and prev_container is not container:
             try:
+                # Real bug, found from a real user's own click-through (not
+                # caught by scripted tests, which only asserted _active_view
+                # and timing, never that the PREVIOUS view was actually
+                # hidden): this used to be `place_forget(); grid()` — but
+                # grid() right after place_forget() immediately remaps/
+                # re-shows the widget in the same cell, so it was never
+                # actually hidden, just switched from place- back to grid-
+                # management while staying visible. Once any view had been
+                # shown via this animated path, it silently stayed visible
+                # forever after, and since Tk's default sibling stacking
+                # follows widget creation order (Cards is built last in
+                # _create_ui, so it naturally sits above every other view),
+                # Cards would silently show through on top of whatever view
+                # was navigated to next.
+                #
+                # `place_forget()` alone is both correct and cheap: a widget
+                # under no geometry manager at all is simply unmapped
+                # (hidden), and re-registering it with grid(row=0, column=0,
+                # sticky="nsew") was tried and measured as a real, if modest,
+                # regression (~300-500ms added to the NEXT transition when
+                # the previous view had its own nontrivial widget tree, e.g.
+                # Contacts/History) — forcing that container's full layout to
+                # resolve immediately as a side effect of hiding it, instead
+                # of lazily whenever it's actually shown again. The existing
+                # incoming-container code a few lines below already calls a
+                # bare container.grid() when SHOWING a container (which is
+                # the only time that cost needs to be paid), and Tk remembers
+                # each container's original sticky="nsew" registration from
+                # _new_view_container's initial grid()+grid_remove() call
+                # across a place()/place_forget() round-trip, so that bare
+                # grid() continues to restore full nsew sizing correctly —
+                # confirmed via tests/ui/test_view_stacking.py's 30
+                # exhaustive view-pair transitions, not assumed.
                 prev_container.place_forget()
-                prev_container.grid()
             except Exception:
                 pass
         self._view_anim_container = container
@@ -2720,6 +2977,7 @@ class MainWindow(ctk.CTk):
         self.setup_wizard_channels = list(settings.get("setup_wizard_channels", []))
         self.setup_wizard_channel_index = int(settings.get("setup_wizard_channel_index", 0))
         self.setup_wizard_substep = str(settings.get("setup_wizard_substep", ""))
+        self._sidebar_collapsed = bool(settings.get("sidebar_collapsed", False))
 
     def _save_settings(self) -> None:
         self.db.set_setting_json(
@@ -2747,6 +3005,7 @@ class MainWindow(ctk.CTk):
                 "setup_wizard_channels":      self.setup_wizard_channels,
                 "setup_wizard_channel_index": self.setup_wizard_channel_index,
                 "setup_wizard_substep":       self.setup_wizard_substep,
+                "sidebar_collapsed":          self._sidebar_collapsed,
             },
         )
         self._update_settings_summary()
@@ -3343,6 +3602,52 @@ class MainWindow(ctk.CTk):
             Logger.error(f"Export failed: {exc}")
             messagebox.showerror("Export Failed", str(exc))
 
+    def _refresh_update_badge(self) -> None:
+        badge = getattr(self, "sidebar_update_badge", None)
+        if badge is None or not badge.winfo_exists():
+            return
+        if self._update_info is None:
+            badge.pack_forget()
+            return
+        self.update_badge_var.set(f"⬆  Update {self._update_info.tag} available")
+        badge.pack(side="top", anchor="w", fill="x", padx=16, pady=(0, 10))
+
+    def _start_update_check(self) -> None:
+        """Background GitHub Releases check, same off-UI-thread pattern as
+        _start_session_bootstrap. Never surfaces a popup on failure — see
+        core/update_checker.check_for_update's docstring; the badge simply
+        stays hidden if the check fails or no newer release exists."""
+        def worker() -> None:
+            info = check_for_update(APP_VERSION)
+            if info is not None:
+                self.after(0, lambda: self._on_update_check_result(info))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_update_check_result(self, info) -> None:
+        self._update_info = info
+        self._refresh_update_badge()
+
+    def _show_update_dialog(self) -> None:
+        if self._update_info is None:
+            return
+        show_update_dialog(self, self._update_info, APP_VERSION)
+
+    def _apply_downloaded_update(self, installer_path: str) -> None:
+        """Launches the downloaded Windows installer as a detached process,
+        then cleanly closes MessageCannon so the installer can overwrite the
+        running .exe (Inno Setup cannot do this while it's still open).
+        Contacts/templates/settings live in %APPDATA%\\MessageCannon Pro
+        (see db_manager.py), entirely outside the install directory the
+        installer touches, so they are structurally untouched by this."""
+        try:
+            spawn_detached(launch_silent_install_and_get_command(installer_path))
+        except Exception as exc:
+            Logger.warning(f"Failed to launch downloaded installer: {exc}")
+            show_toast(self, f"Could not start the installer: {exc}", kind="error")
+            return
+        self._on_close()
+
     def _start_session_bootstrap(self) -> None:
         if self.license_locked:
             return
@@ -3693,6 +3998,20 @@ class MainWindow(ctk.CTk):
 
     def _contact_key(self, contact: Contact, index: int) -> str:
         return str(contact.id if contact.id is not None else f"idx-{index}-{contact.phone}")
+
+    def _prewarm_heavy_views(self) -> None:
+        """Pay Cards' first-render layout cost here, hidden behind the
+        startup splash, instead of on the user's first real click — same
+        idea as Compose's synchronous pre-warm in _create_ui(), just
+        scheduled 1000ms out so card_creator_tab.py's own
+        `self.after(800, self._schedule_preview)` has already populated the
+        live preview with real content by the time this runs (warming it
+        any earlier measured as a 0-cost no-op against an empty shell)."""
+        cards_container = self.view_containers.get("Cards")
+        if cards_container is not None:
+            cards_container.grid()
+            cards_container.update_idletasks()
+            cards_container.grid_remove()
 
     def _periodic_refresh(self) -> None:
         if self._refresh_job is not None:
