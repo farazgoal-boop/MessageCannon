@@ -599,3 +599,284 @@ setup, not a tour of Campaigns/Contacts/Composer navigation).
 
 Step 3 complete. All 5 UX-overhaul phases, the signature animation, the high-volume compliance
 core, and this final testing pass are now done to the extent verifiable in this environment.
+
+## Sidebar redesign — matched against Career Copilot Premium (complete)
+
+Direction: replicate Career Copilot Premium's sidebar/section interaction pattern in
+MessageCannon. **Studied the real reference first, per instruction, before writing any code** —
+findings changed the plan:
+
+- Career Copilot's desktop app is **PyQt** (a floating overlay + `QListWidget` console via
+  `career_copilot_dark.qss`), not Electron — its Playwright suite tests a *separate* Flask
+  `web_app`, not the desktop shell.
+- That web app has **no persistent collapsible left-sidebar** to copy. Its real nav is a
+  horizontal pill-shaped `section-nav` in a sticky header (anchor-links, active state via
+  border-color shift + lift + glow + a gradient underline bar, `180ms ease` CSS transitions), plus
+  a separate `wizard-sidebar` step-list used only inside one onboarding wizard page. Confirmed via
+  direct `grep`/read of `app.css` — asked the user which pattern to target rather than guessing;
+  chosen: adapt the top section-nav's *interaction feel* into MessageCannon's existing left
+  sidebar (already structurally correct — flat vertical nav list, no collapsible groups needed
+  since Copilot doesn't have any either).
+
+**What was matched:** the active/inactive visual language — pill-ish rounded corners
+(`corner_radius` 8→10), an accent-colored border on the active item (`border_color=T.ACCENT`,
+mirroring Copilot's border-color shift), and Copilot's signature gradient accent treatment,
+reinterpreted as a vertical two-stop gradient (top→bottom) on the existing left accent bar instead
+of Copilot's horizontal bottom-underline gradient — same idea (an accent gradient marks the active
+item), rotated 90° to fit a vertical nav instead of a horizontal one. Built from **existing
+theme.py tokens only** (`T.ACCENT` → `T.SUCCESS`, chosen because that pairing already mirrors
+Copilot's blue→teal hue relationship) — no new hex values added, per the Design System rule above.
+
+**What had to be adapted/downgraded, and why (same category of limitation as the earlier
+shatter→slide-in animation call):** CustomTkinter/Tk has no CSS `transition` property and no
+per-widget `box-shadow`/gradient-background support — `_show_view`'s per-click color swap is
+instant (as it already was), and the "gradient bar" is hand-painted pixel-by-pixel onto a
+`tk.Canvas` (`_draw_nav_accent`) since a plain `tk.Frame` can only take one flat `bg`. A short
+step-based reveal animation (`_animate_nav_accent_in`, 5 steps / ~120ms, hard 220ms wall-clock
+deadline — same safety-net pattern as `_animate_view_in`) stands in for Copilot's `180ms ease`
+CSS transition. Copilot's hover "lift" (`translateY(-1px)`) was deliberately **not** replicated —
+CTkButton has no transform property, and faking a 1px reposition on hover would need per-button
+enter/leave bindings driving a `place()`-based micro-animation for a marginal effect; judged not
+worth the complexity/fragility for a sidebar list, so hover feedback stays limited to the existing
+`hover_color` swap.
+
+**Real bug found and fixed while verifying with screenshots (not just noted):** the first version
+of `_draw_nav_accent`'s canvas was constructed with only `width=4` and no explicit `height` — Tk's
+default canvas height (~150-180px, unset) silently stretched every sidebar row taller than its own
+button, so the active item's gradient bar visibly bled into the two neighboring rows above and
+below it. Caught by screenshotting the running app (not just reading the code) — visible
+immediately as a gradient bar roughly 4x taller than the "Contacts" button it was supposed to mark.
+Fixed with an explicit `height=40` matching the nav button's own height.
+
+Verified via a real running MainWindow + screenshots (not just pytest): the gradient renders
+correctly in Dark, Light, and Warm Ivory (confirmed the full `_rebuild_ui_for_theme` cycle —
+entering Warm Ivory, navigating while in it, then leaving back to Dark — preserves the active
+view and redraws the gradient with each palette's own `ACCENT`/`SUCCESS` tokens, e.g. Warm Ivory's
+rust→green pairing instead of Dark's indigo→teal, with no new hex values). All 15 existing
+`tests/ui/` tests still pass run exactly as documented in the README (7 functional in parallel,
+navigation-timing alone, close-button alone) — confirms this change didn't regress the close-button
+~15ms timing, the signature slide-in transition, or the light/Warm-Ivory theme defaults.
+
+**Not done / out of scope:** Career Copilot's marketing/product framing (a live-interview-answer
+overlay for video calls) was not examined beyond its nav CSS and build scripts, and none of that
+functionality is or should be reflected in MessageCannon — this section only concerns sidebar
+visual/interaction patterns.
+
+**Addendum found later, documenting a real gap in this checkpoint discipline**: the shipped code
+also contains a collapsible sidebar (icon-only ↔ expanded, `«`/`»` toggle button,
+`_toggle_sidebar_collapsed`/`_apply_sidebar_collapsed_visuals`, persisted via a `sidebar_collapsed`
+setting) — directly contradicting this section's own "no collapsible groups needed since Copilot
+doesn't have any either" conclusion above, and referencing a second reference app ("JobMind Match")
+never mentioned anywhere else in this file. The code was found already written and working when
+this file was next reconciled against the working tree — no checkpoint entry for it was ever
+written, so the reasoning behind it (why collapse was added despite the earlier conclusion, what
+"JobMind Match" is, what "asked three times" refers to) is lost. **Not verified**: no test in
+`tests/ui/` covers the collapse/expand toggle (`grep -i collaps tests/ui/` returns nothing), and it
+has not been re-verified with screenshots the way every other feature in this file was. Flagging
+as-is rather than either deleting working code or fabricating a verification narrative that didn't
+happen — functional review/testing of this specific feature is a real open item.
+
+## In-app update checker (complete — Step 4 of the packaging spec; Steps 2-3 skipped by user choice)
+
+Direction: match Career Copilot Premium's in-app auto-update system. **Studied the reference
+first, per instruction** — finding: Copilot has **no in-app update mechanism at all**. Its only
+update path, `install_update_now.bat`, is a manual script the user double-clicks by hand
+(`taskkill` the running exe, then `start /wait` a locally-placed setup exe) — no version check,
+no GitHub API call, no sidebar indicator anywhere in its source. There was nothing to port; this
+is new work for MessageCannon, built around its own existing release pipeline instead.
+
+Also found before building anything: MessageCannon already has most of the "packaging" spec's
+Steps 2-3 done — `.github/workflows/build-mac-linux.yml` (297 lines, already committed) builds a
+macOS `.app`->`.dmg` and Linux `.deb`+`AppImage` on `v*` tag push and auto-publishes a GitHub
+Release via `softprops/action-gh-release@v2`; `installer/setup.iss` (Inno Setup, per-user,
+`PrivilegesRequired=lowest`, installs to `{localappdata}\Programs\MessageCannon`) already exists
+for Windows. **Gap**: that CI workflow does not build/attach a Windows asset — the release body
+just tells users to build one locally. Flagged to the user; they chose to skip re-verifying
+Steps 2-3 and go straight to Step 4 (this section).
+
+**Built:**
+- `src/core/update_checker.py` — `check_for_update(current_version)` hits
+  `api.github.com/repos/.../releases/latest` (public, read-only, no auth needed), compares
+  versions numerically (`(1,2,10) > (1,9,0)`, not string comparison), picks the release asset
+  matching the current OS (`.exe`/`.dmg`/`.AppImage`), and **never raises** — any network/parse
+  failure is treated as "no update," so a flaky or offline connection never surfaces as an error
+  and the app stays fully usable regardless. `download_asset()` streams the asset to a temp file.
+  `can_silent_install()` is Windows-only by design (see its docstring) — macOS `.dmg` (manual
+  drag-to-Applications) and Linux `.deb` (needs `sudo`)/AppImage (no install step) have no
+  unattended-apply equivalent that's safe to automate without a real Mac/Linux machine to verify
+  against, which this environment doesn't have; scoped out deliberately rather than guessed at.
+- `src/ui/update_dialog.py` — release notes, a progress bar during download, and a
+  "Download & Install" button that's genuinely disabled (not just `state="disabled"` — see bug #3
+  below) when no matching asset exists for this platform, always falling back to a working
+  "View on GitHub" button so there's no dead end.
+- Sidebar badge (`sidebar_update_badge`, in `main_window.py`), hidden until a real newer release is
+  found via a background thread kicked off 1200ms after startup (same off-UI-thread pattern as the
+  existing `_start_session_bootstrap`), clicking it opens the dialog.
+- `_apply_downloaded_update()`: launches the downloaded installer as a **detached** process
+  (survives this process exiting), then calls the existing `_on_close()` teardown — the exact same
+  path the window's own close button uses — since Inno Setup cannot overwrite the running .exe
+  while MessageCannon is still open. Contacts/templates/settings live in
+  `%APPDATA%\MessageCannon Pro\data\messagecannon.db` (confirmed via the app's own startup log),
+  structurally outside the `{localappdata}\Programs\MessageCannon` install directory the installer
+  touches — user data survives an update by construction, not by new code added to "preserve" it.
+
+**Real bugs found and fixed while verifying (not just noted) — three, in order of severity:**
+1. **Timing regression** (the serious one): `_draw_nav_accent` originally called
+   `canvas.update_idletasks()` to read the accent-bar canvas's live height. `update_idletasks()`
+   flushes *all* pending Tk idle tasks app-wide, not just that ~4px canvas — and since this runs
+   from inside `_show_view` right as a new (possibly heavy) view is being laid out, it forced
+   Cards/Compose/Settings/History's layout to complete synchronously at exactly the wrong moment.
+   Measured via `tests/ui/test_navigation_timing.py`: pushed Cards from its normal ~250ms to
+   860-1740ms across repeated runs before being caught — this was caught by actually re-running the
+   existing pytest suite after the sidebar change, per the spec's own "do not let this regress
+   anything already fixed" instruction, not assumed safe. Fixed by replacing the live
+   `winfo_height()` query with the already-known-fixed height (40, matching the button height the
+   canvas is constructed with) as a class constant — no idle-task flush needed at all.
+2. **Sidebar badge appeared in the wrong position** — packed right above "Premium Access" at the
+   bottom instead of below the brand block at the top. Cause: `pack()` always appends to the END
+   of its parent's current stacking order, and the badge was only actually packed later (inside
+   `_refresh_update_badge`, once an update is found) — by which point nav_frame and everything else
+   had already been packed ahead of it. Fixed by wrapping it in a slot frame packed once,
+   immediately, in the correct position at construction time; only the badge's presence *inside*
+   that already-positioned slot toggles afterward.
+3. **Disabled "Download & Install" button didn't look disabled** — confirmed by reading
+   `ctk_button.py`: CTkButton's `state="disabled"` only dims `text_color` (via
+   `text_color_disabled`), never `fg_color`. A button built with `fg_color=T.ACCENT` and then
+   disabled still rendered as a vivid, apparently-clickable indigo button even though clicks were
+   correctly blocked — misleading. Fixed by choosing `T.NAV_INACTIVE`/`T.TEXT_MUTED` up front at
+   construction time whenever the current platform/release has no installable asset, instead of
+   relying on CTk's default disabled look.
+
+**Verified:**
+- A real, read-only `check_for_update()` call against the actual live GitHub API/repo (safe — GET
+  only, no push/write, no repo state changed): correctly found the real `v1.0.0` release, correctly
+  returned "no update" against a fake newer local version, correctly returned an update against a
+  fake old local version, correctly reported `asset_url=None` (accurately reflecting that no
+  Windows asset is attached to that real release yet).
+- Badge + dialog rendering verified with a mocked "newer version available" response (screenshots),
+  in **both Dark and Warm Ivory** (the user specifically asked this look intentional/premium, not a
+  placeholder — confirmed consistent with the app's existing pill/badge language in both palettes,
+  no new hex values): the release notes, the correctly-greyed-out disabled install button with
+  matching status text when no platform asset exists, and the correctly-positioned sidebar badge.
+- Full `tests/ui/` suite re-run after every change per the spec's explicit regression requirement:
+  functional tests 7/7 stable across multiple runs, close-button ~15ms timing 1/1 stable across
+  multiple runs, navigation timing 7/7 in the large majority of runs (~7s total, matching the
+  pre-existing baseline) with occasional flaky failures under heavy runs — root-caused via
+  `tasklist`/`Get-CimInstance Win32_Process` to genuine background CPU contention on this shared
+  machine (a large personal Chrome session with ~25 renderer processes, plus an unrelated
+  third-party app's server already running), the same class of contention this suite's own README
+  already documents for parallel workers — not a regression reintroduced by this work: confirmed by
+  re-running the identical test back-to-back and observing pass/fail flip between runs with no
+  code change in between, correlated with total run time (clean passes ~7s, flaky runs ~16s+).
+
+**Real, full click-to-complete end-to-end proof (added after the user correctly pushed back that
+"not exercised end-to-end" wasn't good enough to call Step 4 done):** rather than re-assert it
+works, built a real local HTTP server (Python `http.server`, not mocked) standing in for the GitHub
+asset host, and compiled a real tiny stand-in `.exe` (via `csc.exe`, which writes a marker file
+recording the exact args it received, then exits) standing in for a real Inno Setup installer —
+the two things that can't be tested against safely without a real different-version release and a
+real different install to overwrite. Drove the app with a genuine `window.mainloop()` (not manual
+`.update()` polling, which turned out to make cross-thread `self.after(0, ...)` calls artificially
+racy and would have hidden real behavior) through the literal sequence a user's click causes:
+`_show_update_dialog()` -> `dialog._start_download()` (the exact call the real button makes) ->
+real HTTP download completes -> `_on_download_succeeded` -> `_apply_downloaded_update` -> real
+detached-process launch -> real `_on_close()`. Confirmed: the stand-in installer's marker file
+was written with the real args (`/VERYSILENT /SUPPRESSMSGBOXES /NORESTART`) the button truly sends;
+`window.state()` was `"withdrawn"` immediately after; `window.mainloop()` returned on its own
+(before a 4.2s check-in even fired), meaning the real background-thread-driven `_safe_destroy()`
+genuinely completed — the same already-verified close-button behavior from Phase 5, not a new,
+unverified code path.
+
+**A 4th real bug found by this deeper test (not by code reading) — and the most important one**:
+the very first end-to-end run showed the file fully and correctly downloaded to disk, but the
+whole operation was reported as **failed** and the installer never launched. Root cause:
+`download_asset`'s per-chunk `on_progress(written / total)` call had no exception isolation — if
+that UI-progress callback ever throws for *any* reason, the exception propagated straight out of
+`download_asset`, and the caller's `except Exception` treated a perfectly successful download as a
+failure, discarding it. Fixed by wrapping the callback in its own `try/except: pass` — progress
+reporting is a UI convenience, not part of what "did the download succeed" means, and must never be
+able to sink an otherwise-successful download. Re-ran the full end-to-end test after the fix:
+marker file written, correct args, clean close — confirmed working, not just patched and assumed.
+
+**Not built / explicit gap, not silently dropped:** the Windows CI build job that would let
+`asset_url` ever be non-None automatically against a *real* release — until one is added (or a
+Windows installer is uploaded to a release by hand), the "Download & Install" button will correctly
+stay disabled with "View on GitHub" as the working fallback for real releases. The button's full
+mechanics (download, progress, detached launch, close) are now proven for real, end-to-end, against
+faithful local stand-ins — what's *not* proven is a real Inno Setup silent install actually
+completing (the stand-in `.exe` ignores the Inno Setup flags rather than truly installing
+anything), since there is no real different version to install against yet.
+
+## Real bug: Cards content silently showing under Settings (and others) — found by the user, not by any test
+
+While staging the update-checker demo above for the user to click through themselves, they
+navigated Cards -> Settings by hand and caught something no test or screenshot check in this
+whole session had: the header, breadcrumb, and active sidebar highlight all correctly said
+"Settings," but the page body still showed Cards' "Card Identity"/"Live Card Preview" content.
+**An earlier pass this session had already seen this exact symptom once, in a scripted screenshot
+driver, and wrongly dismissed it as a screenshot-timing artifact** after a follow-up direct-nav
+script happened not to reproduce it — that dismissal was wrong, and this section exists because
+the user's own live click-through proved it.
+
+**Root cause**, found by reading `_animate_view_in` line by line: its cleanup step for the
+*previous* animated-in container did `prev_container.place_forget(); prev_container.grid()`.
+`place_forget()` unmaps the previous container — but the very next call, a bare `grid()`,
+immediately remaps/re-shows it in the same cell. It was never actually hidden, just switched from
+place- back to grid-management while staying visible. Once *any* view had ever been shown via the
+animated path, it silently stayed visible forever afterward. Because Tk's default sibling stacking
+follows widget creation order, and Cards is built last in `_create_ui()` (`build_card_creator_view`
+is the final call), Cards naturally sits above every other view in that stacking order — so it,
+specifically, would silently show through on top of whatever view got navigated to next, while
+every other view's chrome (header/breadcrumb/sidebar) updated correctly, making it look exactly
+like a Settings-specific bug rather than what it actually was: a general "the previous view is
+never really hidden" bug that happened to be most visible because of Cards' stacking position.
+
+**Why no test caught this earlier**: `test_navigation_timing.py` only ever asserted
+`app._active_view == view_name` and elapsed time — never that the *previous* view's content was
+actually hidden. That's a real, now-closed test-coverage gap, not just a missed bug.
+
+**Fix, in two iterations (the first one measured as a real, if modest, performance regression and
+was corrected before being kept):**
+1. First attempt: `place_forget()` then re-`grid(row=0, column=0, sticky="nsew")` then
+   `grid_remove()` — correct (verified against 32 exhaustive tests, see below), but measured
+   adding ~300-500ms to the *next* transition when the previous view had its own nontrivial widget
+   tree (e.g. landing on Contacts or History right before it), because re-registering full
+   `sticky="nsew"` grid config forces that container's layout to resolve immediately as a side
+   effect of hiding it.
+2. Final fix: `place_forget()` alone. A widget under no geometry manager at all is simply unmapped
+   — no need to eagerly restore grid registration at hide-time. The existing incoming-container
+   code (`container.grid()`, bare, a few lines below) already re-registers a container when it's
+   actually shown, and Tk remembers each container's original `sticky="nsew"` registration from
+   `_new_view_container`'s initial `grid()`+`grid_remove()` call even across a `place()`/
+   `place_forget()` round-trip — confirmed by testing, not assumed.
+
+**Verification, closing the actual test-coverage gap instead of just patching the symptom**: added
+`tests/ui/test_view_stacking.py` — asserts *exactly one* view container is ever mapped
+(`winfo_ismapped()`) across all 30 possible ordered view-to-view transitions (every view to every
+other view, not just the sequence that happened to surface the bug), plus the user's literal
+Cards-then-Settings repro, plus a longer mixed-revisit stress sequence. **Proved the test itself
+was meaningful, not just trivially green**: temporarily reverted the fix and confirmed 27 of 32
+new tests failed against the old code (including the exact user-repro test), then reapplied the
+fix and confirmed all 32 pass. Re-verified visually too (screenshot of Cards -> Settings after the
+fix shows real Settings content — Campaign Safety, System Experience, WhatsApp ban-risk warning —
+with zero Cards bleed-through).
+
+**A second real issue found while fixing the first one**: switching to the cheaper
+`place_forget()`-only fix caused `test_navigation_timing.py` to start failing on Cards specifically
+(~600ms, consistently, over its 500ms budget — a tight, repeatable number, not the random
+machine-load noise documented elsewhere in this file). Isolated measurement (timing
+`grid()`+`update_idletasks()` alone, no animation logic, same technique already used to diagnose
+Compose's exception) showed Cards' first-ever render costs ~350-500ms and drops to ~70-85ms on
+every later render — the exact same cold-first-render/warm-after shape Compose already has a
+documented pre-warm for, that Cards had just never been given. A first attempt to pre-warm Cards
+synchronously alongside Compose in `_create_ui()` measured as a complete no-op (0.0ms) — traced to
+`card_creator_tab.py` populating its live preview via `self.after(800, self._schedule_preview)`,
+so the expensive content genuinely doesn't exist yet at that point; warming it that early just
+grid()'d an empty shell. Fixed by deferring Cards' pre-warm to a new `_prewarm_heavy_views`,
+scheduled via `self.after(1000, ...)` — comfortably after that 800ms timer — confirmed via direct
+measurement (350ms -> 79.5ms after the delay) and 5 consecutive clean `test_navigation_timing.py`
+runs (previously intermittent) before trusting it.
+
+**Full re-verification after all of the above**: all 47 tests across the whole `tests/ui/` suite
+pass (39 functional in parallel, 7 navigation-timing alone x5 consecutive clean runs, 1
+close-button alone) — run exactly as documented in the README, not cherry-picked.
