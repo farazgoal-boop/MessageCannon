@@ -676,6 +676,42 @@ has not been re-verified with screenshots the way every other feature in this fi
 as-is rather than either deleting working code or fabricating a verification narrative that didn't
 happen — functional review/testing of this specific feature is a real open item.
 
+**Follow-up (2026-07-15): the "not verified" gap above is now closed for functional behavior** —
+the "why was this built"/"what is JobMind Match" provenance question is still genuinely lost and
+not reconstructable, but the toggle itself has now been tested and screenshot-verified:
+
+- `tests/ui/test_sidebar_collapse.py` (7 tests, module-scoped isolated-DB window) and
+  `tests/ui/test_sidebar_collapse_persist.py` (1 test, split into its own file because it needs two
+  sequential `MainWindow()` root creations) now cover: default expanded state, toggle flips
+  `_sidebar_collapsed` + the `«`/`»` glyph, the sidebar column's `minsize` actually shrinks
+  (`SIDEBAR_WIDTH_EXPANDED` 220 → `SIDEBAR_WIDTH_COLLAPSED` 72), informational widgets (brand
+  wordmark, Premium Access panel, session status, license badge) hide/reappear correctly, nav
+  buttons switch to icon-only + centered anchor, navigation still works while collapsed, and
+  `sidebar_collapsed` persists across a simulated restart (fresh `MainWindow()` against the same
+  DB file). All 8 pass; full `tests/ui/` suite re-run afterward (47 functional + 7 navigation-timing
+  + 1 close-button, all still green) to confirm no regression, per this file's own standing rule.
+- **Real bug found and fixed while screenshotting before/after, not by reading the code**:
+  `_apply_sidebar_collapsed_visuals()`'s re-pack loop for the bottom sidebar widgets (Premium
+  Access panel, session status label, license badge) iterated them in the reverse of the order
+  `_create_ui()` originally packed them in. Since all three use `side="bottom"` packing — where
+  each newly-packed widget stacks *above* the ones already packed — replaying them in reverse order
+  silently flipped their on-screen stacking every time the sidebar was collapsed and then
+  re-expanded (License badge ended up on top, Premium Access at the bottom, instead of the
+  original top-to-bottom order). Invisible in a single static screenshot; only showed up as a diff
+  between the pre-toggle and post-round-trip screenshots. Fixed by reordering the tuple to replay
+  the original pack order (license badge → session status → premium panel); added
+  `test_reexpand_preserves_bottom_widget_stacking_order`, confirmed it fails against the old code
+  (via `git stash`) and passes against the fix, before trusting it.
+- `tests/ui/README.md`'s documented functional-test worker count updated `-n 5` → `-n 6` to match
+  the two new files.
+- **Still not done, explicitly out of scope for this pass**: the provenance question above ("why
+  was this built despite the earlier no-collapse conclusion", what "JobMind Match" refers to) is
+  unrecoverable and not worth fabricating an answer to. No keyboard-accessibility pass was added for
+  this control (matches Phase 5's own already-documented scope limit). This was one item picked
+  from a longer list of pending/deferred work in this file — the rest (per-row delete UI, Windows CI
+  build for the update checker, warm-up scheduler, list hygiene warnings, reputation dashboard, full
+  cross-theme visual audit, etc.) remain untouched.
+
 ## In-app update checker (complete — Step 4 of the packaging spec; Steps 2-3 skipped by user choice)
 
 Direction: match Career Copilot Premium's in-app auto-update system. **Studied the reference
@@ -880,3 +916,75 @@ runs (previously intermittent) before trusting it.
 **Full re-verification after all of the above**: all 47 tests across the whole `tests/ui/` suite
 pass (39 functional in parallel, 7 navigation-timing alone x5 consecutive clean runs, 1
 close-button alone) — run exactly as documented in the README, not cherry-picked.
+
+## Follow-up: sidebar-collapse verification pass (2026-07-15)
+
+Picked up the "not verified" gap flagged in the Sidebar redesign Addendum above. Added
+`tests/ui/test_sidebar_collapse.py` (7 tests) + `test_sidebar_collapse_persist.py` (1 test) —
+default state, toggle flips state/glyph, column width actually shrinks, informational widgets
+hide/reappear, nav buttons go icon-only, navigation still works collapsed, persistence across
+restart. **Real bug found via before/after screenshot diff, not code reading**:
+`_apply_sidebar_collapsed_visuals()`'s re-pack loop for the bottom widgets (Premium Access panel,
+session status, license badge) replayed them in the reverse of `_create_ui()`'s original pack
+order — since all three use `side="bottom"`, this silently flipped their visual stacking after
+every collapse→re-expand round trip. Fixed the pack order; added
+`test_reexpand_preserves_bottom_widget_stacking_order`, confirmed it fails on the old code (via
+`git stash`) and passes on the fix. Full suite re-run clean (55 tests). Not committed — left in
+the working tree for the user to review. Provenance of the original collapse feature (why it
+contradicts the "no collapse needed" conclusion, what "JobMind Match" refers to) stays
+unrecoverable, noted as such rather than guessed at.
+
+## Round 2 — major redesign request (raised 2026-07-15, verbatim + triage, not yet started)
+
+User ran the live app, compared it against their other two apps on this machine
+(`D:\my apps\career_copilot_premium` and `D:\my apps\jobmind-match`), and gave this feedback
+in one message (recorded close to verbatim, since the exact wording carries intent):
+
+1. "sidebar placing is too bad and not as copilot colapsable" — the collapse/expand interaction
+   itself doesn't match Career Copilot Premium's feel.
+2. "update app button in sidebar missing as copilot" — Copilot has an update-check affordance in
+   its sidebar that this app's own sidebar update badge apparently doesn't match/isn't visible
+   the same way.
+3. "change color scheme on top of right side as my app jobmind match is missing" — something in
+   the top-right header area's color scheme should match JobMind Match; exact missing element not
+   yet identified (needs a direct read of JobMind Match's header CSS/theme before touching
+   anything, per this file's own standing rule about studying references first).
+4. AI Card Creator should be a properly organized, reliable, "premium SaaS" product-card builder —
+   explicit fields wanted: image, icons, description, background, contacts, header, footer, price
+   of product — "where is it heading" (implies the current version feels incomplete/unclear in
+   direction). This is the biggest single item — effectively a scoped rebuild of
+   `card_creator_tab.py`'s content model, not a visual tweak. Note: CLAUDE.md's own Card Creator
+   section already documents the Bulk Send half of this tab as a non-functional UI mock — this
+   request is about the card *authoring* side, a separate concern.
+5. **Concrete, reproducible bug, distinct from the rest**: sidebar was in the wrong position at
+   first launch and only "settled" into the right place after some point during the session —
+   i.e. a layout/geometry issue on cold start, not just a style complaint. Needs its own
+   root-cause pass (likely a grid/pack timing race during `_create_ui()`, similar in spirit to the
+   Cards pre-warm and view-stacking bugs already found and fixed elsewhere in this file) rather
+   than being bundled into the general polish work.
+6. "app should compare to any apple or google app" — read as a quality-bar statement (build to
+   that level of visual/interaction polish), not a literal feature request to benchmark against a
+   specific named Apple/Google product; confirm this reading before scoping work against it.
+7. General color consistency / theme / behavior polish across the whole app is "not good enough
+   overall" — a broader ask than any single item above; likely overlaps with Phase 5's own
+   already-documented "not done: full cross-theme visual audit" gap.
+8. Section open/close (view-switching) animation and the sidebar footer should match Career Copilot
+   Premium's own signature style — **with one explicit twist**: the user says they *personally
+   customized* Copilot Premium's own footer to sit on the right sidebar in that app, and wants
+   *that same customized placement* (footer content anchored properly in the sidebar footer area,
+   position as corrected in Copilot, not Copilot's original/default footer) replicated here. This
+   needs Copilot Premium's actual current footer code/CSS read directly — not assumed from memory
+   of the earlier "Sidebar redesign" research pass — since the user says they changed it after that
+   research was done.
+
+**User's explicit process ask**: record this in CLAUDE.md (this section), then execute all of it
+"in one go," then confirm together with testing/bug-checking before moving on to GitHub packaging
+work (item 8's "like copilot premium" packaging, i.e. the CI/installer work already partially
+scoped in the "In-app update checker" section above). **Not yet started** — before writing any
+code, the plan is to (a) directly read the relevant sidebar/footer/header/theme source in both
+`career_copilot_premium` and `jobmind-match` (per this file's own repeated rule: study the real
+reference before writing code, which is exactly what caught the earlier "Career Copilot has no
+sidebar to fold" false assumption in the original Sidebar redesign section), and (b) get the
+user's confirmation on the ambiguous items above (3, 4's exact field/behavior spec, 6's reading,
+8's exact footer placement) before treating any of them as done, rather than guessing across 8
+items at once and re-doing work later.

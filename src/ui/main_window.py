@@ -2621,10 +2621,17 @@ class MainWindow(ctk.CTk):
             else:
                 widget.grid()
 
+        # Order matters here: side="bottom" packing stacks each newly-packed
+        # widget ABOVE the previously-packed ones, so this must replay the
+        # same order _create_ui() originally packed them in (license_badge,
+        # then session_status_label, then premium_panel) or a collapse ->
+        # re-expand round trip silently reverses their visual stacking —
+        # found by comparing before/after screenshots, not by reading the
+        # code (the bug was invisible in isolation, only visible as a diff).
         for widget, pack_kwargs in (
-            (self.sidebar_premium_panel, dict(side="bottom", fill="x", padx=10, pady=(0, 6))),
-            (self.sidebar_session_status_label, dict(side="bottom", fill="x", padx=12, pady=(4, 3))),
             (self.sidebar_license_badge, dict(side="bottom", anchor="w", padx=12, pady=(0, 14))),
+            (self.sidebar_session_status_label, dict(side="bottom", fill="x", padx=12, pady=(4, 3))),
+            (self.sidebar_premium_panel, dict(side="bottom", fill="x", padx=10, pady=(0, 6))),
         ):
             if collapsed:
                 widget.pack_forget()
