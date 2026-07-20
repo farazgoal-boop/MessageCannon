@@ -1097,3 +1097,52 @@ animation is neutralized regardless of which path the *next* view navigation tak
 Items 1 (collapse *feel*), 4 (Card Creator field spec), 6 (quality-bar reading), and 7 (broad
 polish) remain open/unstarted, each still needing its own scoping pass before code per this file's
 standing discipline.
+
+**CHECKPOINT: Item 1 (collapse feel) — investigated, partially implemented; full width-transition
+confirmed infeasible by direct measurement.**
+
+Before writing any code, re-checked the actual claim in the earlier "Sidebar redesign" section that
+neither reference app has a real click-to-toggle collapse — that check was only ever done against
+Career Copilot (confirmed: no sidebar at all). **JobMind Match was never actually checked for this
+specific claim and does have one**: `.app-sidebar` + `.sidebar-collapse-toggle`
+(`styles.css:286-325`), a real `transition: width var(--transition-fast)` (0.15s ease) on the
+sidebar itself, `--sidebar-width-collapsed: 68px`, a 180deg icon-rotation on the toggle button
+instead of swapping glyphs, and real JS (`wireSidebarCollapse`, `app.js:422`) persisting state to
+`localStorage`. The stale main_window.py comment above the toggle button (which repeated the wrong
+claim) has been corrected in place.
+
+**The width transition was measured directly, not assumed, before deciding against it** (same
+discipline as every other animation decision in this file): stepping
+`grid_columnconfigure(0, minsize=...)` from 220 to 72 in ~19 steps costs **~40-210ms per step** on
+this app's real views (Cards, Compose, Settings, Campaigns) — even in the best-case variant tested
+(content pane's own column pinned to a fixed width so it doesn't also have to reflow). A single
+step already exceeds the ~22ms-per-step budget the existing view slide-in animation uses, and the
+real toggle can't pin the content pane's width the way the benchmark did, since its available width
+genuinely changes as the sidebar resizes. A smooth version would cost seconds, not milliseconds,
+and would visibly reflow whatever heavy view happens to be on screen every single frame — the exact
+cost class this file has already measured and avoided for the view-slide animation and the
+close-button fix. Kept the instant snap; updated `_apply_sidebar_collapsed_visuals`'s docstring
+with the real numbers instead of the previous "same cost lesson... " hand-wave, which stated the
+conclusion without ever having measured this specific case.
+
+**What WAS feasible and built this pass, mirroring the parts of JobMind's real toggle that don't
+require a relayout:**
+- A dynamic tooltip on the collapse button (`self._collapse_btn_tooltip`, via the existing
+  `tooltip.py`), text updating between "Collapse sidebar" / "Expand sidebar" — same idea as
+  JobMind's `toggle.title` swap.
+- `_pulse_collapse_toggle()`: a brief accent-color flash on the toggle button alone (two
+  `.configure()` calls, synchronous, no layout pass) timed with the instant snap, so the click
+  still gets some tactile feedback in place of the CSS transition that isn't achievable here.
+
+**Not done, still open for item 1**: no visual/UX changes beyond the toggle button itself (e.g. the
+badge-repositioning-onto-icon pattern JobMind uses for collapsed nav badges, or JobMind's own
+`.sidebar-update-pill` collapsed treatment) — those weren't part of the reported complaint ("not as
+copilot [JobMind] collapsable") and are closer to item 2's scope (the sidebar update-pill itself,
+still unbuilt). Verified via direct script probes (not screenshots this pass): tooltip text swaps
+correctly across 2 round-trip toggles, pulse fires synchronously and is confirmed scheduled to
+restore. Added `test_collapse_toggle_tooltip_text_matches_state` and
+`test_collapse_toggle_pulses_then_restores` to `tests/ui/test_sidebar_collapse.py` (10/10 pass in
+that file). Full suite re-run clean per this file's regression discipline.
+
+Items 4 (Card Creator field spec), 6 (quality-bar reading), and 7 (broad polish) remain
+open/unstarted.

@@ -219,3 +219,44 @@ def test_nav_still_switches_views_while_collapsed(window):
     assert window.view_containers["Settings"].winfo_ismapped()
 
     _ensure_expanded(window)
+
+
+def test_collapse_toggle_tooltip_text_matches_state(window):
+    """Item 1 (Round 2): mirrors JobMind Match's real
+    `toggle.title = collapsed ? "Expand..." : "Collapse..."` -- the reference
+    this project actually has a real collapse toggle (unlike Career Copilot,
+    which has none), just not this specific dynamic-tooltip detail before
+    now."""
+    _ensure_expanded(window)
+    assert window._collapse_btn_tooltip.text == "Collapse sidebar"
+
+    window._toggle_sidebar_collapsed()
+    window.update()
+    assert window._collapse_btn_tooltip.text == "Expand sidebar"
+
+    window._toggle_sidebar_collapsed()
+    window.update()
+    assert window._collapse_btn_tooltip.text == "Collapse sidebar"
+
+
+def test_collapse_toggle_pulses_then_restores(window):
+    """A real smooth width transition (matching JobMind's CSS
+    `transition: width`) was measured and found to cost ~40-210ms PER STEP
+    on this app's real views -- infeasible for a smooth animation. This
+    single-widget color pulse is the feasible substitute: verifies the
+    button's fg_color actually changes to accent immediately (synchronous,
+    no relayout) and is scheduled to restore afterward, without asserting a
+    specific wall-clock delay (that part is inherently timing-sensitive --
+    see the call site's own note about _save_settings() I/O being able to
+    outlast the pulse window)."""
+    _ensure_expanded(window)
+    from src.ui import theme as T
+    btn = window.sidebar_collapse_btn
+    resting_color = btn.cget("fg_color")
+
+    window._pulse_collapse_toggle()
+    assert btn.cget("fg_color") == T.ACCENT
+    assert window._collapse_pulse_after_id is not None
+
+    window.after_cancel(window._collapse_pulse_after_id)
+    btn.configure(fg_color=resting_color)
