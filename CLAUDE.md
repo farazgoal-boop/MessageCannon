@@ -1146,3 +1146,85 @@ that file). Full suite re-run clean per this file's regression discipline.
 
 Items 4 (Card Creator field spec), 6 (quality-bar reading), and 7 (broad polish) remain
 open/unstarted.
+
+**CHECKPOINT: Item 4 (Card Creator rebuild) — complete.**
+
+Read `card_creator_tab.py` (1606 lines) fully before writing any code, per this file's own
+"study before building" discipline. Finding that changed the plan: every field the user listed
+(image, icons, description, background, contacts, header, footer, price) already existed in some
+form — a working section-based builder (banner/youtube/text/features/price/links/contact) with AI
+generation, presets, live preview, and export. Rather than guess which gaps mattered, asked the
+user directly: (1) is this a generic tool for any MessageCannon customer or the developer's own
+cross-promotion tool — **generic, confirmed**; (2) which of 4 candidate gaps to prioritize —
+**all four, confirmed**: local image upload, flexible header/footer, custom background, editor
+UI polish.
+
+**Real, serious bug found and fixed, not just a "personal default"**: `self._meta`'s
+org/wa/email/addr (business name, phone, email, address shown in every card's Contact Footer
+section) were hardcoded to the developer's own real contact info (`"Faraz Automation"`,
+`"+92 316 2400657"`, `"farazgoal@gmail.com"`, `"Karachi, Pakistan"`) **with zero UI to ever change
+them** — confirmed via grep that no widget anywhere was ever bound to those dict keys. Every card
+any MessageCannon customer has ever generated with the Contact Footer section has been silently
+advertising the developer's real personal phone number and email instead of their own business's.
+Fixed: replaced the dead dict with real `ctk.StringVar`s (`self._morg/_mwa/_memail/_maddr`), added
+a "YOUR CONTACT INFO" editable field row (same pattern as the App Name/Icon/Tagline fields),
+changed all fallback defaults (in `generate_html()` and `_collect_meta()`) to empty strings, and
+made the Contact Footer section (plus the header's org line and the page `<title>`/footer-tag)
+skip any blank field instead of rendering an empty "📱 " line. Verified the fix would have caught
+the bug: reverted it and confirmed a new test (`test_no_org_defaults_to_generic_not_developer_contact_info`)
+fails against the old code with the developer's real phone number literally asserted present in
+the output, then re-applied the fix and confirmed it passes.
+
+**Local image upload** (banner + custom background, shared code): `image_file_to_data_uri()`
+(new module-level function) reads a local file, validates it's a real image type and under a 5MB
+cap (base64 roughly triples encoded size — 5MB keeps the exported standalone HTML a reasonable
+size to actually send over WhatsApp/email), and returns a `data:` URI embedded directly as the
+`<img>` src — no external file dependency, consistent with `generate_html()`'s existing
+standalone-HTML design. `CardCreatorV2._pick_local_image()` is the shared file-picker+error-toast
+flow, reused by both the banner section's new "📁 Upload from device" button and the custom
+background's "📁 Upload Image" button. Errors (oversized, not a real image, missing file) surface
+as a toast via the existing `main_window`, never a raw traceback.
+
+**Custom background** (color + image): a "Custom" option is appended only to the Card Template
+**dropdown's values list** — never inserted into `CARD_STYLE_TEMPLATES` itself, which stays
+completely untouched per the Design System's own "what not to touch" rule. Selecting it reveals a
+previously-hidden row (color picker via the already-imported `colorchooser`, or the shared image
+upload). A new `_contrast_text_color()` helper picks readable near-black/near-white body text via
+relative luminance, standing in for the manual color pairing the 6 built-in templates already have
+(e.g. Dark Premium's white text on navy) — a custom color has no such hand-pairing, so this closes
+that gap automatically rather than risking unreadable light-on-light text.
+
+**Header made a real section**: the branded header (icon/app name/tagline) was the one piece that
+was still hardcoded to always render first in `generate_html()`, unlike every other section
+(banner, text, price, ...) which are already addable/removable/reorderable — the Contact Footer
+("footer") was, on inspection, *already* a real section (`SECTION_TYPES` includes `"📞 Contact
+Footer"`), so the actual structural gap was narrower than the original ask implied. Added
+`("🏷️ Header", "header")` to `SECTION_TYPES`, moved the header's HTML out of its own hardcoded
+block into the same `if/elif` chain as every other section type (reading identity fields from
+`meta`, not its own per-section data, since App Name/Icon/Tagline are already global card identity
+rather than per-section content), and made `_load_preset()` add it as the first section by default
+so existing behavior is unchanged out of the box — it's just now a real, removable, reorderable
+section like the rest.
+
+**Editor UI polish**: with the AI box, presets, identity fields, style controls, and now custom
+background + contact info all in one panel, the editor had started to read as one undifferentiated
+wall of fields. Added two small section labels ("APP IDENTITY", "STYLE & APPEARANCE") using the
+same `T.TEXT_DIM`/10pt/bold style already established by the existing "OR START FROM A TEMPLATE"
+and "YOUR CONTACT INFO" labels — a light, real grouping pass rather than a ground-up visual
+rebuild, consistent with this file's practice of scoping realistically rather than attempting
+everything at once.
+
+**Verified throughout, not just at the end**: `tests/test_card_generator.py` grew from 6 to 19
+tests (image upload validation, the org-default bug with a confirmed-fails-on-old-code check,
+blank-field omission, custom background color/image rendering, contrast-color edge cases, header
+section presence/absence/reordering) — all 19 pass. Full `tests/ui/` suite re-run clean after each
+of the four sub-changes (50 functional tests stable throughout), plus live-widget probes (not just
+unit tests) confirming: the new contact-info fields actually flow into exported HTML, an uploaded
+local image's data URI appears in the exported card, switching to/from "Custom" template correctly
+shows/hides the background controls and reverts cleanly, and removing the header section actually
+removes it from the output while the page `<title>` still carries the app name.
+
+**Not done / explicit scope note**: the Bulk Send half of this tab remains the pre-existing
+documented non-functional mock (see "Card Creator — current state" section above) — this pass was
+scoped to the card *authoring* side only, per the user's own framing of item 4 as a separate
+concern from that.

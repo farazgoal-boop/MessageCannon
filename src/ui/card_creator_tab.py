@@ -4,7 +4,9 @@ Complete in-app card builder with live HTML preview, section management,
 bulk send via WhatsApp + Email, and read/unread tracking.
 """
 
+import base64
 import logging
+import mimetypes
 import html as html_module
 import tkinter as tk
 from tkinter import filedialog, messagebox, colorchooser
@@ -17,7 +19,7 @@ import tempfile
 import time
 from pathlib import Path
 from datetime import datetime, date
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 from ..core import ai_service
 from ..core.ai_service import AIServiceError
@@ -39,6 +41,7 @@ except ImportError:
 
 # ── Section types available in card builder ───────────────────────────────────
 SECTION_TYPES = [
+    ("🏷️ Header",          "header"),
     ("🖼️ Banner Image",    "banner"),
     ("▶️ YouTube Video",   "youtube"),
     ("📝 Text Block",      "text"),
@@ -140,6 +143,62 @@ def _clean_url(url: str) -> str:
     return str(url).strip().strip('"').strip("'").strip()
 
 
+def _contrast_text_color(hex_color: str) -> str:
+    """Pick a readable body-text color (near-white or near-black) for a
+    given solid background hex color, via relative luminance -- so a custom
+    background someone picks light doesn't silently ship unreadable
+    light-on-light text (the 6 built-in CARD_STYLE_TEMPLATES were each
+    hand-paired with a matching text color; a custom background has no such
+    pairing, so this stands in for that judgment)."""
+    h = hex_color.lstrip("#")
+    if len(h) != 6:
+        return "rgba(255,255,255,0.85)"
+    try:
+        r, g, b = (int(h[i:i + 2], 16) for i in (0, 2, 4))
+    except ValueError:
+        return "rgba(255,255,255,0.85)"
+    luminance = (0.299 * r + 0.587 * g + 0.114 * b) / 255
+    return "rgba(20,20,20,0.85)" if luminance > 0.6 else "rgba(255,255,255,0.85)"
+
+
+# Cards are standalone HTML files sent over WhatsApp/email -- embedding an
+# uploaded image as a base64 data URI keeps the exported file self-contained
+# (no broken links if the original file moves), but every extra MB roughly
+# triples in encoded size and bloats the message. 5MB is generous for a
+# banner/background image while still keeping the exported card a
+# reasonable size to actually send.
+MAX_UPLOAD_IMAGE_BYTES = 5 * 1024 * 1024
+
+
+class ImageUploadError(Exception):
+    """Raised by image_file_to_data_uri for a file that's missing, unreadable,
+    too large, or not a recognized image type -- always caught and shown to
+    the user via a toast, never left to surface as a raw traceback."""
+
+
+def image_file_to_data_uri(path: str) -> str:
+    """Read a local image file and return it as a base64 data: URI, so it
+    can be used directly as an <img src="..."> in a standalone exported
+    card with no external file dependency."""
+    file_path = Path(path)
+    if not file_path.is_file():
+        raise ImageUploadError(f"File not found: {path}")
+
+    size = file_path.stat().st_size
+    if size > MAX_UPLOAD_IMAGE_BYTES:
+        raise ImageUploadError(
+            f"Image is {size / (1024*1024):.1f}MB — please use one under "
+            f"{MAX_UPLOAD_IMAGE_BYTES // (1024*1024)}MB so the exported card "
+            f"stays a reasonable size to send.")
+
+    mime_type, _ = mimetypes.guess_type(str(file_path))
+    if not mime_type or not mime_type.startswith("image/"):
+        raise ImageUploadError(f"Not a recognized image file: {file_path.name}")
+
+    encoded = base64.b64encode(file_path.read_bytes()).decode("ascii")
+    return f"data:{mime_type};base64,{encoded}"
+
+
 def _contact_key(contact: Contact) -> str:
     """Stable per-contact identifier used to line up AI-personalized messages."""
     return (contact.phone or contact.email or "").strip()
@@ -191,10 +250,10 @@ def generate_html(sections: list, meta: dict, for_preview: bool = False) -> str:
     app_name = safe_text(meta.get("app_name", "My App"))
     icon     = meta.get("icon", "⭐")
     tagline  = safe_text(meta.get("tagline", ""))
-    org      = safe_text(meta.get("org", "Faraz Automation"))
-    wa       = safe_text(meta.get("wa", "+92 316 2400657"))
-    email    = safe_text(meta.get("email", "farazgoal@gmail.com"))
-    addr     = safe_text(meta.get("addr", "Karachi, Pakistan"))
+    org      = safe_text(meta.get("org", ""))
+    wa       = safe_text(meta.get("wa", ""))
+    email    = safe_text(meta.get("email", ""))
+    addr     = safe_text(meta.get("addr", ""))
     style    = meta.get("style", CARD_STYLE_TEMPLATES["Dark Premium"])
     card_bg  = style.get("bg", "#1a1a2e")
     body_bg  = style.get("body_bg", "#111827")
@@ -206,8 +265,20 @@ def generate_html(sections: list, meta: dict, for_preview: bool = False) -> str:
 
     body_parts = []
 
-    # Always start with branded header
-    body_parts.append(f"""
+    for sec in sections:
+        stype = sec.get("type", "")
+        data  = sec.get("data", {})
+
+        if stype == "header":
+            # Was previously hardcoded to always render first regardless of
+            # `sections` -- now a real section like everything else
+            # (addable/removable/reorderable), reading the same App
+            # Name/Icon/Tagline identity fields from `meta` rather than its
+            # own per-section data, since those are already global card
+            # identity, not per-section content.
+            org_line = (f'<div style="font-size:10px;color:rgba(255,255,255,0.4)">'
+                        f'{org}</div>') if org else ""
+            body_parts.append(f"""
     <div style="background:{header_bg};padding:20px 24px 0">
       <div style="height:3px;background:linear-gradient(90deg,{accent},{accent}88,{accent});
         margin:-20px -24px 20px;border-radius:20px 20px 0 0"></div>
@@ -217,7 +288,7 @@ def generate_html(sections: list, meta: dict, for_preview: bool = False) -> str:
             display:flex;align-items:center;justify-content:center;font-size:22px">{icon}</div>
           <div>
             <div style="font-size:17px;font-weight:500;color:#fff">{app_name}</div>
-            <div style="font-size:10px;color:rgba(255,255,255,0.4)">{org}</div>
+            {org_line}
           </div>
         </div>
         <div style="font-size:10px;padding:4px 12px;border-radius:20px;
@@ -225,11 +296,7 @@ def generate_html(sections: list, meta: dict, for_preview: bool = False) -> str:
       </div>
     </div>""")
 
-    for sec in sections:
-        stype = sec.get("type", "")
-        data  = sec.get("data", {})
-
-        if stype == "banner" and data.get("url"):
+        elif stype == "banner" and data.get("url"):
             banner_url = safe_attr(_clean_url(data["url"]))
             body_parts.append(f"""
     <div style="width:100%;aspect-ratio:16/9;overflow:hidden;background:#111">
@@ -342,14 +409,20 @@ def generate_html(sections: list, meta: dict, for_preview: bool = False) -> str:
                 body_parts.append(f'<div style="padding:8px 24px">{rows}</div>')
 
         elif stype == "contact":
-            body_parts.append(f"""
+            org_html = (f'<div style="font-size:12px;font-weight:500;color:{accent};'
+                        f'margin-bottom:6px">{org}</div>') if org else ""
+            wa_html = (f'<div style="font-size:11px;color:rgba(255,255,255,0.5);'
+                       f'margin-bottom:3px">📱 {wa}</div>') if wa else ""
+            email_html = (f'<div style="font-size:11px;color:rgba(255,255,255,0.5);'
+                          f'margin-bottom:3px">✉️ {email}</div>') if email else ""
+            addr_html = (f'<div style="font-size:11px;color:rgba(255,255,255,0.4)">'
+                         f'📍 {addr}</div>') if addr else ""
+            if org_html or wa_html or email_html or addr_html:
+                body_parts.append(f"""
     <div style="height:0.5px;background:rgba(255,255,255,0.08);margin:4px 24px"></div>
     <div style="padding:14px 24px 20px;display:flex;align-items:flex-end;justify-content:space-between">
       <div>
-        <div style="font-size:12px;font-weight:500;color:{accent};margin-bottom:6px">{org}</div>
-        <div style="font-size:11px;color:rgba(255,255,255,0.5);margin-bottom:3px">📱 {wa}</div>
-        <div style="font-size:11px;color:rgba(255,255,255,0.5);margin-bottom:3px">✉️ {email}</div>
-        <div style="font-size:11px;color:rgba(255,255,255,0.4)">📍 {addr}</div>
+        {org_html}{wa_html}{email_html}{addr_html}
       </div>
       <div style="text-align:right">
         <div style="width:40px;height:40px;background:{accent}22;border:0.5px solid {accent}55;
@@ -359,13 +432,15 @@ def generate_html(sections: list, meta: dict, for_preview: bool = False) -> str:
     </div>""")
 
     body_html = "\n".join(body_parts)
+    title = f"{app_name} — {org}" if org else app_name
+    footer_tag = f"Created with MessageCannon Pro · {org}" if org else "Created with MessageCannon Pro"
 
     return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>{app_name} — {org}</title>
+<title>{title}</title>
 <style>
   *{{box-sizing:border-box;margin:0;padding:0}}
   body{{background:{body_bg};font-family:Arial,Helvetica,sans-serif;
@@ -384,7 +459,7 @@ def generate_html(sections: list, meta: dict, for_preview: bool = False) -> str:
   <div class="card">
 {body_html}
   </div>
-  <div class="footer-tag">Created with MessageCannon Pro · {org}</div>
+  <div class="footer-tag">{footer_tag}</div>
 </div>
 </body>
 </html>"""
@@ -407,17 +482,29 @@ class CardCreatorV2(ctk.CTkFrame):
         self._bulk_messages: Dict[str, str] = {}  # contact key -> AI-personalized message
         self._preview_job = None
         self._style_name = "Dark Premium"
-        self._buy_var = ctk.StringVar(value="")
-        self._meta     = {
-            "app_name": "MessageCannon Pro",
-            "icon":     "📨",
-            "tagline":  "Bulk Messaging Tool",
-            "accent":   "#6c63ff",
-            "org":      "Faraz Automation",
-            "wa":       "+92 316 2400657",
-            "email":    "farazgoal@gmail.com",
-            "addr":     "Karachi, Pakistan",
+        # Custom background (task #6, Round 2 item 4): a separate style dict
+        # from the 6 built-in CARD_STYLE_TEMPLATES (never touched -- see
+        # Design System rules), selected via a "Custom" entry appended only
+        # to the dropdown's *values* list, never inserted into the dict
+        # itself. Starts as a plain dark default; either a color pick or an
+        # uploaded image (see _pick_custom_bg_color/_pick_custom_bg_image)
+        # overwrites it once the user actually customizes something.
+        self._custom_style = {
+            "bg": "#1a1a2e", "body_bg": "#1a1a2e",
+            "text": "rgba(255,255,255,0.85)", "header_bg": "#1a1a2e",
         }
+        self._buy_var = ctk.StringVar(value="")
+        # Business/contact info shown in the card's footer -- previously a
+        # dead, never-editable dict hardcoded to the developer's own real
+        # contact details (org/phone/email/address), so every card any
+        # MessageCannon user generated silently advertised the developer's
+        # info instead of their own. Now real, empty-by-default StringVars
+        # with a UI to edit them (see the "Your Contact Info" row below),
+        # same pattern as the App Name/Icon/Tagline fields.
+        self._morg   = ctk.StringVar(value="")
+        self._mwa    = ctk.StringVar(value="")
+        self._memail = ctk.StringVar(value="")
+        self._maddr  = ctk.StringVar(value="")
         self._build_ui()
         # Load default sections
         self._load_preset("MessageCannon Pro")
@@ -508,9 +595,20 @@ class CardCreatorV2(ctk.CTkFrame):
             bf.grid_columnconfigure(i%3, weight=1)
             self._app_btns[name] = b
 
+        # Task #8 (Round 2 item 4): light visual grouping pass -- with the
+        # AI box, presets, identity fields, style controls, and contact info
+        # all now in one panel, a plain unlabeled stack of rows started to
+        # read as one undifferentiated wall of fields. Small section labels
+        # (same T.TEXT_DIM/10pt/bold style already used for "OR START FROM A
+        # TEMPLATE" and "YOUR CONTACT INFO") group related controls without
+        # a structural rebuild.
+        ctk.CTkLabel(top, text="APP IDENTITY", text_color=T.TEXT_DIM,
+                     font=ctk.CTkFont(size=10, weight="bold")).grid(
+            row=4, column=0, padx=16, pady=(4, 4), sticky="w")
+
         # Meta fields row
         mf = ctk.CTkFrame(top, fg_color="transparent")
-        mf.grid(row=4, column=0, padx=16, pady=(0, 8), sticky="ew")
+        mf.grid(row=5, column=0, padx=16, pady=(0, 8), sticky="ew")
         mf.grid_columnconfigure((0,1,2,3), weight=1)
 
         self._mname = ctk.StringVar(value="MessageCannon Pro")
@@ -532,9 +630,13 @@ class CardCreatorV2(ctk.CTkFrame):
                 row=1,column=i,sticky="ew",padx=2)
             var.trace_add("write", lambda *_: self._schedule_preview())
 
+        ctk.CTkLabel(top, text="STYLE & APPEARANCE", text_color=T.TEXT_DIM,
+                     font=ctk.CTkFont(size=10, weight="bold")).grid(
+            row=6, column=0, padx=16, pady=(4, 4), sticky="w")
+
         # Accent colors
         cf = ctk.CTkFrame(top, fg_color="transparent")
-        cf.grid(row=5, column=0, padx=16, pady=(0,12), sticky="w")
+        cf.grid(row=7, column=0, padx=16, pady=(0,12), sticky="w")
         ctk.CTkLabel(cf, text="Theme:", text_color=T.TEXT_MUTED,
                      font=ctk.CTkFont(size=11)).grid(row=0,column=0,padx=(0,6))
         for i,c in enumerate(ACCENT_COLORS):
@@ -547,12 +649,15 @@ class CardCreatorV2(ctk.CTkFrame):
                       command=self._custom_color).grid(row=0,column=len(ACCENT_COLORS)+1,padx=(6,0))
 
         tf = ctk.CTkFrame(top, fg_color="transparent")
-        tf.grid(row=6, column=0, padx=16, pady=(0, 14), sticky="ew")
+        tf.grid(row=8, column=0, padx=16, pady=(0, 14), sticky="ew")
         ctk.CTkLabel(tf, text="Card Template:", text_color=T.TEXT_MUTED,
                      font=ctk.CTkFont(size=11)).grid(row=0, column=0, padx=(0, 8))
         self._template_var = ctk.StringVar(value="Dark Premium")
+        # "Custom" is appended only to the dropdown's values list here, never
+        # inserted into CARD_STYLE_TEMPLATES itself (off-limits, see Design
+        # System rules) -- _apply_card_template branches on it separately.
         ctk.CTkOptionMenu(
-            tf, values=list(CARD_STYLE_TEMPLATES.keys()),
+            tf, values=list(CARD_STYLE_TEMPLATES.keys()) + ["Custom"],
             variable=self._template_var, command=self._apply_card_template,
             fg_color=T.BADGE_BG, button_color=T.BADGE_BG,
             button_hover_color=T.BG_BORDER,
@@ -562,6 +667,61 @@ class CardCreatorV2(ctk.CTkFrame):
             dropdown_text_color=T.TEXT_HEAD,
             width=180, font=ctk.CTkFont(size=11),
         ).grid(row=0, column=1, sticky="w")
+
+        # Custom background controls -- hidden unless "Custom" is the
+        # selected template, so users don't see inactive controls.
+        self._custom_bg_row = ctk.CTkFrame(top, fg_color="transparent")
+        self._custom_bg_row.grid(row=9, column=0, padx=16, pady=(0, 14), sticky="ew")
+        ctk.CTkLabel(self._custom_bg_row, text="Custom Background:",
+                     text_color=T.TEXT_MUTED, font=ctk.CTkFont(size=11)).pack(
+            side="left", padx=(0, 8))
+        ctk.CTkButton(self._custom_bg_row, text="🎨 Pick Color", width=1,
+                      fg_color=T.BADGE_BG, hover_color=T.BG_BORDER,
+                      text_color=T.TEXT_HEAD, font=ctk.CTkFont(size=11),
+                      command=self._pick_custom_bg_color).pack(side="left", padx=2)
+        ctk.CTkButton(self._custom_bg_row, text="📁 Upload Image", width=1,
+                      fg_color=T.BADGE_BG, hover_color=T.BG_BORDER,
+                      text_color=T.TEXT_HEAD, font=ctk.CTkFont(size=11),
+                      command=self._pick_custom_bg_image).pack(side="left", padx=2)
+        ctk.CTkButton(self._custom_bg_row, text="✕ Clear image", width=1,
+                      fg_color=T.BADGE_BG, hover_color=T.DANGER_HOVER,
+                      text_color=T.TEXT_HEAD, font=ctk.CTkFont(size=11),
+                      command=self._clear_custom_bg_image).pack(side="left", padx=2)
+        self._custom_bg_status = ctk.StringVar(value="")
+        ctk.CTkLabel(self._custom_bg_row, textvariable=self._custom_bg_status,
+                     text_color=T.SUCCESS, font=ctk.CTkFont(size=10)).pack(
+            side="left", padx=(8, 0))
+        self._custom_bg_row.grid_remove()  # only shown when template == "Custom"
+
+        # Your Contact Info -- shown in the card's Contact Footer section.
+        # Previously hardcoded to the developer's own real phone/email/org
+        # with no way to edit it at all, so every card any MessageCannon
+        # user made advertised the developer's contact info instead of
+        # their own. Empty by default; the Contact Footer section (see
+        # SECTION_TYPES) simply omits any line left blank.
+        cif = ctk.CTkFrame(top, fg_color="transparent")
+        cif.grid(row=10, column=0, padx=16, pady=(0, 14), sticky="ew")
+        cif.grid_columnconfigure((0, 1), weight=1)
+        ctk.CTkLabel(cif, text="YOUR CONTACT INFO (shown in Contact Footer section)",
+                     text_color=T.TEXT_DIM, font=ctk.CTkFont(size=10, weight="bold")).grid(
+            row=0, column=0, columnspan=2, sticky="w", pady=(0, 4))
+
+        for i, (lbl, var, ph) in enumerate([
+            ("Business/Org Name", self._morg, "Your Company"),
+            ("WhatsApp Number",   self._mwa,   "+1 555 0100"),
+            ("Email",             self._memail, "you@example.com"),
+            ("Address",           self._maddr,  "City, Country"),
+        ]):
+            ctk.CTkLabel(cif, text=lbl, text_color=T.TEXT_MUTED,
+                         font=ctk.CTkFont(size=11)).grid(
+                row=1 + (i // 2) * 2, column=i % 2, sticky="w", padx=2, pady=(4, 0))
+            ctk.CTkEntry(cif, textvariable=var, placeholder_text=ph,
+                         fg_color=T.BG_INNER, border_color=T.BG_BORDER,
+                         text_color=T.TEXT_HEAD,
+                         placeholder_text_color=T.TEXT_DIM,
+                         font=ctk.CTkFont(size=11)).grid(
+                row=2 + (i // 2) * 2, column=i % 2, sticky="ew", padx=2)
+            var.trace_add("write", lambda *_: self._schedule_preview())
 
         # ── Middle: sections list ─────────────────────────────────────────────
         mid = ctk.CTkFrame(left, fg_color="transparent")
@@ -834,12 +994,50 @@ class CardCreatorV2(ctk.CTkFrame):
             "body": body, "visible_var": visible_var, "title_label": title_lbl,
         }
 
-        if stype == "banner":
+        if stype == "header":
+            ctk.CTkLabel(
+                body,
+                text="Uses the App Name, Icon and Tagline from Card Identity above.\n"
+                     "Hide or reorder this section to control whether/where the "
+                     "branded header appears.",
+                text_color=T.TEXT_MUTED, font=ctk.CTkFont(size=11),
+                justify="left", wraplength=280,
+            ).pack(anchor="w", pady=(2, 6))
+
+        elif stype == "banner":
             v = ctk.StringVar()
             lbl("Image URL (paste any image link)")
             entry(v, "https://example.com/banner.jpg")
             v.trace_add("write", lambda *_: self._schedule_preview())
             data["_url_var"] = v
+            data["_uploaded_uri"] = None
+
+            upload_status = ctk.StringVar(value="")
+
+            def _on_picked(uri: str, filename: str, data=data, status=upload_status) -> None:
+                data["_uploaded_uri"] = uri
+                status.set(f"✓ Using uploaded file: {filename}")
+                self._schedule_preview()
+
+            def _clear_upload(data=data, status=upload_status) -> None:
+                data["_uploaded_uri"] = None
+                status.set("")
+                self._schedule_preview()
+
+            upload_row = ctk.CTkFrame(body, fg_color="transparent")
+            upload_row.pack(fill="x", pady=(0, 6))
+            ctk.CTkButton(upload_row, text="📁 Upload from device", width=1,
+                          fg_color=T.BADGE_BG, hover_color=T.BG_BORDER,
+                          text_color=T.TEXT_HEAD, font=ctk.CTkFont(size=11),
+                          command=lambda: self._pick_local_image(_on_picked)).pack(side="left")
+            ctk.CTkButton(upload_row, text="✕", width=28,
+                          fg_color=T.BADGE_BG, hover_color=T.DANGER_HOVER,
+                          text_color=T.TEXT_HEAD, font=ctk.CTkFont(size=11),
+                          command=_clear_upload).pack(side="left", padx=(4, 0))
+            ctk.CTkLabel(upload_row, textvariable=upload_status,
+                         text_color=T.SUCCESS, font=ctk.CTkFont(size=10)).pack(
+                side="left", padx=(8, 0))
+            data["_upload_status_var"] = upload_status
 
         elif stype == "youtube":
             v = ctk.StringVar()
@@ -982,8 +1180,11 @@ class CardCreatorV2(ctk.CTkFrame):
             data  = sec["data"]
             d     = {}
 
-            if stype == "banner":
-                d["url"] = data.get("_url_var", ctk.StringVar()).get()
+            if stype == "header":
+                pass   # uses meta (App Name/Icon/Tagline), same as "contact"
+            elif stype == "banner":
+                uploaded = data.get("_uploaded_uri")
+                d["url"] = uploaded or data.get("_url_var", ctk.StringVar()).get()
             elif stype == "youtube":
                 d["url"] = data.get("_url_var", ctk.StringVar()).get()
             elif stype == "text":
@@ -1010,10 +1211,47 @@ class CardCreatorV2(ctk.CTkFrame):
         return result
 
     def _apply_card_template(self, name: str) -> None:
-        """Apply a built-in visual card template."""
+        """Apply a built-in visual card template, or reveal the custom
+        background controls if "Custom" was picked (see __init__'s
+        _custom_style comment for why that's a separate dict, not an entry
+        added to CARD_STYLE_TEMPLATES)."""
         self._style_name = name
-        style = CARD_STYLE_TEMPLATES.get(name, CARD_STYLE_TEMPLATES["Dark Premium"])
-        self._accent = style.get("accent", self._accent)
+        if name == "Custom":
+            self._custom_bg_row.grid()
+        else:
+            self._custom_bg_row.grid_remove()
+            style = CARD_STYLE_TEMPLATES.get(name, CARD_STYLE_TEMPLATES["Dark Premium"])
+            self._accent = style.get("accent", self._accent)
+        self._schedule_preview()
+
+    def _pick_custom_bg_color(self) -> None:
+        current = self._custom_style.get("bg", "#1a1a2e")
+        picked = colorchooser.askcolor(title="Pick background color", color=current)
+        if not picked or not picked[1]:
+            return
+        color = picked[1]
+        text_color = _contrast_text_color(color)
+        self._custom_style.update({
+            "bg": color, "body_bg": color, "header_bg": color, "text": text_color,
+        })
+        self._custom_bg_status.set(f"✓ Solid color {color}")
+        self._schedule_preview()
+
+    def _pick_custom_bg_image(self) -> None:
+        def _on_picked(uri: str, filename: str) -> None:
+            bg_value = f"url({uri}) center center / cover no-repeat"
+            self._custom_style.update({"bg": bg_value, "body_bg": bg_value})
+            self._custom_bg_status.set(f"✓ Using image: {filename}")
+            self._schedule_preview()
+        self._pick_local_image(_on_picked)
+
+    def _clear_custom_bg_image(self) -> None:
+        color = "#1a1a2e"
+        self._custom_style.update({
+            "bg": color, "body_bg": color, "header_bg": color,
+            "text": "rgba(255,255,255,0.85)",
+        })
+        self._custom_bg_status.set("")
         self._schedule_preview()
 
     def _collect_buy_link(self) -> str:
@@ -1033,16 +1271,20 @@ class CardCreatorV2(ctk.CTkFrame):
         return ""
 
     def _collect_meta(self) -> dict:
+        if self._style_name == "Custom":
+            style = self._custom_style
+        else:
+            style = CARD_STYLE_TEMPLATES.get(self._style_name, CARD_STYLE_TEMPLATES["Dark Premium"])
         return {
             "app_name": self._mname.get().strip(),
             "icon":     self._micon.get().strip() or "⭐",
             "tagline":  self._mtag.get().strip(),
             "accent":   self._accent,
-            "org":      self._meta.get("org", "Faraz Automation"),
-            "wa":       self._meta.get("wa", "+92 316 2400657"),
-            "email":    self._meta.get("email", "farazgoal@gmail.com"),
-            "addr":     self._meta.get("addr", "Karachi, Pakistan"),
-            "style":    CARD_STYLE_TEMPLATES.get(self._style_name, CARD_STYLE_TEMPLATES["Dark Premium"]),
+            "org":      self._morg.get().strip(),
+            "wa":       self._mwa.get().strip(),
+            "email":    self._memail.get().strip(),
+            "addr":     self._maddr.get().strip(),
+            "style":    style,
             "buy_link": self._collect_buy_link(),
         }
 
@@ -1493,6 +1735,30 @@ class CardCreatorV2(ctk.CTkFrame):
         if c and c[1]:
             self._accent = c[1]
 
+    def _pick_local_image(self, on_picked) -> None:
+        """Shared local-image-upload flow for both the banner section and
+        the custom background (task #6) — opens a real file picker, encodes
+        the chosen file as a data: URI (see image_file_to_data_uri), and
+        hands the result to on_picked(data_uri, filename). Errors (file too
+        large, not a real image, etc.) are shown as a toast, never raised
+        as a raw traceback into the UI."""
+        path = filedialog.askopenfilename(
+            title="Choose an image",
+            filetypes=[("Image files", "*.png *.jpg *.jpeg *.gif *.webp"),
+                       ("All files", "*.*")],
+        )
+        if not path:
+            return
+        try:
+            data_uri = image_file_to_data_uri(path)
+        except ImageUploadError as exc:
+            if self.main_window is not None:
+                show_toast(self.main_window, str(exc), kind="error")
+            else:
+                messagebox.showwarning("Image not used", str(exc))
+            return
+        on_picked(data_uri, Path(path).name)
+
     def _generate_card_with_ai(self) -> None:
         if self.main_window is None:
             messagebox.showwarning("Unavailable", "AI generation isn't available in this context.")
@@ -1566,7 +1832,9 @@ class CardCreatorV2(ctk.CTkFrame):
                 sec["frame"].destroy()
         self._sections.clear()
         self._sec_row = 0
-        # Add sensible defaults
+        # Add sensible defaults -- header first, matching where it always
+        # rendered before it became a real removable/reorderable section.
+        self._add_section("header")
         self._add_section("banner")
         self._add_section("text")
         self._add_section("features")
