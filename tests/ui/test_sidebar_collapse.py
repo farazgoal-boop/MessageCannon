@@ -105,6 +105,31 @@ def test_collapse_shrinks_sidebar_column_width(window):
     _ensure_expanded(window)
 
 
+def test_collapse_actually_shrinks_rendered_sidebar_width(window):
+    """The test above only checked the *configured* grid_columnconfigure
+    minsize -- a floor, not the real on-screen width -- which let a real bug
+    ship silently: the collapsed sidebar rendered at ~158px, not ~72px,
+    because the 58x58 brand logo image (and, before an earlier fix in this
+    same session, the nav buttons' own unconstrained default width) kept
+    requesting more space than the column's minsize regardless of the
+    collapsed flag. Asserts the real winfo_width() actually shrinks close to
+    SIDEBAR_WIDTH_COLLAPSED, not just that the config value changed."""
+    _ensure_expanded(window)
+    window.update()
+    expanded_width = window.sidebar.winfo_width()
+    assert expanded_width >= window.SIDEBAR_WIDTH_EXPANDED
+
+    window._toggle_sidebar_collapsed()
+    window.update()
+    collapsed_width = window.sidebar.winfo_width()
+    assert collapsed_width <= window.SIDEBAR_WIDTH_COLLAPSED + 20, (
+        f"collapsed sidebar rendered at {collapsed_width}px, expected close "
+        f"to {window.SIDEBAR_WIDTH_COLLAPSED}px")
+    assert collapsed_width < expanded_width - 100
+
+    _ensure_expanded(window)
+
+
 def test_collapse_hides_informational_widgets(window):
     _ensure_expanded(window)
     informational = [

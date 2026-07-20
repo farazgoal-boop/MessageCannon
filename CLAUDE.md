@@ -988,3 +988,112 @@ sidebar to fold" false assumption in the original Sidebar redesign section), and
 user's confirmation on the ambiguous items above (3, 4's exact field/behavior spec, 6's reading,
 8's exact footer placement) before treating any of them as done, rather than guessing across 8
 items at once and re-doing work later.
+
+**CHECKPOINT: reference research done (2026-07-20); "in one go" plan explicitly overridden by the
+user in favor of one item at a time.** Findings changed the plan again, same as the original
+Sidebar redesign pass:
+
+- **Career Copilot Premium has neither a sidebar, a footer, nor an update-check UI anywhere in its
+  actual source** — checked its Flask `web_app` (no `<footer>`, no sidebar/collapse CSS or JS, no
+  update/version-check code at all) AND its separate PyQt desktop shell (`desktop_app/overlay.py`
+  — a single frameless floating card, no `QListWidget` nav, no footer widget, no update-check code;
+  even recovered the deleted-but-git-tracked `overlay_new.py` via `git show` and it has neither).
+  So items 2 and 8 as originally worded ("as copilot", "customized in Copilot") don't correspond to
+  anything that exists in Copilot's codebase.
+- **JobMind Match is the actual source of both patterns.** Its own CSS comment literally reads
+  *"Sidebar update pill (Copilot-Premium style upsell)"* — i.e. JobMind built a Copilot-flavored
+  update pill, it isn't copied from Copilot. Confirmed with the user: use JobMind Match as the real
+  reference for items 2 and 8 instead of continuing to chase Copilot's source.
+  - Item 2: `.sidebar-update-pill` (JobMind `styles.css:1077+`) — gradient
+    `rgba(79,70,229,.16)→rgba(53,37,205,.1)`, pulsing `.sidebar-update-dot`, bottom-pinned in the
+    sidebar via `flex:1` on the nav above it, text "Update available vX.X", wired to a
+    `/api/app/update-check` fetch cached 6h in localStorage (`app.js:422-450`,
+    `wireUpdateCheck`). MessageCannon should wire the equivalent to its own
+    `src/core/update_checker.py` (already built, see "In-app update checker" section above) rather
+    than a new check.
+  - Item 8: JobMind's sidebar is `flex-direction:column` with `.sidebar-nav{flex:1}` pushing
+    `.sidebar-update-pill` to the bottom, plus a separate page-level `<footer class="app-footer
+    premium-footer">` (`margin-top:auto`) and a fixed `.footer-status-bar` — this combination
+    (bottom-pinned sidebar section + real footer) is the reference for "footer in the sidebar
+    footer area" now, not anything from Copilot.
+- **Item 3 confirmed**: JobMind's header top-right cluster (`.install-chip`, theme-toggle buttons,
+  gradient `#6366f1→#4f46e5`) is the missing element — and that gradient is already exactly
+  `T.ACCENT`→`T.ACCENT_HOVER` in MessageCannon's own `theme.py`, so no new hex values needed.
+- **User explicitly changed the process ask**: rather than "execute all 8 in one go" as originally
+  recorded above, the user asked to continue one item at a time in this session, starting from
+  wherever this checkpoint leaves off — this supersedes the "in one go" line two paragraphs up.
+  Items 1 (collapse *feel*), 4 (Card Creator field spec), 5 (cold-start position bug), 6 (quality-
+  bar reading), and 7 (broad polish) are still open/unstarted and each needs its own scoping pass
+  before code, per this same discipline.
+
+**CHECKPOINT: Item 5 (cold-start sidebar position bug) — root-caused and fixed; resumed after a
+session interruption picked this fix up mid-edit from an uncommitted working-tree diff.**
+
+Investigated by instrumenting real `winfo_width()` on the sidebar frame rather than trusting the
+existing test suite, since `test_collapse_shrinks_sidebar_column_width` only ever asserted the
+*configured* `grid_columnconfigure(0)["minsize"]` value — a floor, not the actual on-screen width.
+Direct measurement showed the bug immediately: collapsing the sidebar changed the config value
+(220→72) correctly but the real rendered width only moved 307px→158px, nowhere near 72px. This is
+the same shape as the reported symptom (sidebar visually wrong/oversized, only looking right once
+something else forced a relayout) — a persisted `sidebar_collapsed=True` from a prior session would
+cold-start into this exact same wrong-width state.
+
+**Two independent real bugs found and fixed, in order of discovery:**
+
+1. **Nav buttons and sidebar container frames never actually shrank.** `CTkButton`'s default
+   ~140px requested width doesn't change just because `fill="x"` stretches its *displayed* size —
+   Tk's column-sizing math uses the *requested* (minimum) size of pack-managed children, and
+   `fill`/`expand` don't reduce that. So even icon-only collapsed buttons kept demanding ~140px,
+   silently overriding the 72px `minsize` floor. Fixed by giving nav buttons an explicit
+   `width=40` (small enough to fit collapsed, still stretches to fill the expanded column via
+   `fill="x", expand=True` same as before) and giving the sidebar's plain divider/slot frames an
+   explicit `width=1` (harmless — for frames with no packed children, an explicit width **is** the
+   frame's real size; for frames whose children get `pack_forget()`'d when collapsed — the update
+   badge slot, the bottom-widgets frame — this is a no-op since propagation was never disabled, but
+   moot in practice because those children are already empty of content by the time collapse
+   happens).
+2. **The 58×58 brand logo image was never hidden when collapsed**, unlike the title/subtitle text
+   next to it. The logo alone (58px + its own 10px grid padding) already exceeds the entire 72px
+   collapsed budget on its own — no button-width fix could ever compensate for it. This was the
+   dominant remaining contributor (158px → still short of 72px even after fix #1 alone). Fixed by
+   storing the logo `CTkLabel` as `self._brand_logo_label` and hiding/showing it in
+   `_apply_sidebar_collapsed_visuals` alongside `_brand_title_label`/`_brand_subtitle_label`, the
+   same pattern already used for those two.
+
+Real collapsed width after both fixes: **78px** (vs. a 72px target, negligible remainder from the
+still-visible collapse-toggle button + padding) — down from 158px before fix #1, 250px before
+either fix. Expanded width (307px) is unchanged and not a bug: `minsize` is a floor, not a fixed
+value, and the design intent for expanded mode was always "at least 220px, sized to content," never
+literal 220px.
+
+**Verified, not just patched and assumed**: added
+`test_collapse_actually_shrinks_rendered_sidebar_width` to `tests/ui/test_sidebar_collapse.py` —
+asserts real `winfo_width()`, not just the config value. Confirmed it fails against the pre-fix
+code (`git stash` back to the nav-button-only fix: 250px; reverting both fixes entirely: also
+fails) and passes after both fixes (78px). Full `tests/ui/` suite re-run clean afterward (48
+functional in parallel, 7 navigation-timing alone, 1 close-button alone — 56/56).
+
+**A third, unrelated real bug found incidentally while re-running the full suite per this file's
+own regression-check discipline** (not part of item 5's own scope, but too serious to leave
+unflagged and un-fixed given it's a live content-bleed-through bug, the same category as the
+earlier "Cards content silently showing under Settings" bug): `tests/ui/test_view_stacking.py`
+failed on `Campaigns→Compose`, `Settings→Compose`, and `History→Compose` specifically (not
+`Contacts→Compose` or `Cards→Compose`) — a real timing race, not a per-view quirk. Root cause:
+`_animate_view_in`'s stale-animation cancellation (place_forget() on the previous container) only
+ever ran from inside `_animate_view_in` itself, but `_show_view`'s
+`_HEAVY_VIEWS_NO_ANIMATION` fast path for Compose (a bare `container.grid()`) never calls
+`_animate_view_in` at all — so a still-in-flight animation from the *previous* view (one whose
+`after()`-scheduled steps hadn't fired yet by the time the test's single `.update()` call returned)
+was never cancelled, left its container under `place()` management, and `_show_view`'s
+`grid_remove()` cleanup loop is a no-op against a `place()`-managed widget. The previous view stayed
+visible, floating on top of Compose. `Contacts`/`Cards` happened not to reproduce it only because
+their own heavier layout cost meant enough real wall-clock time passed during `.update()` for the
+animation to finish naturally first — a timing coincidence, not a fix. Fixed by extracting the
+cancellation logic into a new `_cancel_pending_view_animation()` helper and calling it
+unconditionally at the top of `_show_view` (not only from inside `_animate_view_in`), so a stale
+animation is neutralized regardless of which path the *next* view navigation takes. Verified: all
+32 `test_view_stacking.py` cases pass (were 3 failing before), full suite re-run clean (56/56).
+
+Items 1 (collapse *feel*), 4 (Card Creator field spec), 6 (quality-bar reading), and 7 (broad
+polish) remain open/unstarted, each still needing its own scoping pass before code per this file's
+standing discipline.

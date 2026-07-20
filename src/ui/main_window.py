@@ -515,8 +515,11 @@ class MainWindow(ctk.CTk):
         brand_panel = ctk.CTkFrame(self.sidebar, fg_color="transparent")
         brand_panel.pack(side="top", fill="x", padx=16, pady=(18, 12))
         brand_panel.grid_columnconfigure(1, weight=1)
+        self._brand_logo_label = None
         if self.brand_logo is not None:
-            ctk.CTkLabel(brand_panel, text="", image=self.brand_logo).grid(
+            self._brand_logo_label = ctk.CTkLabel(
+                brand_panel, text="", image=self.brand_logo)
+            self._brand_logo_label.grid(
                 row=0, column=0, rowspan=2, padx=(0, 10), sticky="w")
         self._brand_title_label = ctk.CTkLabel(
             brand_panel, text="MessageCannon",
@@ -557,7 +560,14 @@ class MainWindow(ctk.CTk):
         # in a slot frame that's packed exactly once, immediately, at this
         # position fixes it: the slot's position never changes, only its one
         # child's presence inside it does.
-        self._update_badge_slot = ctk.CTkFrame(self.sidebar, fg_color="transparent")
+        # width=1 (not CTkFrame's ~200px default): this is a pack()-managed
+        # child of the sidebar, so its *requested* width feeds directly into
+        # the sidebar's own natural width computation and would otherwise
+        # silently override grid_columnconfigure(0, minsize=...) on column 0
+        # — the same root cause found and fixed for every unsized
+        # divider/slot frame in this sidebar, see CLAUDE.md "cold-start
+        # sidebar position bug" checkpoint.
+        self._update_badge_slot = ctk.CTkFrame(self.sidebar, fg_color="transparent", width=1)
         self._update_badge_slot.pack(side="top", fill="x")
 
         self.update_badge_var = ctk.StringVar(value="")
@@ -571,11 +581,11 @@ class MainWindow(ctk.CTk):
         if self._update_info is not None:
             self._refresh_update_badge()
 
-        ctk.CTkFrame(self.sidebar, height=1, fg_color=T.BG_BORDER, corner_radius=0
+        ctk.CTkFrame(self.sidebar, width=1, height=1, fg_color=T.BG_BORDER, corner_radius=0
                      ).pack(side="top", fill="x")
 
         # ── Bottom widgets (packed bottom first so nav fills remaining space) ──
-        _bot = ctk.CTkFrame(self.sidebar, fg_color="transparent")
+        _bot = ctk.CTkFrame(self.sidebar, fg_color="transparent", width=1)
         _bot.pack(side="bottom", fill="x")
 
         self.sidebar_license_badge = ctk.CTkLabel(
@@ -604,7 +614,7 @@ class MainWindow(ctk.CTk):
                      text_color=T.TEXT_MUTED, font=ctk.CTkFont(size=10),
                      ).grid(row=1, column=0, padx=12, pady=(0, 10), sticky="w")
 
-        ctk.CTkFrame(_bot, height=1, fg_color=T.BG_BORDER, corner_radius=0
+        ctk.CTkFrame(_bot, width=1, height=1, fg_color=T.BG_BORDER, corner_radius=0
                      ).pack(side="bottom", fill="x")
 
         # ── Nav items (packed into middle nav_frame) ───────────────────────────
@@ -635,6 +645,17 @@ class MainWindow(ctk.CTk):
                 btn_frame,
                 text=icon if self._sidebar_collapsed else f"{icon}  {label}",
                 anchor="center" if self._sidebar_collapsed else "w",
+                # width=40, not CTkButton's ~140px default: btn_frame packs
+                # this with fill="x", expand=True, so it still stretches to
+                # fill whatever width the sidebar column actually is at
+                # runtime — but an explicit small width keeps its own
+                # *requested* size from dominating that column's natural-size
+                # computation, same fix as the sidebar's divider frames above.
+                # Without this, collapsed mode only changed the button's text
+                # or centering, never its width — real bug found via winfo_
+                # reqwidth() instrumentation, not just style, see CLAUDE.md
+                # "cold-start sidebar position bug" checkpoint.
+                width=40,
                 height=40,
                 corner_radius=10,
                 fg_color=T.NAV_INACTIVE,
@@ -2615,7 +2636,17 @@ class MainWindow(ctk.CTk):
         # widget hide entirely when collapsed -- none of them fit
         # meaningfully at 72px, and none are things a user needs to act on
         # at a glance. The collapse toggle itself always stays reachable.
-        for widget in (self._brand_title_label, self._brand_subtitle_label):
+        # The 58x58 logo image is included here too -- real bug found via
+        # winfo_width() instrumentation (not just style/const comparison):
+        # the logo alone (58px + its own 10px grid padding) already exceeds
+        # the entire SIDEBAR_WIDTH_COLLAPSED budget, so leaving it visible
+        # meant the collapsed sidebar never actually reached 72px no matter
+        # what else shrank -- it silently floated around ~150-160px instead.
+        # See CLAUDE.md "cold-start sidebar position bug" checkpoint.
+        for widget in (self._brand_title_label, self._brand_subtitle_label,
+                       self._brand_logo_label):
+            if widget is None:
+                continue
             if collapsed:
                 widget.grid_remove()
             else:
@@ -2653,11 +2684,57 @@ class MainWindow(ctk.CTk):
                     anchor="center" if collapsed else "w",
                 )
 
+    def _cancel_pending_view_animation(self) -> None:
+        """Cancel any in-flight _animate_view_in transition and hide its
+        container immediately.
+
+        Real bug this closes: _animate_view_in used to be the only place
+        that cancelled a stale in-flight animation, so the
+        _HEAVY_VIEWS_NO_ANIMATION fast path in _show_view (a bare
+        container.grid(), no call to _animate_view_in) never cancelled
+        anything. A view mid-slide-in is managed by place(), not grid(), so
+        _show_view's grid_remove() cleanup loop silently did nothing to it
+        -- it stayed visible, floating on top of whatever heavy view got
+        shown next. Bumping _view_anim_run_id also guarantees any already
+        in-flight step() closure (captured before after_cancel could reach
+        it) is a guaranteed no-op if it still somehow fires.
+        """
+        prev_after_id = getattr(self, "_view_anim_after_id", None)
+        if prev_after_id is not None:
+            try:
+                self.after_cancel(prev_after_id)
+            except Exception:
+                pass
+            self._view_anim_after_id = None
+        prev_container = getattr(self, "_view_anim_container", None)
+        if prev_container is not None:
+            try:
+                prev_container.place_forget()
+            except Exception:
+                pass
+            self._view_anim_container = None
+        self._view_anim_run_id = getattr(self, "_view_anim_run_id", 0) + 1
+
     def _show_view(self, view_name: str) -> None:
         self._active_view = view_name
         self._apply_view_chrome(view_name)
         self.header_title.configure(text=view_name)
         incoming = self.view_containers.get(view_name)
+        # A still-in-flight _animate_view_in transition leaves its container
+        # under place() management, not grid() -- the grid_remove() loop
+        # below is a no-op against a container place() owns, so it would
+        # stay visible (mid-slide) on top of whatever we show next. Must
+        # cancel it *unconditionally* here, not only inside _animate_view_in
+        # itself, because the _HEAVY_VIEWS_NO_ANIMATION fast path below
+        # never calls _animate_view_in at all and so never touched this
+        # state before. Real bug: tests/ui/test_view_stacking.py failed on
+        # {Campaigns,Settings,History}->Compose specifically (the source
+        # views light/fast enough that update() returns before the ~90ms
+        # animation's after()-scheduled steps are due) but not
+        # {Contacts,Cards}->Compose (heavy enough that update() happens to
+        # outlast the animation) -- a real timing race, not a per-view quirk.
+        if incoming is not getattr(self, "_view_anim_container", None):
+            self._cancel_pending_view_animation()
         for name, frame in self.view_containers.items():
             if name == view_name:
                 continue
@@ -2797,57 +2874,18 @@ class MainWindow(ctk.CTk):
         regardless, so a slow machine degrades to "snaps into place a little
         early" rather than ever blocking longer than the promised budget.
         """
+        # If a previous animation is still in flight (rapid nav clicking, or
+        # a HEAVY_VIEWS_NO_ANIMATION target that bypassed this method
+        # entirely), cancel its pending step and hide its container
+        # immediately so it doesn't finish animating into view later. See
+        # _cancel_pending_view_animation's own docstring for the real bug
+        # this closes (place()-managed containers surviving a grid_remove()
+        # cleanup pass) and _show_view's call site for why this can't only
+        # live here.
+        if getattr(self, "_view_anim_container", None) is not container:
+            self._cancel_pending_view_animation()
         anim_id = getattr(self, "_view_anim_run_id", 0) + 1
         self._view_anim_run_id = anim_id
-        # If a previous animation is still in flight (rapid nav clicking),
-        # cancel its pending step and snap its container to its resting grid
-        # state immediately so it doesn't finish animating into view later.
-        prev_after_id = getattr(self, "_view_anim_after_id", None)
-        if prev_after_id is not None:
-            try:
-                self.after_cancel(prev_after_id)
-            except Exception:
-                pass
-            self._view_anim_after_id = None
-        prev_container = getattr(self, "_view_anim_container", None)
-        if prev_container is not None and prev_container is not container:
-            try:
-                # Real bug, found from a real user's own click-through (not
-                # caught by scripted tests, which only asserted _active_view
-                # and timing, never that the PREVIOUS view was actually
-                # hidden): this used to be `place_forget(); grid()` — but
-                # grid() right after place_forget() immediately remaps/
-                # re-shows the widget in the same cell, so it was never
-                # actually hidden, just switched from place- back to grid-
-                # management while staying visible. Once any view had been
-                # shown via this animated path, it silently stayed visible
-                # forever after, and since Tk's default sibling stacking
-                # follows widget creation order (Cards is built last in
-                # _create_ui, so it naturally sits above every other view),
-                # Cards would silently show through on top of whatever view
-                # was navigated to next.
-                #
-                # `place_forget()` alone is both correct and cheap: a widget
-                # under no geometry manager at all is simply unmapped
-                # (hidden), and re-registering it with grid(row=0, column=0,
-                # sticky="nsew") was tried and measured as a real, if modest,
-                # regression (~300-500ms added to the NEXT transition when
-                # the previous view had its own nontrivial widget tree, e.g.
-                # Contacts/History) — forcing that container's full layout to
-                # resolve immediately as a side effect of hiding it, instead
-                # of lazily whenever it's actually shown again. The existing
-                # incoming-container code a few lines below already calls a
-                # bare container.grid() when SHOWING a container (which is
-                # the only time that cost needs to be paid), and Tk remembers
-                # each container's original sticky="nsew" registration from
-                # _new_view_container's initial grid()+grid_remove() call
-                # across a place()/place_forget() round-trip, so that bare
-                # grid() continues to restore full nsew sizing correctly —
-                # confirmed via tests/ui/test_view_stacking.py's 30
-                # exhaustive view-pair transitions, not assumed.
-                prev_container.place_forget()
-            except Exception:
-                pass
         self._view_anim_container = container
 
         steps = 4
