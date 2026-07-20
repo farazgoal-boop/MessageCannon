@@ -423,6 +423,31 @@ class MainWindow(ctk.CTk):
                 except Exception:
                     continue
 
+                # Real bug found via direct instrumentation (not just code
+                # reading): a (light, dark) tuple -- e.g. any T.token color
+                # from theme.py -- is already CTk-native and auto-resolves
+                # on every ctk.set_appearance_mode() call with zero extra
+                # code. _resolve_theme_color's own _select_theme_value used
+                # to unconditionally collapse ANY tuple down to a single
+                # matching-mode string via widget.configure(), which
+                # permanently replaced the dynamic tuple with a static one.
+                # Since _rebuild_ui_for_theme calls this method right after
+                # every full rebuild (freshly constructed widgets, correct
+                # tuples), every widget's color got flattened to whichever
+                # mode was active AT REBUILD TIME on its very first pass --
+                # meaning a later plain Dark<->Light toggle (which doesn't
+                # trigger a rebuild) silently stopped updating that widget's
+                # color at all, often permanently until the next Warm Ivory
+                # round-trip forced a fresh rebuild. Confirmed via a direct
+                # probe: a Settings card's fg_color stayed frozen at the
+                # Dark value (#2A4762) after switching to Light, both before
+                # and after this method ran. Only plain strings (CTk's own
+                # hardcoded "gray98"-style defaults, or a legacy
+                # THEME_COLOR_PAIRS literal) actually need manual remapping
+                # here -- an already-correct tuple must be left untouched.
+                if isinstance(current_value, (tuple, list)):
+                    continue
+
                 resolved_value = self._resolve_theme_color(current_value)
                 if (
                     attr == "text_color"
@@ -990,7 +1015,11 @@ class MainWindow(ctk.CTk):
         ctk.CTkLabel(
             right_panel,
             textvariable=self.license_message_var,
-            text_color=T.DANGER,
+            # T.DANGER is fg_color-only per the Design System rules -- as
+            # text_color on right_panel's BG_INNER surface it measures
+            # 3.79:1, still under the 4.5:1 WCAG AA threshold.
+            # T.DANGER_ON_BADGE passes at 5.69:1 on this same background.
+            text_color=T.DANGER_ON_BADGE,
             wraplength=240,
             justify="left",
         ).grid(row=4, column=0, padx=24, pady=(0, 12), sticky="w")
@@ -1558,10 +1587,12 @@ class MainWindow(ctk.CTk):
         self._em_smtp_chip = ctk.CTkLabel(
             em_smtp_card, textvariable=self._em_smtp_status_var,
             fg_color=T.BADGE_BG, corner_radius=999, padx=10, pady=4,
-            text_color=T.DANGER, font=ctk.CTkFont(size=11))
+            # This is literally red text on BADGE_BG -- the Design System's
+            # own documented DANGER_ON_BADGE case, not DANGER (3.10:1 fail).
+            text_color=T.DANGER_ON_BADGE, font=ctk.CTkFont(size=11))
         self._em_smtp_chip.grid(row=0, column=1, padx=16, pady=(14, 4), sticky="e")
         self._em_validation_label = ctk.CTkLabel(
-            em_smtp_card, text="", text_color=T.DANGER,
+            em_smtp_card, text="", text_color=T.DANGER_ON_BADGE,
             font=ctk.CTkFont(size=11), wraplength=240, justify="left")
         self._em_validation_label.grid(row=1, column=0, columnspan=2, padx=16, pady=(0, 4), sticky="w")
         ctk.CTkButton(em_smtp_card, text="Configure in Settings →", height=30, corner_radius=6,
@@ -1593,7 +1624,7 @@ class MainWindow(ctk.CTk):
                 self._em_smtp_chip.configure(text_color=T.SUCCESS)
             else:
                 self._em_smtp_status_var.set("Not configured")
-                self._em_smtp_chip.configure(text_color=T.DANGER)
+                self._em_smtp_chip.configure(text_color=T.DANGER_ON_BADGE)
 
         self._em_user.trace_add("write", _smtp_changed)
         self._em_provider.trace_add("write", _smtp_changed)

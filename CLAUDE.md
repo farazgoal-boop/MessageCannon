@@ -1228,3 +1228,76 @@ removes it from the output while the page `<title>` still carries the app name.
 documented non-functional mock (see "Card Creator — current state" section above) — this pass was
 scoped to the card *authoring* side only, per the user's own framing of item 4 as a separate
 concern from that.
+
+**CHECKPOINT: Item 6 (quality-bar reading) confirmed; Item 7 (broad cross-theme polish audit) —
+one severe real bug found and fixed, plus a smaller contrast-rule violation; audit complete.**
+
+**Item 6**: confirmed with the user directly rather than guessing — "app should compare to any
+apple or google app" means a general visual/interaction polish quality bar to build toward, not a
+literal feature-by-feature benchmark against a specific named product. Folded into item 7's
+scoping below.
+
+**Item 7 — the real finding**: while screenshotting Settings across all three themes to check for
+the kind of incidental issues this file has caught before, switching from Dark to Light showed the
+sidebar nav buttons change correctly but every card panel (Campaign Safety, System Experience,
+License & Activation, and by extension every `T.BG_SURFACE`/`T.BG_INNER`/etc-colored panel
+app-wide) stayed frozen at its Dark color. Root-caused by direct instrumentation, not guessing:
+**`_sync_theme_overrides` — called by `_rebuild_ui_for_theme` immediately after every full
+Warm-Ivory-triggered rebuild, and also called directly on every plain Dark↔Light toggle —
+unconditionally collapsed any `(light, dark)` color tuple down to a single string matching
+whichever mode was active at that moment, via `widget.configure()`.** A `(light, dark)` tuple is
+exactly theme.py's own documented CTk-native mechanism ("Dark <-> Light switching uses
+CustomTkinter's OWN native mechanism... auto-update on `ctk.set_appearance_mode()` with zero extra
+code") — this sync method's blanket logic was silently defeating that on every single widget it
+touched, which is all of them. Once flattened to a static string, a widget could never again
+respond to a future appearance-mode change — frozen until the next full rebuild (i.e. the next
+Warm Ivory round-trip) happened to reconstruct it fresh. Confirmed via direct probe before fixing:
+a Settings card's `fg_color` stayed `"#2A4762"` (the Dark value) after switching to Light, both
+immediately after `_apply_theme("Light")` and after manually re-forcing `_sync_theme_overrides()`
+again.
+
+**Fix**: `_sync_widget_theme` now skips any attribute whose current value is already a
+`tuple`/`list` — those are CTk-native and must be left completely alone; only plain strings (CTk's
+own hardcoded `"gray98"`-style defaults, or a legacy `THEME_COLOR_PAIRS` literal — the actual
+original reason this method exists) still get the manual remap. Verified with a new
+`tests/ui/test_theme_toggle_after_rebuild.py` (2 tests): confirmed both fail against the pre-fix
+code (reverted via `git stash`, re-tested, restored) and pass after the fix — one asserts the
+`fg_color` tuple survives a Dark→Light toggle unchanged, the other asserts the actual rendered
+canvas color (via CTkFrame's `"inner_parts"` tag, found by direct canvas-item inspection, not
+guessed) really does switch from `#2A4762` to `#FFFFFF`. Re-screenshotted Settings, Campaigns,
+Contacts, Compose, History, and Cards in Light (after first going through Dark, the exact
+regression path) — all render correctly light-themed app-wide, not just on the one card originally
+checked. Dark and Warm Ivory re-screenshotted too, confirmed unaffected.
+
+**Second, smaller issue found via grep** (the same anti-pattern Phase 5 already found and fixed
+once for the daily-limit warning, but not exhaustively swept at the time): 4 more instances of
+`text_color=T.DANGER` in `main_window.py` — the license-activation error label, the email SMTP
+status chip, its validation label, and its color-reset callback. `T.DANGER` is fg_color-only per
+the Design System rules; computed actual contrast (not just cited the doc's numbers) — the license
+label measured 3.79:1 on its `BG_INNER` background, the SMTP chip is literally red-on-`BADGE_BG` at
+an even worse ratio — both under the 4.5:1 WCAG AA floor. Fixed all 4 to `T.DANGER_ON_BADGE`
+(computed 5.69:1 and 4.65:1 respectively on those same backgrounds — both pass). Grepped the rest
+of `src/ui/*.py` for the same pattern and for stray hardcoded hex colors outside `theme.py`; the
+only other hex literals found were the intentionally-off-limits `THEME_COLOR_PAIRS` dict and the
+marketing-email HTML templates (not app UI) — both already documented exceptions, nothing further
+to fix.
+
+**Full regression check**: 52 functional tests (was 50 — the 2 new theme-toggle tests), 7
+navigation-timing, 1 close-button — 60/60, run exactly as `tests/ui/README.md` documents.
+
+**Not done this pass, explicit scope note**: this was a targeted audit that found and fixed the
+most severe issue (the theme-toggle regression, which affects the entire app, not one screen) plus
+one grep-sweep of a known anti-pattern — not an exhaustive manual screen-by-screen visual review of
+every view in all three themes beyond the ones screenshotted above (Campaigns, Contacts, Compose,
+History, Cards, Settings). Given the severity of what was found, further exhaustive manual review
+was judged lower-value than confirming the systemic fix generalizes, which the screenshots across
+6 views did.
+
+Round 2 status: 1 (collapse feel — tooltip/pulse, full width-transition ruled out by measurement),
+3 (confirmed as already matching `T.ACCENT`→`T.ACCENT_HOVER`, no code needed), 4 (Card Creator
+rebuild — complete), 5 (cold-start sidebar bug — complete), 6 (quality-bar reading — confirmed), 7
+(polish audit — complete) are done. **Items 2 (sidebar update pill, wiring `update_checker.py` into
+a JobMind-style pill) and 8 (section-animation/sidebar-footer match, including the user's own
+customized Copilot footer placement) were only ever researched, never built** — the reference
+research above identified exactly what to build for both, but no code exists yet for either. Not
+to be confused with "done" — these are the two remaining open items from the original 8.
