@@ -43,6 +43,7 @@ class ContactImportReviewDialog(ctk.CTkToplevel):
         self.grab_set()
         self.configure(fg_color=T.BG_MAIN)
         self.protocol("WM_DELETE_WINDOW", self.destroy)
+        self.bind("<Escape>", lambda _e: self.destroy())
 
         self.rows: list = []
         self.dup_resolution = ctk.StringVar(value="skip")

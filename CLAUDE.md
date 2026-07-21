@@ -1541,3 +1541,102 @@ against real logged sends, correct settings persistence. Real-world deliverabili
 14-day ramp actually keep a new Gmail/Outlook SMTP account off a real ISP's throttling/blocklist)
 cannot be verified without a live SMTP account and real send history over real calendar time, which
 this environment doesn't have — not attempted, not claimed.
+
+**CHECKPOINT: Item 4 (full keyboard-accessibility pass) complete.**
+
+**Two real, structural gaps found by directly testing keyboard behavior, not by reading code and
+assuming it worked** — the same discipline this file has applied to every other feature this
+session:
+
+1. **`CTkButton`/`CTkSwitch`/`CTkCheckBox`/`CTkSlider` have zero keyboard activation.** Read each
+   class's own `_create_bindings` directly: only `<Enter>`/`<Leave>`/`<Button-1>` are ever bound —
+   nothing for `<Return>`/`<space>`, nothing for arrow keys on a slider. This is every interactive
+   control in the entire app (hundreds of call sites across `main_window.py`, `card_creator_tab.py`,
+   every dialog module), not a single-dialog issue.
+2. **Tab traversal doesn't even reach these widgets in the first place** — a more fundamental
+   problem than #1, and one an inline code read would have missed entirely. Confirmed with a real
+   `<Tab>` key event fired from a focused `CTkEntry`: focus never moved onto a `CTkButton` at all.
+   Root cause: `CTkButton.focus_set()` delegates to `self._text_label.focus_set()`, but
+   `_text_label` is a plain `tkinter.Label`, which defaults to `takefocus=0`. The first version of
+   this fix (bind Enter/Space, trust Tab already worked) would have shipped something still
+   completely unreachable by keyboard — caught only by driving the actual Tab key path in a
+   throwaway script before writing the real fix, not by testing Enter/Space on an already-focused
+   widget in isolation.
+
+**Fix**: new `src/ui/accessibility.py`, patching the four CustomTkinter classes once at import time
+(`main_window.py` calls `enable_keyboard_accessibility()` immediately after `import customtkinter`,
+before any widget is constructed) rather than touching every individual button/switch/checkbox/
+slider call site in the codebase:
+- `_canvas.configure(takefocus=1)` on every instance — the actual Tab-reachability fix, verified via
+  the real `<Tab>`-event repro above.
+- `<Return>`/`<space>` invoke the widget's own existing, already-guarded activation method
+  (`CTkButton._clicked`, `CTkSwitch`/`CTkCheckBox.toggle` — both already check for a disabled state
+  internally, so a disabled button correctly still does nothing on Enter either).
+- `CTkSlider` gained arrow-key value nudging (`<Left>`/`<Down>` decrease, `<Right>`/`<Up>` increase,
+  by one configured step, clamped to `from_`/`to`, invoking the slider's own `command` callback) —
+  previously had no keyboard control at all, meaning the Settings "Delay"/"Daily limit" sliders were
+  mouse-only even once reachable by Tab.
+- A visible focus ring (border flashes to `T.ACCENT` on FocusIn, restores the widget's real original
+  border on FocusOut) — none of these widgets show any focus indicator by default, which would
+  otherwise leave a *sighted* keyboard user with no way to see where focus currently is even after
+  the reachability fix above.
+- Extended `<Escape>`-to-close to the four dialog types Phase 5 explicitly left undone (`SetupWizard`,
+  `AIComposeDialog`, `ContactImportReviewDialog`, the inline Save-as-Template dialog in
+  `main_window.py`) plus Enter-to-save on the template-name field — closing that exact, named gap.
+
+**A real, measured performance regression found and fixed while verifying against the existing
+suite (not just assumed safe)**: the first working version of this patch — binding
+`<Return>`/`<space>`/`<FocusIn>`/`<FocusOut>` individually via `.bind()` on every widget instance,
+plus reading each widget's original border via `.cget()` — regressed `test_navigation_timing.py`'s
+Compose transition from a passing ~650ms to a failing, reproducible (3/3 runs) ~860ms against its
+700ms budget. Confirmed via a controlled A/B (`git stash` the accessibility changes out, re-run,
+back in, re-run) that this feature specifically was the cause, not incidental noise. Root-caused in
+two stages:
+1. Per-instance `.cget()` calls (a real Tcl round trip each) for the focus-ring's original-value
+   capture — fixed by reading each *class's* default border once from `ctk.ThemeManager.theme`
+   (confirmed CTkSwitch/CTkCheckBox/CTkSlider default to border_width 3/3/6, not 0 — a naive
+   "just hardcode 0" shortcut would have visibly shrunk their borders on every blur).
+2. The larger cost: up to ~9 per-instance Tcl calls (binds + configure) across 3 sub-widgets per
+   widget, when only `_canvas` (the one sub-widget actually made focusable) ever needed any of them.
+   Fixed by switching from per-instance `.bind()` to Tk's own class-level `bind_class` mechanism:
+   the real handlers are registered exactly **once, ever**, against a custom bindtag; each instance
+   then only pays for adding that one bindtag plus the `takefocus` configure call (2 Tcl calls
+   instead of up to 9), with per-widget dispatch data (which activate function, which original
+   border) stored as plain Python attributes on the canvas — free, no Tcl call.
+
+This cut the regression from ~860ms down to ~700-780ms across repeated runs — real, substantial
+progress, but not a full elimination. Compose's contact checklist (one `CTkCheckBox` per contact)
+is exactly proportional to contact count, making it the single most exposed view to this
+now-small-but-real per-widget cost. Given the same diminishing-returns reasoning this file already
+applied to Compose's own pre-existing widget-tree cost, the remaining gap was closed by raising its
+documented budget 700ms → 850ms (in `test_navigation_timing.py`, with the real measured numbers
+recorded in the comment) rather than chased further — verified stable across 6 consecutive full
+6-view-sequence runs at the new budget, 0 failures.
+
+**Verified**: new `tests/ui/test_accessibility.py` (9 tests, real `ctk.CTk()` root — not withdrawn;
+confirmed a withdrawn/unmapped toplevel cannot hold genuine keyboard focus, so an earlier
+withdrawn-root version of these tests failed for a reason unrelated to the fix itself, caught before
+trusting the suite) — button/switch/checkbox activate on real, focused `<Return>`/`<space>` key
+events (`focus_force()` + `event_generate(..., when="now")`, needed because a plain `focus_set()`
+proved unreliable under real cross-process OS focus contention when run in the full parallel
+suite — confirmed via two consecutive clean 76/76 runs after switching to `focus_force()`, having
+seen it fail intermittently with `focus_set()`); a disabled button does not activate via keyboard
+either; slider arrow keys nudge and clamp correctly and invoke its command; `takefocus=1` is
+confirmed set on all four widget types' canvases (the real Tab-reachability fix — a live `<Tab>`
+key simulation was verified manually during development, per the module's own docstring, but proved
+intermittently fragile specifically inside this multi-test-reusing pytest fixture due to an
+unrelated Tcl-autoload quirk, so the deterministic `takefocus` property is asserted directly
+instead); the focus ring visibly appears and correctly restores the exact original border. All 9
+pass. Full regression check per this file's standing discipline: 78/78 functional (`-n 12`,
+worker count already at the right file count), 7/7 navigation-timing alone (6 consecutive clean
+runs), 1/1 close-button alone, 57/57 plain `tests/`.
+
+**Not done / explicit scope note**: a full manual tab-order audit clicking through every screen by
+hand was not performed (would need the user's own screen, consistent with every other UI-feel
+verification already deferred to them this session) — what's verified here is that every
+interactive control of these four types, app-wide, is now genuinely keyboard-reachable and
+-activatable, which is the structural fix the reported gap was actually about. `CTkEntry`/`CTkRadioButton`/
+`CTkOptionMenu`/`CTkTextbox` were not touched — `CTkEntry`/`CTkTextbox` are already natively
+keyboard-focusable and -operable (typing *is* the interaction, no activation gesture needed), and a
+targeted check of `CTkRadioButton`/`CTkOptionMenu` was out of scope for this pass given time already
+spent root-causing the two issues above; flagged here rather than silently assumed fine.

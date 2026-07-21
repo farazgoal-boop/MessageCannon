@@ -24,6 +24,7 @@ from PIL import Image
 from ..ui.card_creator_tab import build_card_creator_view
 from ..ui.reports_chart import ReportsChart
 from ..ui.update_dialog import show_update_dialog
+from ..ui.accessibility import enable_keyboard_accessibility
 from ..core.update_checker import check_for_update, spawn_detached, launch_silent_install_and_get_command
 
 try:
@@ -31,6 +32,13 @@ try:
     HAS_DND = True
 except ImportError:
     HAS_DND = False
+
+# Patches CTkButton/CTkSwitch/CTkCheckBox/CTkSlider at the class level so
+# every one of them, app-wide, gains Enter/Space activation, arrow-key
+# slider control, and a visible focus ring -- must run before any of these
+# widgets are constructed, so it happens here at module import time, before
+# MainWindow (or anything it imports that builds widgets) is instantiated.
+enable_keyboard_accessibility()
 
 
 def _ensure_tcl_tk_paths() -> None:
@@ -3841,12 +3849,15 @@ class MainWindow(ctk.CTk):
         dlg.transient(self)
         dlg.grab_set()
         dlg.configure(fg_color=T.BG_MAIN)
+        dlg.bind("<Escape>", lambda _e: dlg.destroy())
 
         ctk.CTkLabel(dlg, text="Template name", text_color=T.TEXT_HEAD).pack(
             anchor="w", padx=20, pady=(20, 4))
         name_var = StringVar(value="")
-        ctk.CTkEntry(dlg, textvariable=name_var, fg_color=T.BG_INNER, border_color=T.BG_BORDER,
-                     text_color=T.TEXT_HEAD).pack(fill="x", padx=20)
+        name_entry = ctk.CTkEntry(dlg, textvariable=name_var, fg_color=T.BG_INNER,
+                                   border_color=T.BG_BORDER, text_color=T.TEXT_HEAD)
+        name_entry.pack(fill="x", padx=20)
+        name_entry.focus_set()
 
         ctk.CTkLabel(dlg, text="Category (optional)", text_color=T.TEXT_HEAD).pack(
             anchor="w", padx=20, pady=(14, 4))
@@ -3875,6 +3886,7 @@ class MainWindow(ctk.CTk):
         ctk.CTkButton(dlg, text="Save Template", fg_color=T.ACCENT, hover_color=T.ACCENT_HOVER,
                       text_color=T.TEXT_HEAD, font=ctk.CTkFont(size=13, weight="bold"),
                       command=do_save).pack(pady=(20, 0))
+        name_entry.bind("<Return>", lambda _e: do_save())
 
     def _refresh_preview(self) -> None:
         template = self.message_textbox.get("1.0", "end").strip() if hasattr(self, "message_textbox") else ""

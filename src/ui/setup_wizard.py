@@ -33,6 +33,7 @@ class SetupWizard(ctk.CTkToplevel):
         self.grab_set()
         self.configure(fg_color=T.BG_MAIN)
         self.protocol("WM_DELETE_WINDOW", self._on_close)
+        self.bind("<Escape>", lambda _e: self._on_close())
 
         resumable = main_window.setup_wizard_channels or main_window.setup_wizard_substep
         if force_restart or not resumable:
