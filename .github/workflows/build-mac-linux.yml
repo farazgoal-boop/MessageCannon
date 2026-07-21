@@ -29,7 +29,20 @@ jobs:
           pip install -r requirements.txt
           pip install pyinstaller
 
+      - name: Get version from tag (or fallback)
+        id: version
+        run: |
+          RAW="${GITHUB_REF_NAME}"
+          VERSION="${RAW#v}"
+          if [ -z "$VERSION" ] || [ "$VERSION" = "$RAW" ]; then
+            VERSION="1.0.0"
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Version: $VERSION"
+
       - name: Build .app bundle with PyInstaller
+        env:
+          MC_APP_VERSION: ${{ steps.version.outputs.version }}
         run: pyinstaller messagecannon_unix.spec --noconfirm
 
       - name: Verify .app bundle exists

@@ -1422,3 +1422,49 @@ new persistent status-bar row.
    Round 2 has been committed yet; `CLAUDE.md`, `src/ui/main_window.py`, and the two new test files
    are all still uncommitted working-tree changes as of this checkpoint.
 5. Then Round 2 is fully complete (all 8 items addressed) — report that back to the user.
+
+Steps 3-5 above completed later the same day: user confirmed the status bar, items 2+8 committed
+(`bd5b6c9`). Round 2 (all 8 items) is complete. Separately, the same day, the Windows packaging
+pipeline was built, tested, and shipped for real (new CI job, `v1.1.0` tag/release, real
+`MessageCannon_Setup.exe` asset, `check_for_update` confirmed live against it) — see the
+"In-app update checker" section above for the full record.
+
+## Final Completion Pass (started 2026-07-22) — clearing every open/deferred item across the project
+
+User's explicit standing rule for this pass: prove everything with real tests/evidence, checkpoint
+CLAUDE.md after each item so an interruption can resume with "ok continue," never silently skip
+anything — if something genuinely can't be verified in this environment (e.g. no Mac, no live SMTP
+account, no second WhatsApp phone), say so plainly and log it as a known limitation rather than
+falsely closing it.
+
+**CHECKPOINT: Item 1 (macOS version-drift fix) complete — code fix done and structurally verified;
+a real Mac install test is still needed from the user, explicitly not claimed here.**
+
+Applied the same fix pattern already used for Windows (`installer/setup.iss`'s `MyAppVersion`
+define): `messagecannon_unix.spec`'s macOS `BUNDLE` was hardcoding `CFBundleVersion`/
+`CFBundleShortVersionString` to `"1.0.0"` regardless of what tag actually triggered the build —
+flagged as a known drift in the Windows-packaging checkpoint above, now closed the same way.
+
+- `messagecannon_unix.spec`: reads `MC_APP_VERSION` from the environment (set by CI from the git
+  tag), falling back to the real `src.utils.constants.APP_VERSION` — not a second hardcoded string,
+  since a second hardcoded fallback is exactly the kind of thing that drifted last time — for local/
+  manual builds that don't set the env var.
+- `build-mac-linux.yml`'s `build-macos` job gained the same "Get version from tag (or fallback)"
+  step the `build-linux` job already had (bash, identical logic), exporting `MC_APP_VERSION` as an
+  env var to the PyInstaller build step.
+
+**Verified structurally** (this dev machine is Windows — there is no way to run a real macOS
+PyInstaller `BUNDLE`/`create-dmg` build here, so this is explicitly *not* claimed as a full
+verification): `.github/workflows/build-mac-linux.yml` re-parses as valid YAML with the new step
+present in `build-macos`'s step list; `messagecannon_unix.spec` passes `py_compile` (valid Python);
+directly executed the actual substitution logic (env var present → used; env var absent → falls
+back to the real `APP_VERSION` constant, confirmed both equal `"1.1.0"` after the version bump) —
+both branches produce the correct value.
+
+**Explicit, not-silently-skipped limitation**: a real macOS build (PyInstaller `BUNDLE` +
+`create-dmg` actually producing a `.app`/`.dmg` with the correct `Info.plist` version, installed
+and launched on a real Mac) has not been run and cannot be run in this environment. This will only
+be truly confirmed the next time the `build-macos` CI job runs on GitHub's real `macos-latest`
+runner against a new tag (structurally identical to how the Windows fix was only *fully* trusted
+after it ran for real on `windows-latest`, per the checkpoint above) — logged here as a known,
+not-yet-closed gap rather than claimed done.

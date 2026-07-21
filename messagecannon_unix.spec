@@ -9,8 +9,24 @@ Build:
   pyinstaller messagecannon_unix.spec --noconfirm
 """
 
+import os
 import sys
 from PyInstaller.utils.hooks import collect_submodules, collect_data_files
+
+# ── App version for the macOS bundle's Info.plist ─────────────────────────────
+# CI (build-macos job) sets MC_APP_VERSION from the git tag, same pattern as
+# messagecannon_windows.spec/setup.iss's version define, so a release doesn't
+# silently ship Info.plist claiming "1.0.0" forever (that was a real, found
+# drift -- see CLAUDE.md's Windows-packaging checkpoint for the same class of
+# bug already fixed there). Falls back to the actual APP_VERSION constant
+# (not a second hardcoded string, which is exactly what drifted last time) for
+# local/manual builds that don't set the env var.
+sys.path.insert(0, os.getcwd())
+try:
+    from src.utils.constants import APP_VERSION as _FALLBACK_VERSION
+except Exception:
+    _FALLBACK_VERSION = "1.0.0"
+_APP_VERSION = os.environ.get("MC_APP_VERSION", _FALLBACK_VERSION)
 
 # ── Hidden imports ────────────────────────────────────────────────────────────
 hiddenimports = [
@@ -121,8 +137,8 @@ if sys.platform == "darwin":
         info_plist={
             "CFBundleName": "MessageCannon Pro",
             "CFBundleDisplayName": "MessageCannon Pro",
-            "CFBundleVersion": "1.0.0",
-            "CFBundleShortVersionString": "1.0.0",
+            "CFBundleVersion": _APP_VERSION,
+            "CFBundleShortVersionString": _APP_VERSION,
             "NSHighResolutionCapable": True,
             "NSRequiresAquaSystemAppearance": False,   # supports dark mode
         },
