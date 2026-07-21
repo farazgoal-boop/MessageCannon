@@ -1,11 +1,20 @@
 ; MessageCannon Installer Script
 ; Inno Setup 6.0+
+;
+; Version is passed in by CI via `ISCC /DMyAppVersion=x.y.z setup.iss` (computed
+; from the git tag, same pattern build-mac-linux.yml already uses for the Linux
+; .deb package version) so a release doesn't silently ship as "1.0.0" forever.
+; The #ifndef fallback keeps a plain local `ISCC setup.iss` (no /D flag) working
+; for manual test builds.
+#ifndef MyAppVersion
+  #define MyAppVersion "1.1.0"
+#endif
 
 [Setup]
 AppId={{9C5BC6E1-4A94-4C72-BE29-1D9BC9B0C6A8}
 AppName=MessageCannon
-AppVerName=MessageCannon Premium 1.0.0
-AppVersion=1.0.0
+AppVerName=MessageCannon Premium {#MyAppVersion}
+AppVersion={#MyAppVersion}
 AppPublisher=Muhammad Faraz
 AppPublisherURL=https://github.com/farazgoal/MessageCannon
 AppSupportURL=https://github.com/farazgoal/MessageCannon/issues
@@ -57,8 +66,13 @@ begin
 end;
 
 [Registry]
-Root: HKCU; Subkey: "Software\MessageCannon"; ValueType: string; ValueName: "InstallPath"; ValueData: "{app}"
-Root: HKCU; Subkey: "Software\MessageCannon"; ValueType: string; ValueName: "Version"; ValueData: "1.0.0"
+; uninsdeletekey on the subkey itself (needs it on only one line, but Inno
+; Setup only evaluates uninsdeletekey against the specific Subkey value of
+; the line it's on, so both carry it for safety): without this flag, real
+; installs were confirmed (by actually installing then uninstalling) to
+; leave HKCU\Software\MessageCannon behind forever after uninstall.
+Root: HKCU; Subkey: "Software\MessageCannon"; ValueType: string; ValueName: "InstallPath"; ValueData: "{app}"; Flags: uninsdeletekey
+Root: HKCU; Subkey: "Software\MessageCannon"; ValueType: string; ValueName: "Version"; ValueData: "{#MyAppVersion}"; Flags: uninsdeletekey
 
 [Messages]
 WelcomeLabel1=Welcome to the MessageCannon Premium Setup Wizard

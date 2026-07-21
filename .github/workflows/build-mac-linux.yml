@@ -245,9 +245,82 @@ jobs:
           if-no-files-found: error
 
   # ────────────────────────────────────────────────────────────────────────────
+  build-windows:
+  # ────────────────────────────────────────────────────────────────────────────
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller
+
+      - name: Build EXE with PyInstaller
+        run: pyinstaller messagecannon_windows.spec --noconfirm
+
+      - name: Verify EXE exists
+        run: |
+          if (-not (Test-Path "dist\MessageCannon.exe")) {
+            Write-Host "ERROR: dist\MessageCannon.exe not found after PyInstaller run."
+            Get-ChildItem dist -ErrorAction SilentlyContinue
+            exit 1
+          }
+          $size = (Get-Item "dist\MessageCannon.exe").Length / 1MB
+          Write-Host ("OK: dist\MessageCannon.exe exists ({0:N1} MB)" -f $size)
+
+      - name: Get version from tag (or fallback)
+        id: version
+        run: |
+          $raw = $env:GITHUB_REF_NAME
+          if ($raw -match '^v(.+)$') {
+            $version = $Matches[1]
+          } else {
+            $version = "1.0.0"
+          }
+          "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          Write-Host "Version: $version"
+
+      - name: Install Inno Setup
+        run: choco install innosetup -y --no-progress
+
+      - name: Build installer with Inno Setup
+        env:
+          MY_APP_VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" `
+            "/DMyAppVersion=$env:MY_APP_VERSION" `
+            "installer\setup.iss"
+
+      - name: Verify installer exists
+        run: |
+          if (-not (Test-Path "installer\MessageCannon_Setup.exe")) {
+            Write-Host "ERROR: installer\MessageCannon_Setup.exe not found after ISCC run."
+            exit 1
+          }
+          $size = (Get-Item "installer\MessageCannon_Setup.exe").Length / 1MB
+          Write-Host ("OK: installer size ({0:N1} MB)" -f $size)
+
+      - name: Upload Windows installer artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: MessageCannonPro-windows
+          path: installer\MessageCannon_Setup.exe
+          if-no-files-found: error
+
+  # ────────────────────────────────────────────────────────────────────────────
   create-release:
   # ────────────────────────────────────────────────────────────────────────────
-    needs: [build-macos, build-linux]
+    needs: [build-macos, build-linux, build-windows]
     runs-on: ubuntu-latest
     # Only runs on real tag pushes, not workflow_dispatch
     if: startsWith(github.ref, 'refs/tags/v')
@@ -270,10 +343,12 @@ jobs:
             artifacts/MessageCannonPro-mac/MessageCannonPro-mac.dmg
             artifacts/MessageCannonPro-linux/MessageCannonPro-linux-*.deb
             artifacts/MessageCannonPro-linux/MessageCannonPro-linux-*.AppImage
+            artifacts/MessageCannonPro-windows/MessageCannon_Setup.exe
           body: |
             ## Installation
 
-            **Windows:** Download `MessageCannonPro-Setup.exe` from the [Windows build](../../actions/workflows/build-mac-linux.yml) or build locally with `build\build_windows.bat`.
+            **Windows:** Download `MessageCannon_Setup.exe` below and run it — no admin rights needed
+            (per-user install). Launch MessageCannon from the Start Menu when it's done.
 
             **macOS:** Download `MessageCannonPro-mac.dmg`, open it, drag the app to Applications.
             > First launch: right-click → Open (Gatekeeper will block double-click since the app is not notarized).
