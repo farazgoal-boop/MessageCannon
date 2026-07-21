@@ -9,7 +9,7 @@ import re
 import sys
 import threading
 import time
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 from tkinter import BooleanVar, IntVar, StringVar, filedialog, messagebox
 from typing import Dict, List, Optional
@@ -50,6 +50,7 @@ def _ensure_tcl_tk_paths() -> None:
 
 _ensure_tcl_tk_paths()
 
+from ..core import warmup_scheduler
 from ..core.contact_manager import ContactManager
 from ..core.message_processor import MessageProcessor
 from ..core.whatsapp_sender import WhatsAppSender
@@ -278,6 +279,8 @@ class MainWindow(ctk.CTk):
         self.jitter_var = BooleanVar(value=True)
         self.consent_required_var = BooleanVar(value=True)
         self.consent_confirmed_var = BooleanVar(value=False)
+        self.email_warmup_enabled_var = BooleanVar(value=True)
+        self._email_warmup_start_date = ""  # ISO "YYYY-MM-DD", set on first real send
         self.report_format_var = StringVar(value="csv")
         self.session_status_var = StringVar(value="Checking session...")
         self.template_var = StringVar(value="Custom Message")
@@ -1759,6 +1762,18 @@ class MainWindow(ctk.CTk):
                 self._em_validation_label.configure(
                     text="Configure SMTP in Settings before sending.")
             return
+
+        if self.email_warmup_enabled_var.get():
+            remaining_today = self._email_warmup_remaining_today()
+            if len(contacts) > remaining_today:
+                messagebox.showwarning(
+                    "Warm-Up Limit",
+                    f"Warm-up mode allows {remaining_today} more email(s) today "
+                    f"({warmup_scheduler.ramp_status_text(warmup_scheduler.parse_date(self._email_warmup_start_date), date.today(), self.daily_limit_var.get())}). "
+                    "Reduce your recipient list, wait until tomorrow, or turn off warm-up mode "
+                    "in Settings → Campaign Safety if this account is already established.")
+                return
+
         if hasattr(self, "_em_validation_label"):
             self._em_validation_label.configure(text="")
         html_template = self._compose_em_body.get("1.0", "end") if hasattr(
@@ -1820,6 +1835,9 @@ class MainWindow(ctk.CTk):
                 self.compose_progress.set(1)
                 self.progress_status_var.set(
                     f"Done — ✅ {result['sent']} sent  ❌ {result['failed']} failed")
+                if result.get("sent", 0) > 0:
+                    self._ensure_email_warmup_started()
+                    self._update_email_warmup_status_label()
                 self._show_email_report(result)
 
             self.after(0, finish)
@@ -2321,6 +2339,25 @@ class MainWindow(ctk.CTk):
                                      "before every send — required in most places for bulk "
                                      "email/WhatsApp messaging.")
 
+        def _on_warmup_toggle() -> None:
+            self._save_settings()
+            self._update_email_warmup_status_label()
+
+        warmup_switch = ctk.CTkSwitch(card, text="Email warm-up mode",
+                      variable=self.email_warmup_enabled_var,
+                      text_color=T.TEXT_HEAD, command=_on_warmup_toggle)
+        warmup_switch.grid(row=6, column=0, columnspan=2, padx=16, pady=(10, 0), sticky="w")
+        add_tooltip(warmup_switch, "Ramps a new/unproven email account's daily send cap up "
+                                    "gradually over the first 14 days instead of allowing your "
+                                    "full daily limit from day one — reduces the risk of a new "
+                                    "sending account getting throttled or flagged. Turn this off "
+                                    "once your account has an established sending history.")
+        self.email_warmup_status_label = ctk.CTkLabel(
+            card, text="", text_color=T.TEXT_MUTED, font=ctk.CTkFont(size=11),
+            wraplength=360, justify="left")
+        self.email_warmup_status_label.grid(
+            row=7, column=0, columnspan=3, padx=16, pady=(2, 14), sticky="w")
+
         system_card = ctk.CTkFrame(frame, fg_color=T.BG_SURFACE, corner_radius=14,
                                    border_width=1, border_color=T.BG_BORDER)
         system_card.grid(row=1, column=1, sticky="nsew", padx=(8, 0))
@@ -2652,6 +2689,7 @@ class MainWindow(ctk.CTk):
 
         self._update_settings_summary()
         self._update_daily_limit_warning()
+        self._update_email_warmup_status_label()
 
     def _build_status_bar(self) -> None:
         """Round 2 item 8: JobMind Match's real `.footer-status-bar`
@@ -3183,6 +3221,8 @@ class MainWindow(ctk.CTk):
         self.daily_limit_var.set(int(settings.get("daily_limit", 50)))
         self.jitter_var.set(bool(settings.get("jitter", True)))
         self.consent_required_var.set(bool(settings.get("consent_required", True)))
+        self.email_warmup_enabled_var.set(bool(settings.get("email_warmup_enabled", True)))
+        self._email_warmup_start_date = str(settings.get("email_warmup_start_date", ""))
 
         # SMTP — host/user/etc are low-sensitivity and stay plain; the password
         # is encrypted at rest with the same Fernet key as the AI API key.
@@ -3224,6 +3264,8 @@ class MainWindow(ctk.CTk):
                 "daily_limit": self.daily_limit_var.get(),
                 "jitter": self.jitter_var.get(),
                 "consent_required": self.consent_required_var.get(),
+                "email_warmup_enabled": self.email_warmup_enabled_var.get(),
+                "email_warmup_start_date": self._email_warmup_start_date,
                 # SMTP
                 "smtp_provider":   self._em_provider.get(),
                 "smtp_host":       self._em_host.get(),
@@ -3415,8 +3457,34 @@ class MainWindow(ctk.CTk):
         self.daily_limit_var.set(rounded)
         self.limit_label.configure(text=str(rounded))
         self._update_daily_limit_warning()
+        self._update_email_warmup_status_label()
         self._update_compose_summary()
         self._save_settings()
+
+    def _email_warmup_remaining_today(self) -> int:
+        """How many more emails can be sent today under the warm-up ramp
+        (see core/warmup_scheduler.py), already accounting for how many
+        were sent earlier today. Never negative."""
+        start = warmup_scheduler.parse_date(self._email_warmup_start_date)
+        cap = warmup_scheduler.effective_daily_cap(start, date.today(), self.daily_limit_var.get())
+        sent_today = self.db.get_email_sent_count_on(warmup_scheduler.format_date(date.today()))
+        return max(cap - sent_today, 0)
+
+    def _ensure_email_warmup_started(self) -> None:
+        """Called once a real email campaign has actually sent at least one
+        message — records today as day 0 of the ramp if warm-up hasn't
+        already been started. Never overwrites an existing start date."""
+        if self._email_warmup_start_date:
+            return
+        self._email_warmup_start_date = warmup_scheduler.format_date(date.today())
+        self._save_settings()
+
+    def _update_email_warmup_status_label(self) -> None:
+        if not hasattr(self, "email_warmup_status_label"):
+            return
+        start = warmup_scheduler.parse_date(self._email_warmup_start_date)
+        text = warmup_scheduler.ramp_status_text(start, date.today(), self.daily_limit_var.get())
+        self.email_warmup_status_label.configure(text=text)
 
     def _update_daily_limit_warning(self) -> None:
         limit = self.daily_limit_var.get()

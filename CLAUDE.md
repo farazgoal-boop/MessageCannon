@@ -1491,3 +1491,53 @@ and the in-memory list entry; confirm cancelling the `askyesno` prompt leaves th
 intact in both places; confirm a rendered row actually contains a findable "Delete"-labeled button
 widget. All 3 pass. Full `tests/ui/` functional suite re-run (worker count bumped 9→10 in
 `tests/ui/README.md` to match the new file count): 63/63 passing, no regressions.
+
+**CHECKPOINT: Item 3 (email warm-up scheduler) complete.**
+
+New `src/core/warmup_scheduler.py` — pure logic, no I/O: a 5-step ramp schedule (day 0-2: 20/day,
+3-4: 50, 5-7: 100, 8-10: 150, 11-13: 200, day 14+: the user's own configured daily limit applies
+uncapped by the ramp). The ramp only ever *narrows* the user's configured daily limit during the
+14-day window, never recommends sending more than they themselves configured.
+
+Wiring into the live email send path (`_start_email_from_compose`, `main_window.py`):
+- New `email_warmup_enabled_var` (default on) and `_email_warmup_start_date` (persisted via the
+  existing settings blob, empty string until the first real send).
+- `_email_warmup_remaining_today()`: `effective_daily_cap(...) - db.get_email_sent_count_on(today)`
+  — a real cumulative check against `message_logs`, not just a per-click truncation. New
+  `db_manager.get_email_sent_count_on(date_iso)` counts `status='sent'` rows for that calendar day
+  via a `substr(sent_at, 1, 10)` prefix match (sidesteps any ambiguity from `sent_at`'s stored
+  `datetime.isoformat()` including microseconds).
+- `_start_email_from_compose` gained a new gate, structurally identical in weight to the existing
+  WhatsApp path's own `len(selected_contacts) > daily_limit_var` block (a `messagebox.showwarning`
+  + abort, not a silent truncation) — this closes a real, pre-existing asymmetry found while
+  building this: email sending had **no** daily-limit enforcement at all before this pass (only
+  WhatsApp did); the warm-up gate is now also the mechanism that enforces the base daily limit for
+  email in the first place.
+- `_ensure_email_warmup_started()` records today as day 0 the first time a real campaign sends at
+  least one message (`result["sent"] > 0` in `_execute_email_send`'s finish callback) — never
+  overwrites an already-recorded start date.
+- Settings → Campaign Safety gained an "Email warm-up mode" switch + a live status label
+  (`ramp_status_text`, e.g. "Warm-up day 3 of 14 (started 2026-07-01) — today's cap: 50/day.") via a
+  new `_update_email_warmup_status_label()`, refreshed on toggle, on daily-limit slider change, and
+  at Settings-view build time.
+
+**Verified**: `tests/test_warmup_scheduler.py` (8 tests, pure logic — every ramp boundary, the
+never-exceed-user's-own-limit guarantee, the active/inactive window edge at exactly day 14, date
+parse/format round-trip, status-text wording); `tests/test_email_warmup_db.py` (2 tests, throwaway
+temp SQLite DB — only `status='sent'` rows count, only rows on the queried calendar day count);
+`tests/ui/test_email_warmup_enforcement.py` (6 tests, fresh-isolated-DB `MainWindow` — remaining-
+today math with/without a start date and after real sends recorded in `message_logs`;
+`_ensure_email_warmup_started` sets once and never overwrites; a real call to
+`_start_email_from_compose` with 21 recipients against a day-0 cap of 20 is genuinely blocked with
+the expected warning text and the send thread never starts; the same call succeeds past the
+warm-up gate — proven by reaching the *next* real gate, SMTP-not-configured — when the toggle is
+off). All 16 new tests pass. Full regression check per this file's standing discipline: 69/69
+functional (`-n 11`, worker count bumped again for the 3 new UI test files), 7/7 navigation-timing
+alone, 1/1 close-button alone, 57/57 plain `tests/` — 77 UI + 57 plain, all green, no regressions.
+
+**Explicit, not-silently-claimed limitation** (per the user's own standing instruction for this
+pass): what's verified above is the *mechanism* — correct ramp math, correct cumulative enforcement
+against real logged sends, correct settings persistence. Real-world deliverability outcomes (does a
+14-day ramp actually keep a new Gmail/Outlook SMTP account off a real ISP's throttling/blocklist)
+cannot be verified without a live SMTP account and real send history over real calendar time, which
+this environment doesn't have — not attempted, not claimed.

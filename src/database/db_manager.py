@@ -762,6 +762,28 @@ class DatabaseManager:
             Logger.error(f"Error getting message logs: {e}")
             return []
 
+    def get_email_sent_count_on(self, target_date_iso: str) -> int:
+        """Count of message_logs rows (the email send path) with status
+        'sent' whose sent_at falls on the given calendar day, for the
+        email warm-up scheduler's cumulative daily cap. `target_date_iso`
+        is a "YYYY-MM-DD" string; sent_at is stored as a full
+        datetime.isoformat() string, so a substring prefix match is used
+        rather than SQLite's own date() parsing to avoid any ambiguity
+        from the embedded time/microseconds component."""
+        try:
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "SELECT COUNT(*) FROM message_logs "
+                    "WHERE status = 'sent' AND substr(sent_at, 1, 10) = ?",
+                    (target_date_iso,)
+                )
+                row = cursor.fetchone()
+                return int(row[0]) if row else 0
+        except Exception as e:
+            Logger.error(f"Error counting today's sent emails: {e}")
+            return 0
+
     # Delivery Tracking Operations
     def create_tracked_message(
         self,
