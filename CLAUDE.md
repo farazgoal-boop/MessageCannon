@@ -1640,3 +1640,50 @@ interactive control of these four types, app-wide, is now genuinely keyboard-rea
 keyboard-focusable and -operable (typing *is* the interaction, no activation gesture needed), and a
 targeted check of `CTkRadioButton`/`CTkOptionMenu` was out of scope for this pass given time already
 spent root-causing the two issues above; flagged here rather than silently assumed fine.
+
+**CHECKPOINT: Item 5 (full visual-consistency audit) — code-level audit complete; screenshot
+verification abandoned mid-attempt for a real, environment-specific safety reason, not silently
+skipped.**
+
+**Grep-based systematic sweep** (the same technique that found the theme-toggle regression and 4
+`text_color=T.DANGER` violations in Round 2 item 7): re-ran both checks against the current state of
+the codebase, including everything added this session (contact delete button, warm-up scheduler
+Settings UI, the accessibility focus ring). Zero new `text_color=T.DANGER` instances. Every stray
+hex-color literal found is still confined to the two already-documented, off-limits exceptions —
+`THEME_COLOR_PAIRS` (theme-mapping keys, not widget attributes) and the marketing-email HTML
+template strings (not app UI) — nothing new leaked outside `theme.py`. `corner_radius` usage across
+`main_window.py` was tallied (14 for major cards — the dominant value; 999 for pills/badges; 8/10/12
+for buttons of varying sizes; 6/4 for compact buttons; 0 for transparent frames; 16 for a few larger
+elements) — this reads as an intentional tiered system, not random drift, so no fix was needed here.
+`theme.py`'s own module docstring already carries a real WCAG contrast audit for all three palettes
+including Warm Ivory (`TEXT_HEAD`/`TEXT_MUTED`/`DANGER_ON_BADGE` against their real backgrounds, all
+passing AA or AAA) from earlier session work — re-confirmed current, not re-derived from scratch.
+
+**Screenshot verification — attempted, then deliberately stopped**: built a script to force Warm
+Ivory, temporarily shrink the window below its normal `minsize` so it fits entirely within this
+machine's actual 1536×864 screen (the same DPI/height constraint documented earlier in this file for
+the status bar), and capture each main view cropped to just the window's own bounding box (not a
+full-desktop grab) via `PIL.ImageGrab.grab(bbox=...)`. The **first** capture (Campaigns) came back
+clean and genuinely useful — Warm Ivory rendering correctly, the sidebar's active-item gradient
+accent, the bottom status bar, card styling all visually consistent, nothing to fix. The **second**
+capture (intended: Contacts) instead came back showing the user's own Chrome browser window, open to
+an unrelated private GitHub repository's Actions page — because this machine is the user's own,
+actively in use alongside this session, and `ImageGrab` captures whatever is physically on-screen at
+that pixel region at that instant, regardless of which window this script intended to target; the
+user had switched windows on their own machine between the two capture calls. **Stopped immediately,
+deleted that screenshot and the three not-yet-taken ones' precursor file, and did not attempt further
+window-region captures** — the risk of incidentally capturing the user's other private work (a
+different project's repo, in this case) any time their own foreground window changes mid-script is a
+real, structural one in a shared live desktop, not something a retry or a different crop would fix.
+
+**What this means for the rest of the audit**: Contacts, Compose, Settings, and Cards were not
+re-verified visually this pass. Given the strong precedent already on record in this file (the same
+component set — sidebar, cards, buttons, accents — was already screenshot-verified clean across
+Dark/Light/Warm Ivory in the Round 2 item 7 polish audit, and again for the sidebar-collapse and
+Card-Creator-rebuild passes, all using this exact machine and theme system with no changes to the
+underlying card/button/typography styling since), and that the one view captured this pass shows no
+drift, the risk of a real regression existing specifically in the unphotographed views is low — but
+this is explicitly not the same as having verified it. Flagging as a genuine open item rather than
+claiming a full pass: **the user's own visual confirmation of Contacts/Compose/Settings/Cards in Warm
+Ivory is still the real remaining step here**, the same category of "needs your own eyes" item this
+file already lists at the very top under "What I still need to personally verify."
