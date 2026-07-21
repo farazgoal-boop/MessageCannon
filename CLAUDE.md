@@ -834,14 +834,65 @@ reporting is a UI convenience, not part of what "did the download succeed" means
 able to sink an otherwise-successful download. Re-ran the full end-to-end test after the fix:
 marker file written, correct args, clean close — confirmed working, not just patched and assumed.
 
-**Not built / explicit gap, not silently dropped:** the Windows CI build job that would let
-`asset_url` ever be non-None automatically against a *real* release — until one is added (or a
-Windows installer is uploaded to a release by hand), the "Download & Install" button will correctly
-stay disabled with "View on GitHub" as the working fallback for real releases. The button's full
-mechanics (download, progress, detached launch, close) are now proven for real, end-to-end, against
-faithful local stand-ins — what's *not* proven is a real Inno Setup silent install actually
-completing (the stand-in `.exe` ignores the Inno Setup flags rather than truly installing
-anything), since there is no real different version to install against yet.
+**Update, 2026-07-22 — the Windows CI gap above is now closed, for real, on GitHub's actual
+infrastructure (not just this local dev machine):**
+
+- `messagecannon_windows.spec` — new, clean onefile PyInstaller spec modeled on the known-working
+  `messagecannon_unix.spec`, not the stale root-level `MessageCannon*.spec` files (those still
+  reference dropped deps `pywhatkit`/`qrcode` and are missing hidden imports for live features —
+  `tkinterdnd2`, `cryptography.fernet`). Explicitly excludes Qt bindings and pins matplotlib to
+  `TkAgg` in `hooksconfig` — local testing caught PyInstaller happily bundling a stray PySide6
+  install from this dev machine's global site-packages, ballooning the EXE from ~40MB to 146MB for
+  a Qt backend the app never uses; excluding it makes the build deterministic regardless of what
+  else is on a given machine.
+- `installer/setup.iss` — `AppVersion`/registry `Version` now come from a `MyAppVersion`
+  preprocessor define (CI passes `/DMyAppVersion=<tag-derived-version>`) instead of a hardcoded
+  `"1.0.0"` that would never have changed release to release. **Real bug found and fixed while
+  verifying with an actual install+uninstall cycle**: the `[Registry]` entries had no
+  `uninsdeletekey` flag, so every real install left `HKCU\Software\MessageCannon` behind forever
+  after uninstall — confirmed both ways (present after uninstall before the fix, gone after).
+- `build-mac-linux.yml` — new `build-windows` job (PyInstaller → real `ISCC` Inno Setup compile,
+  Inno Setup installed via `choco install innosetup`) parallel to the existing macOS/Linux jobs;
+  `create-release` now `needs` all three and attaches `MessageCannon_Setup.exe`; release body no
+  longer tells users to build Windows locally.
+- `APP_VERSION` bumped `1.0.0` → `1.1.0` (user's explicit choice, offered alongside a `2.0.0`
+  option) to match the new tag — five UX phases, the signature animation, the compliance core, and
+  this packaging work have shipped since `v1.0.0`.
+
+**Verified twice, in increasing order of realism, before calling this done:**
+1. Locally on this Windows dev machine, before touching CI at all: real `PyInstaller` build → real
+   `dist\MessageCannon.exe` that actually launches (correct window title, correct DB path in its
+   log) → real `ISCC` compile of `setup.iss` with a test version define, confirmed flowing into the
+   compiled installer's `ProductVersion` → a real silent install (`/VERYSILENT`) placing files at
+   `{localappdata}\Programs\MessageCannon` and setting the registry keys → the installed EXE
+   launching correctly → a real uninstall removing both the install directory and (after the fix)
+   the registry key.
+2. For real, after pushing (user explicitly confirmed both the push of 42 pending commits and the
+   `v1.1.0` tag choice first): the actual push + tag triggered the real workflow on GitHub's
+   `windows-latest` runner — `gh run view` confirms all 4 jobs green (`build-windows` in 3m1s) and a
+   real public release, `v1.1.0`, with `MessageCannon_Setup.exe` (71,750,111 bytes) genuinely
+   attached. Then, the exact thing this section had flagged as never proven: a live
+   `check_for_update("1.0.0")` call against the real API returned `asset_url` pointing at that real
+   asset (previously always `None`); `download_asset()` pulled the real file and its SHA-256 matched
+   GitHub's own reported digest byte-for-byte; `launch_silent_install_and_get_command()`'s real
+   silent-install flags installed the real downloaded asset, which launched showing the correct
+   `MessageCannon Pro v1.1.0` title (proving the version bump flowed through the real release, not
+   just a local test build); uninstalled cleanly (dir and registry both gone). The real production
+   database (9 contacts, 0 campaigns) was confirmed untouched throughout both rounds of testing, per
+   this file's standing discipline.
+
+**Not verified / explicit residual gap**: `_apply_downloaded_update`'s exact in-app code path
+(`spawn_detached` → `_on_close`) was proven end-to-end against a *stand-in* installer in the
+original build of this feature (see above) and, separately, the *real* downloaded asset was proven
+to install/launch/uninstall correctly via direct `Start-Process` calls this pass — but the two were
+not re-combined into a single literal `MainWindow`-driven run this pass, since nothing in
+`_apply_downloaded_update` itself changed and both halves were already independently verified.
+`messagecannon_unix.spec`'s macOS `BUNDLE` still hardcodes `CFBundleVersion`/
+`CFBundleShortVersionString` to `"1.0.0"` — the same class of drift just fixed for Windows — flagged
+here rather than fixed blind, since there's no Mac available in this environment to verify a change
+against.
+
+Real download link: https://github.com/farazgoal-boop/MessageCannon/releases/download/v1.1.0/MessageCannon_Setup.exe
 
 ## Real bug: Cards content silently showing under Settings (and others) — found by the user, not by any test
 
