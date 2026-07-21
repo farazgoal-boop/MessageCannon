@@ -1301,3 +1301,73 @@ a JobMind-style pill) and 8 (section-animation/sidebar-footer match, including t
 customized Copilot footer placement) were only ever researched, never built** — the reference
 research above identified exactly what to build for both, but no code exists yet for either. Not
 to be confused with "done" — these are the two remaining open items from the original 8.
+
+**CHECKPOINT (mid-session break, user-requested): Item 2 complete and committed-pending; Item 8
+in progress, NOT yet committed. Resume exactly here on "ok continue."**
+
+**Item 2 — done, not yet committed.** Re-read JobMind's real `.sidebar-update-pill`
+(`styles.css:1243`) directly: a gradient pill with a small pulsing dot (`.sidebar-update-dot`,
+`sidebarUpdatePulse` keyframe, opacity 1→0.4→1 over 1.8s). A true CSS gradient fill on a CTkButton
+isn't achievable in Tk (no per-widget gradient paint), so kept the existing flat
+`T.BADGE_BG`/`T.ACCENT` badge styling and added the part that *is* replicable: a small `tk.Canvas`
+dot (`self._update_badge_dot`) packed to the left of the existing badge button inside a new
+`self._update_badge_row` wrapper, pulsing via `_start_update_dot_pulse`/`_stop_update_dot_pulse` —
+alternates the dot's fill between `T.ACCENT` and `T.BG_MAIN` (its own background) on a 900ms half-
+period, standing in for the CSS opacity fade since Tk canvas items have no alpha channel. Kept the
+existing top-of-sidebar position (under the brand block) rather than JobMind's bottom-pinned
+placement — that position was itself a real, tested bug fix from the "In-app update checker"
+section, and repositioning risks the sidebar's fragile bottom pack-order (see the stacking-order
+bug fixed elsewhere) for a discoverability problem the dot itself already solves. Verified: new
+`tests/ui/test_sidebar_update_pill.py` (4 tests) — row show/hide, pulse start/stop, color
+alternation via a direct dot-fill check, and pulse correctly stopping while the sidebar is
+collapsed and resuming on re-expand. All 4 pass. Existing `tests/ui/test_sidebar_collapse.py`
+re-run clean (10/10) after this change.
+
+**Item 8 — in progress, built but not yet fully verified or committed.** The earlier reference-
+research checkpoint's claim of a `<footer class="app-footer premium-footer">` was itself wrong —
+re-grepped JobMind's actual templates/CSS again this pass and confirmed no such class exists
+anywhere. The real thing is `.footer-status-bar` (`styles.css:458`, comment-labeled "Fixed
+Copilot-style status bar — always visible at bottom"): a full-width bar fixed to the bottom of the
+*entire window* (`position:fixed;bottom:0;left:0;right:0`), not a sidebar-only element, showing
+(confirmed via `dashboard.html:2103`): `JobMind Premium · ● Live · v{version} · 100% On Your
+Machine · © 2026 Muhammad Faraz`.
+
+Built `MainWindow._build_status_bar()` (called once in `__init__` after the first `_create_ui()`,
+never destroyed/rebuilt since its content doesn't depend on the active view or theme rebuild): a
+new grid row=1 (columnspan=2, weight=0, below the existing sidebar+content row=0 weight=1) —
+the direct equivalent of CSS `position:fixed;bottom:0` for a non-scrolling desktop window. Content:
+`MessageCannon Pro · ● Live · v{APP_VERSION} · 100% On Your Device · © {year} Muhammad Faraz` (using
+the existing `DEVELOPER` constant, not hardcoded). The "Live" dot pulses via the same
+alternation technique as item 2's badge dot (`_start_status_bar_dot_pulse`), just with
+`T.SUCCESS`↔`T.BG_MAIN` instead of `T.ACCENT`↔`T.BG_MAIN`, 1000ms half-period.
+
+**Verified so far**: confirmed via direct widget introspection (not screenshots — see below for
+why) that the bar is correctly grid-placed at row=1 columnspan=2, `winfo_ismapped()` is `True`,
+real non-zero `winfo_height()` (35px), and sits flush at the bottom edge of the window
+(`winfo_y() + winfo_height() == window height` exactly). **Not yet verified**: a real screenshot
+proof (attempted 3 times this pass — every attempt showed a black strip where the bar should be,
+traced to a sandbox-only constraint: this app's `minsize(1220, 760)` floor is ~950px tall at this
+machine's 125% DPI scaling, but the actual physical screen here is only 864px tall, so the bottom
+of the window — including the status bar — falls outside what `ImageGrab` can actually capture;
+this is an environment limitation, not evidence of a bug, but it means visual confirmation still
+needs the user's own screen). Also not yet done: no automated test file for the status bar
+(equivalent to `test_sidebar_update_pill.py` for item 2), no full `tests/ui/` suite re-run since
+adding it, and neither item 2 nor item 8 has been committed yet.
+
+**Steps 1-2 done this pass**: added `tests/ui/test_status_bar.py` (4 tests — bar grid-placed at
+row=1/columnspan=2 and mapped, contains all 5 expected text pieces via a recursive label-text
+walk, dot pulses to `T.SUCCESS` deterministically, `_start_status_bar_dot_pulse` is idempotent).
+All 4 pass alone. Full suite re-run exactly per `tests/ui/README.md`'s two-command pattern
+(worker count bumped 6→9 in the README to match the file count, which grew from item 2's
+`test_sidebar_update_pill.py` plus this new file): 60/60 functional (`-n 9 --dist loadfile`),
+7/7 navigation-timing alone, 1/1 close-button alone — 68/68, no flakiness, no regression from the
+new persistent status-bar row.
+
+**Still open — steps 3-5, exact resume steps**:
+3. Ask the user to visually confirm the status bar renders correctly on their own screen (the
+   sandbox can't screenshot it, per above) — in particular that it doesn't visually collide with
+   anything and that 28px height is enough / not too much.
+4. Commit items 2 and 8 together (or separately if that reads cleaner in the log) — nothing from
+   Round 2 has been committed yet; `CLAUDE.md`, `src/ui/main_window.py`, and the two new test files
+   are all still uncommitted working-tree changes as of this checkpoint.
+5. Then Round 2 is fully complete (all 8 items addressed) — report that back to the user.

@@ -55,7 +55,7 @@ from ..core.message_processor import MessageProcessor
 from ..core.whatsapp_sender import WhatsAppSender
 from ..database.db_manager import DatabaseManager
 from ..models import Contact, Template, Campaign, MessageLog, MessageStatus
-from ..utils.constants import APP_NAME, APP_VERSION, WINDOW_HEIGHT, WINDOW_WIDTH, JITTER_RANGE
+from ..utils.constants import APP_NAME, APP_VERSION, DEVELOPER, WINDOW_HEIGHT, WINDOW_WIDTH, JITTER_RANGE
 from . import theme as T
 from .toast import show_toast
 from .confirm_dialogs import show_danger_confirm
@@ -352,9 +352,11 @@ class MainWindow(ctk.CTk):
         self._load_settings()
         self._apply_theme(self.theme_var.get())
         self.grid_rowconfigure(0, weight=1)
+        self.grid_rowconfigure(1, weight=0)
         self.grid_columnconfigure(1, weight=1)
 
         self._create_ui()
+        self._build_status_bar()
         self._sync_theme_overrides()
         self._enforce_license()
         self._load_templates()
@@ -601,14 +603,39 @@ class MainWindow(ctk.CTk):
         self._update_badge_slot = ctk.CTkFrame(self.sidebar, fg_color="transparent", width=1)
         self._update_badge_slot.pack(side="top", fill="x")
 
+        # Round 2 item 2: JobMind Match's real `.sidebar-update-pill`
+        # (styles.css:1243) is a gradient pill with a small pulsing dot --
+        # confirmed via direct source read, not assumed. A true CSS gradient
+        # fill on a CTkButton isn't achievable in Tk (no per-widget gradient
+        # paint), so the badge itself keeps its existing flat
+        # T.BADGE_BG/T.ACCENT treatment (already reasonably close visually);
+        # the pulsing dot -- the actual attention-grabbing mechanic in
+        # JobMind's design, not the gradient -- is the part that's genuinely
+        # replicable and is what's new here. Kept the existing top position
+        # (under the brand block) rather than moving it to a JobMind-style
+        # bottom pin: that position was itself a real, tested bug fix (see
+        # the comment above), and re-verifying a reposition against the
+        # sidebar's fragile bottom pack-order (see the stacking-order bug
+        # fixed elsewhere in this file) wasn't worth the regression risk for
+        # a discoverability fix that the dot itself already addresses.
+        self._update_badge_row = ctk.CTkFrame(self._update_badge_slot, fg_color="transparent")
+        self._update_badge_dot = tk.Canvas(
+            self._update_badge_row, width=10, height=10, highlightthickness=0,
+            bg=T.resolve(T.BG_MAIN))
+        self._update_badge_dot.pack(side="left", padx=(16, 6))
+        self._update_badge_dot_item = self._update_badge_dot.create_oval(
+            2, 2, 8, 8, fill=T.resolve(T.ACCENT), outline="")
+        self._update_dot_pulse_after_id = None
+
         self.update_badge_var = ctk.StringVar(value="")
         self.sidebar_update_badge = ctk.CTkButton(
-            self._update_badge_slot, textvariable=self.update_badge_var,
+            self._update_badge_row, textvariable=self.update_badge_var,
             fg_color=T.BADGE_BG, hover_color=T.BG_SURFACE,
             text_color=T.ACCENT, corner_radius=999, height=26,
             font=ctk.CTkFont(size=10, weight="bold"),
             command=self._show_update_dialog,
         )
+        self.sidebar_update_badge.pack(side="left", fill="x", expand=True, padx=(0, 16))
         if self._update_info is not None:
             self._refresh_update_badge()
 
@@ -2626,6 +2653,98 @@ class MainWindow(ctk.CTk):
         self._update_settings_summary()
         self._update_daily_limit_warning()
 
+    def _build_status_bar(self) -> None:
+        """Round 2 item 8: JobMind Match's real `.footer-status-bar`
+        (styles.css:458, "Fixed Copilot-style status bar — always visible
+        at bottom") -- a full-width bar fixed to the bottom of the whole
+        window, not a sidebar-only element. The earlier reference-research
+        checkpoint's claim of a `<footer class="app-footer premium-footer">`
+        was itself wrong (grepped JobMind's actual templates/CSS again for
+        this pass -- no such class exists anywhere); `.footer-status-bar` is
+        the real thing, confirmed via `dashboard.html:2103`:
+        `JobMind <em>Premium</em> · ● Live · v{version} · 100% On Your
+        Machine · © 2026 Muhammad Faraz`.
+
+        Built once here (not inside _create_ui) and never destroyed: unlike
+        the sidebar/content, this bar's content doesn't depend on the
+        active view, so it doesn't need rebuilding on Warm Ivory
+        transitions. Its colors use plain T.token tuples, so it picks up
+        every theme change (Dark/Light natively, Warm Ivory via the same
+        (value, value) tuple mechanism) with zero extra code, same as any
+        other CTk-native widget in this app.
+
+        Placed in a new grid row=1 (columnspan=2, weight=0) below the
+        existing sidebar+content row=0 (weight=1) -- a fixed-height row
+        pinned to the bottom of a non-scrolling desktop window is the
+        direct equivalent of CSS `position:fixed;bottom:0` for this stack.
+        """
+        bar = ctk.CTkFrame(self, fg_color=T.BG_MAIN, corner_radius=0,
+                            border_width=1, border_color=T.BG_BORDER, height=28)
+        bar.grid(row=1, column=0, columnspan=2, sticky="ew")
+        bar.grid_propagate(False)
+
+        row = ctk.CTkFrame(bar, fg_color="transparent")
+        row.pack(expand=True)
+
+        def sep() -> None:
+            ctk.CTkLabel(row, text="·", text_color=T.TEXT_DIM,
+                         font=ctk.CTkFont(size=10)).pack(side="left", padx=6)
+
+        ctk.CTkLabel(row, text=APP_NAME, text_color=T.TEXT_HEAD,
+                     font=ctk.CTkFont(size=10, weight="bold")).pack(side="left")
+        sep()
+
+        live_group = ctk.CTkFrame(row, fg_color="transparent")
+        live_group.pack(side="left")
+        self._status_bar_dot = tk.Canvas(
+            live_group, width=8, height=8, highlightthickness=0, bg=T.resolve(T.BG_MAIN))
+        self._status_bar_dot.pack(side="left", padx=(0, 4))
+        self._status_bar_dot_item = self._status_bar_dot.create_oval(
+            1, 1, 7, 7, fill=T.resolve(T.SUCCESS), outline="")
+        ctk.CTkLabel(live_group, text="Live", text_color=T.TEXT_DIM,
+                     font=ctk.CTkFont(size=10)).pack(side="left")
+        sep()
+
+        ctk.CTkLabel(row, text=f"v{APP_VERSION}", text_color=T.TEXT_DIM,
+                     font=ctk.CTkFont(size=10)).pack(side="left")
+        sep()
+
+        ctk.CTkLabel(row, text="100% On Your Device", text_color=T.TEXT_DIM,
+                     font=ctk.CTkFont(size=10)).pack(side="left")
+        sep()
+
+        ctk.CTkLabel(row, text=f"© {datetime.now().year} {DEVELOPER}",
+                     text_color=T.TEXT_DIM, font=ctk.CTkFont(size=10)).pack(side="left")
+
+        self._status_bar_dot_pulse_after_id = None
+        self._start_status_bar_dot_pulse()
+
+    def _start_status_bar_dot_pulse(self) -> None:
+        """Same color-alternation technique as the sidebar update pill's dot
+        (see _start_update_dot_pulse) -- standing in for JobMind's CSS
+        opacity-pulse keyframe on `.footer-status-dot`, which Tk canvas
+        items can't do directly (no alpha channel)."""
+        if getattr(self, "_status_bar_dot_pulse_after_id", None) is not None:
+            return
+        dot = getattr(self, "_status_bar_dot", None)
+        if dot is None:
+            return
+
+        def step(lit: bool) -> None:
+            if not dot.winfo_exists():
+                self._status_bar_dot_pulse_after_id = None
+                return
+            try:
+                dot.itemconfig(
+                    self._status_bar_dot_item,
+                    fill=T.resolve(T.SUCCESS) if lit else T.resolve(T.BG_MAIN))
+            except Exception:
+                self._status_bar_dot_pulse_after_id = None
+                return
+            self._status_bar_dot_pulse_after_id = self.after(1000, lambda: step(not lit))
+
+        step(True)
+
     def _new_view_frame(self, name: str) -> ctk.CTkFrame:
         return self._new_view_container(name)
 
@@ -2753,6 +2872,7 @@ class MainWindow(ctk.CTk):
 
         if collapsed:
             self._update_badge_slot.pack_forget()
+            self._stop_update_dot_pulse()
         else:
             self._update_badge_slot.pack(side="top", fill="x")
             if self._update_info is not None:
@@ -3720,13 +3840,53 @@ class MainWindow(ctk.CTk):
 
     def _refresh_update_badge(self) -> None:
         badge = getattr(self, "sidebar_update_badge", None)
+        row = getattr(self, "_update_badge_row", None)
         if badge is None or not badge.winfo_exists():
             return
         if self._update_info is None:
-            badge.pack_forget()
+            row.pack_forget()
+            self._stop_update_dot_pulse()
             return
         self.update_badge_var.set(f"⬆  Update {self._update_info.tag} available")
-        badge.pack(side="top", anchor="w", fill="x", padx=16, pady=(0, 10))
+        row.pack(side="top", fill="x", pady=(0, 10))
+        self._start_update_dot_pulse()
+
+    def _start_update_dot_pulse(self) -> None:
+        """JobMind Match's `.sidebar-update-dot` pulses via a CSS opacity
+        keyframe (1 -> 0.4 -> 1, 1.8s ease-in-out infinite) -- Tk canvas
+        items have no alpha channel, so this simulates the same "breathing"
+        attention cue by alternating the dot's fill between T.ACCENT and
+        T.BG_MAIN (its own background, i.e. fully faded out) instead, on
+        the same ~1.8s period. Idempotent: safe to call again while already
+        pulsing (used whenever the badge is re-shown)."""
+        if self._update_dot_pulse_after_id is not None:
+            return
+        dot = getattr(self, "_update_badge_dot", None)
+        if dot is None:
+            return
+
+        def step(lit: bool) -> None:
+            if not dot.winfo_exists():
+                self._update_dot_pulse_after_id = None
+                return
+            try:
+                dot.itemconfig(
+                    self._update_badge_dot_item,
+                    fill=T.resolve(T.ACCENT) if lit else T.resolve(T.BG_MAIN))
+            except Exception:
+                self._update_dot_pulse_after_id = None
+                return
+            self._update_dot_pulse_after_id = self.after(900, lambda: step(not lit))
+
+        step(True)
+
+    def _stop_update_dot_pulse(self) -> None:
+        if self._update_dot_pulse_after_id is not None:
+            try:
+                self.after_cancel(self._update_dot_pulse_after_id)
+            except Exception:
+                pass
+            self._update_dot_pulse_after_id = None
 
     def _start_update_check(self) -> None:
         """Background GitHub Releases check, same off-UI-thread pattern as
