@@ -1468,3 +1468,26 @@ be truly confirmed the next time the `build-macos` CI job runs on GitHub's real 
 runner against a new tag (structurally identical to how the Windows fix was only *fully* trusted
 after it ran for real on `windows-latest`, per the checkpoint above) — logged here as a known,
 not-yet-closed gap rather than claimed done.
+
+**CHECKPOINT: Item 2 (per-row contact delete) complete.**
+
+Added a "🗑 Delete" button to every row in the Contacts directory (`_render_contacts_directory`,
+`main_window.py`), rightmost in the footer row (packed before the existing Unsubscribe/Resubscribe
+button so it lands outermost). New `_delete_contact_row(contact)`: a single `messagebox.askyesno`
+confirm ("Permanently delete {name}? This cannot be undone.") — the same weight already used
+elsewhere in this app for a deliberate-but-routine action (the WhatsApp panel's own Reset Session
+confirm), explicitly lighter than the Danger Zone's typed-confirmation gate, which this file's own
+"Round 2 - major redesign request" section already reserves for irreversible *bulk* operations, not
+a single row. On confirm: calls the pre-existing, already-DB-verified `db.delete_contact(contact.id)`
+(this codebase had the backend done, per this file's own Phase 5 note, just no UI entry point until
+now), removes the contact from the in-memory `self.contacts` list, logs the activity, shows a toast,
+and re-renders both the Contacts directory and the Compose contact list so a deleted contact can't
+linger as a stale, no-longer-selectable checkbox.
+
+**Verified**: new `tests/ui/test_contact_delete.py` (3 tests, same fresh-isolated-DB
+module-scoped-MainWindow pattern as `test_sidebar_update_pill.py`/`test_status_bar.py` — a real
+delete must never be able to reach the live production database) — confirm deletes both the DB row
+and the in-memory list entry; confirm cancelling the `askyesno` prompt leaves the contact fully
+intact in both places; confirm a rendered row actually contains a findable "Delete"-labeled button
+widget. All 3 pass. Full `tests/ui/` functional suite re-run (worker count bumped 9→10 in
+`tests/ui/README.md` to match the new file count): 63/63 passing, no regressions.

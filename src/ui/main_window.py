@@ -3556,6 +3556,11 @@ class MainWindow(ctk.CTk):
                          text=f"ID {contact.id if contact.id is not None else '—'}",
                          text_color=T.TEXT_MUTED, font=ctk.CTkFont(size=11),
                          ).pack(side="left")
+            ctk.CTkButton(footer, text="🗑 Delete", width=76, height=22, corner_radius=6,
+                          fg_color=T.DANGER, hover_color=T.DANGER_HOVER, text_color=T.TEXT_HEAD,
+                          font=ctk.CTkFont(size=10),
+                          command=lambda c=contact: self._delete_contact_row(c),
+                          ).pack(side="right", padx=(6, 0))
             if contact.opted_out:
                 ctk.CTkLabel(footer, text="Excluded from all sends",
                              text_color=T.DANGER_ON_BADGE, font=ctk.CTkFont(size=10, weight="bold"),
@@ -3591,6 +3596,32 @@ class MainWindow(ctk.CTk):
             self,
             f"{contact.name or contact.phone} {'unsubscribed — excluded from all future sends' if opted_out else 'resubscribed'}.",
             kind="success")
+        self._render_contacts_directory()
+        self._render_compose_contacts()
+
+    def _delete_contact_row(self, contact: Contact) -> None:
+        """Per-row delete from the Contacts directory. A single explicit
+        askyesno (same weight as the WhatsApp panel's own Reset Session
+        confirm) rather than the Danger Zone's typed-confirmation gate --
+        that gate is reserved for irreversible *bulk* operations; a single
+        row is a lighter, still-deliberate action, not a one-click accident
+        (the button itself requires a click on a labeled Delete button, not
+        an ambient control)."""
+        if contact.id is None:
+            return
+        label = contact.name or contact.phone
+        if not messagebox.askyesno(
+            "Delete Contact",
+            f"Permanently delete {label}? This cannot be undone.",
+        ):
+            return
+        ok = self.db.delete_contact(contact.id)
+        if not ok:
+            show_toast(self, "Could not delete contact.", kind="error")
+            return
+        self.contacts = [c for c in self.contacts if c.id != contact.id]
+        self._log_activity(f"Deleted contact: {label}")
+        show_toast(self, f"{label} deleted.", kind="success")
         self._render_contacts_directory()
         self._render_compose_contacts()
 
