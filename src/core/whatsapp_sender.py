@@ -18,6 +18,7 @@ from selenium.webdriver.support.ui import WebDriverWait
 from ..delivery_tracker import DeliveryTracker
 from ..models import Contact
 from ..session_manager import SessionManager, SessionState
+from .whatsapp_accounts import WhatsAppAccount
 from ..utils.constants import (
     JITTER_RANGE,
     MAX_MESSAGES_PER_SESSION,
@@ -35,8 +36,23 @@ EventCallback = Callable[[str, Dict[str, Any]], None]
 class WhatsAppSender:
     """Automate sending through WhatsApp Web using Selenium."""
 
-    def __init__(self):
-        self.session_manager = SessionManager()
+    def __init__(self, account: Optional[WhatsAppAccount] = None):
+        """`account`: optional multi-number groundwork (Item 7, final
+        completion pass). Every real call site in this app today constructs
+        `WhatsAppSender()` with no argument, which behaves identically to
+        before this change -- a single, default SessionManager/session
+        directory. Passing a `WhatsAppAccount` gives this sender its own
+        isolated Chrome profile directory and its own namespaced session
+        state, so multiple accounts' sessions never collide -- the storage
+        half of multi-number support. Not yet wired into a live rotating
+        send loop (see core/whatsapp_accounts.py's module docstring)."""
+        self.account = account
+        if account is not None:
+            from .whatsapp_accounts import get_account_session_dir
+            self.session_manager = SessionManager(
+                session_dir=get_account_session_dir(account), account_label=account.label)
+        else:
+            self.session_manager = SessionManager()
         self.delivery_tracker = DeliveryTracker()
         self.is_sending = False
         self.pause_event = threading.Event()

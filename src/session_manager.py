@@ -35,9 +35,18 @@ class SessionManager:
     SESSION_KEY = "whatsapp_session_state"
     SESSION_TTL_HOURS = 48
 
-    def __init__(self, session_dir: Optional[Path] = None):
+    def __init__(self, session_dir: Optional[Path] = None, account_label: Optional[str] = None):
         self.db = DatabaseManager()
         self.session_dir = session_dir or get_session_dir()
+        # Multi-number groundwork (Item 7, final completion pass): when no
+        # account_label is given -- every real call site in this app today
+        # -- self.session_key is exactly self.SESSION_KEY, unchanged, so the
+        # live production database's existing saved session state is read
+        # under the identical key it's always used. A distinct account_label
+        # namespaces the key instead, so multiple SessionManager instances
+        # (one per WhatsApp number) don't silently overwrite each other's
+        # session state through the single shared class-level key.
+        self.session_key = f"{self.SESSION_KEY}_{account_label}" if account_label else self.SESSION_KEY
 
     def _default_state(self) -> Dict[str, str]:
         return {
@@ -48,7 +57,7 @@ class SessionManager:
         }
 
     def _read_state(self) -> Dict[str, str]:
-        state = self.db.get_setting_json(self.SESSION_KEY, self._default_state())
+        state = self.db.get_setting_json(self.session_key, self._default_state())
         if not isinstance(state, dict):
             return self._default_state()
         merged = self._default_state()
@@ -56,7 +65,7 @@ class SessionManager:
         return merged
 
     def _write_state(self, state: Dict[str, str]) -> None:
-        self.db.set_setting_json(self.SESSION_KEY, state)
+        self.db.set_setting_json(self.session_key, state)
 
     def _parse_dt(self, value: str) -> Optional[datetime]:
         if not value:

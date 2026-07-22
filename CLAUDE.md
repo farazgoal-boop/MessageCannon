@@ -1735,3 +1735,58 @@ risk classification, correct narrowing math, correct real-data-only behavior. Wh
 thresholds (10%/3% failure rate, 25%/50% cap reduction) actually track real-world ESP
 throttling/blocklist behavior cannot be verified without a live SMTP account and real send history,
 which this environment doesn't have — not attempted, not claimed.
+
+**CHECKPOINT: Item 7 (multi-number WhatsApp rotation) complete to the extent genuinely feasible —
+real structural groundwork built and tested, live rotation during an actual send explicitly NOT
+built, per the user's own explicit instruction for exactly this scenario.**
+
+Investigated `WhatsAppSender`/`SessionManager`'s actual architecture before writing anything (per
+this file's own standing discipline): `SessionManager.__init__` already accepts a `session_dir`
+override, so multiple isolated Chrome profile directories were already half-supported — but its
+session-state tracking (`SESSION_KEY = "whatsapp_session_state"`) is a single, fixed, global settings
+key shared by every instance regardless of `session_dir`. Two independent `SessionManager`s pointed
+at two different profile folders would have silently overwritten the *same* DB-tracked session state
+— a real bug that would have surfaced the moment a second account was actually used, caught by
+reading the code before building on top of it rather than assumed fine.
+
+**Built** (all additive; the existing single-account path is provably unchanged — see verification
+below):
+- `session_manager.py`: new optional `account_label` parameter. When omitted (every real call site
+  in this app today), `self.session_key` is exactly `self.SESSION_KEY`, byte-for-byte identical to
+  before this change. When given, the key is namespaced (`whatsapp_session_state_{label}`), so
+  multiple accounts' session state never collides.
+- `core/whatsapp_sender.py`: new optional `account` parameter (a `WhatsAppAccount`). Omitted →
+  identical to before (a bare `SessionManager()`). Given → an isolated `SessionManager` pointed at
+  that account's own Chrome profile directory and namespaced session key.
+- New `core/whatsapp_accounts.py`: `WhatsAppAccount` dataclass, storage as a plain JSON list under
+  one settings key (`whatsapp_accounts` — the same pattern already used for every other structured
+  setting in this app, so zero schema-migration risk against the live production database), add/
+  remove with duplicate/empty-label rejection and directory-slug collision handling, and a pure,
+  tested `assign_account_for_message()` round-robin rotation algorithm (returns `None` with no
+  accounts configured, so a caller falls back to today's real single-account behavior).
+- Settings gained a new "WhatsApp Multi-Number (Experimental)" card: list configured accounts + a
+  Remove button per row, an "+ Add Account" field, and **explicit, prominent copy stating this is
+  not yet wired into live sending** — a campaign still uses the one connected number in the WhatsApp
+  panel above.
+
+**Deliberately not built, and not silently skipped**: `WhatsAppSender.send_messages`'s real,
+already-working, already-tested single-account send loop was **not modified at all**. Wiring
+`assign_account_for_message()` into a live campaign — actually swapping drivers/profiles mid-send —
+needs a real second WhatsApp-registered phone to verify a driver handoff doesn't corrupt an in-
+flight send, drop delivery tracking, or leave a half-authenticated session; none of that is
+checkable without real hardware this environment doesn't have. Per the user's own explicit
+instruction for this exact scenario ("build the structural groundwork... but flag plainly... don't
+skip silently, but don't fake-verify either"), this is logged as the explicit next step, not claimed
+done.
+
+**Verified**: `tests/test_whatsapp_accounts.py` (11 tests — CRUD, empty/duplicate-label rejection,
+directory-slug collision disambiguation, per-account session-dir isolation, and the rotation
+algorithm's exact round-robin/wrap-around/zero-step-clamped behavior);
+`tests/test_session_manager_multi_account.py` (4 tests — **the single most important check here**:
+a real default `SessionManager()` with no `account_label` reads/writes the identical key whether or
+not named accounts exist elsewhere in the same database, and two named accounts' `mark_session_verified()`
+calls never leak into each other's tracked state);
+`tests/ui/test_whatsapp_multi_account_settings.py` (4 tests — add/remove through the real
+`_add_whatsapp_account`/`_remove_whatsapp_account` methods, duplicate-add rejected without creating
+a second row, empty state renders correctly). All 19 new tests pass. Full regression check: 87/87
+functional (`-n 14`), 7/7 navigation-timing alone, 1/1 close-button alone, 84/84 plain `tests/`.

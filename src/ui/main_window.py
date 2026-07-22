@@ -59,6 +59,7 @@ def _ensure_tcl_tk_paths() -> None:
 _ensure_tcl_tk_paths()
 
 from ..core import reputation, warmup_scheduler
+from ..core import whatsapp_accounts as wa_accounts
 from ..core.contact_manager import ContactManager
 from ..core.message_processor import MessageProcessor
 from ..core.whatsapp_sender import WhatsAppSender
@@ -2706,6 +2707,43 @@ class MainWindow(ctk.CTk):
                 "This cannot be undone.",
                 "DELETE", "Clear History", self._do_clear_campaign_history))
 
+        multi_wa_card = ctk.CTkFrame(frame, fg_color=T.BG_SURFACE, corner_radius=14,
+                                     border_width=1, border_color=T.BG_BORDER)
+        multi_wa_card.grid(row=6, column=0, columnspan=2, sticky="ew", pady=(10, 0))
+        multi_wa_card.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(multi_wa_card, text="WhatsApp Multi-Number (Experimental)",
+                     font=ctk.CTkFont(size=15, weight="bold"),
+                     text_color=T.TEXT_HEAD).grid(
+            row=0, column=0, padx=16, pady=(16, 4), sticky="w")
+        ctk.CTkLabel(
+            multi_wa_card,
+            text="Configure additional numbers here so each gets its own isolated, persisted "
+                 "login. Not yet wired into live sending — a campaign still uses the one "
+                 "connected number in the WhatsApp panel above. Rotating sends across multiple "
+                 "real numbers needs testing against real WhatsApp accounts, which isn't "
+                 "available in this environment.",
+            text_color=T.TEXT_MUTED, font=ctk.CTkFont(size=11),
+            wraplength=700, justify="left").grid(
+            row=1, column=0, padx=16, pady=(0, 12), sticky="w")
+
+        self.wa_accounts_list_frame = ctk.CTkFrame(multi_wa_card, fg_color="transparent")
+        self.wa_accounts_list_frame.grid(row=2, column=0, padx=16, pady=(0, 10), sticky="ew")
+
+        add_row = ctk.CTkFrame(multi_wa_card, fg_color="transparent")
+        add_row.grid(row=3, column=0, padx=16, pady=(0, 16), sticky="w")
+        self._wa_new_account_var = StringVar(value="")
+        add_entry = ctk.CTkEntry(add_row, textvariable=self._wa_new_account_var, width=220,
+                                  placeholder_text="e.g. Sales Line",
+                                  fg_color=T.BG_INNER, border_color=T.BG_BORDER,
+                                  text_color=T.TEXT_HEAD)
+        add_entry.pack(side="left", padx=(0, 8))
+        add_entry.bind("<Return>", lambda _e: self._add_whatsapp_account())
+        ctk.CTkButton(add_row, text="+ Add Account", corner_radius=8, height=32,
+                      fg_color=T.ACCENT, hover_color=T.ACCENT_HOVER, text_color=T.TEXT_HEAD,
+                      command=self._add_whatsapp_account).pack(side="left")
+
+        self._render_whatsapp_accounts()
+
         self._update_settings_summary()
         self._update_daily_limit_warning()
         self._update_email_warmup_status_label()
@@ -3528,6 +3566,50 @@ class MainWindow(ctk.CTk):
         self.reputation_label.configure(
             text=f"📊 Recommended safe volume today: {rec.recommended}/day — {rec.reason}",
             text_color=risk_color)
+
+    def _render_whatsapp_accounts(self) -> None:
+        """Multi-number groundwork (Item 7, final completion pass) --
+        lists configured accounts with a Remove button per row. Each
+        account is just a label + an isolated session directory at this
+        point (see core/whatsapp_accounts.py); no live session/QR
+        initialization happens from this list."""
+        if not hasattr(self, "wa_accounts_list_frame"):
+            return
+        for child in self.wa_accounts_list_frame.winfo_children():
+            child.destroy()
+
+        accounts = wa_accounts.list_accounts(self.db)
+        if not accounts:
+            ctk.CTkLabel(self.wa_accounts_list_frame, text="No additional numbers configured yet.",
+                         text_color=T.TEXT_MUTED, font=ctk.CTkFont(size=11)).pack(anchor="w")
+            return
+
+        for account in accounts:
+            row = ctk.CTkFrame(self.wa_accounts_list_frame, fg_color=T.BADGE_BG, corner_radius=8)
+            row.pack(fill="x", pady=3)
+            ctk.CTkLabel(row, text=f"📱 {account.label}", text_color=T.TEXT_HEAD,
+                         font=ctk.CTkFont(size=12)).pack(side="left", padx=12, pady=8)
+            ctk.CTkButton(row, text="Remove", width=80, height=24, corner_radius=6,
+                          fg_color=T.DANGER, hover_color=T.DANGER_HOVER, text_color=T.TEXT_HEAD,
+                          font=ctk.CTkFont(size=10),
+                          command=lambda a=account: self._remove_whatsapp_account(a),
+                          ).pack(side="right", padx=12, pady=6)
+
+    def _add_whatsapp_account(self) -> None:
+        label = self._wa_new_account_var.get().strip()
+        try:
+            wa_accounts.add_account(self.db, label)
+        except ValueError as exc:
+            show_toast(self, str(exc), kind="error")
+            return
+        self._wa_new_account_var.set("")
+        self._render_whatsapp_accounts()
+        show_toast(self, f'"{label}" added — configure its own session separately.', kind="success")
+
+    def _remove_whatsapp_account(self, account: wa_accounts.WhatsAppAccount) -> None:
+        wa_accounts.remove_account(self.db, account.label)
+        self._render_whatsapp_accounts()
+        show_toast(self, f'"{account.label}" removed.', kind="success")
 
     def _update_daily_limit_warning(self) -> None:
         limit = self.daily_limit_var.get()
