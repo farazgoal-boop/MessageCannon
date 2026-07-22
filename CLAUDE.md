@@ -1687,3 +1687,51 @@ this is explicitly not the same as having verified it. Flagging as a genuine ope
 claiming a full pass: **the user's own visual confirmation of Contacts/Compose/Settings/Cards in Warm
 Ivory is still the real remaining step here**, the same category of "needs your own eyes" item this
 file already lists at the very top under "What I still need to personally verify."
+
+**CHECKPOINT: Item 6 (reputation / "recommended safe volume today" indicator) complete.**
+
+New `src/core/reputation.py`: combines the email warm-up ramp (Item 3) with any real, recently-
+logged (last 7 days) send-failure rate into a single, honest recommendation. The warm-up cap is
+always the ceiling — an elevated failure rate can only narrow it further (25% of the cap at >10%
+failure = "high" risk, 50% at >3% = "medium"), never widen it beyond what warm-up itself allows.
+With zero real send history, the failure signal is explicitly `"unknown"` (not "0% — healthy", which
+would be a fabricated-looking claim) and the recommendation is simply the ramp's own conservative
+default — **no sample data is ever generated to make the indicator look more populated than it
+really is**, per the user's own explicit instruction for this item.
+
+New `db_manager.get_email_stats_since(date_iso)` — real sent/failed counts from `message_logs`,
+using `created_at` (always populated) rather than `sent_at` (null for a failed attempt, which would
+have silently excluded every failure from the signal).
+
+**Real bug found and fixed while writing this method's own tests, not by reading the code and
+assuming it was fine**: the first version compared `created_at`'s raw stored string directly against
+a local-calendar-date string — but `created_at`'s `DEFAULT CURRENT_TIMESTAMP` is SQLite's own UTC
+clock, while every other date comparison in this app (`get_email_sent_count_on`, the warm-up
+scheduler) reasons in local calendar dates via `date.today()`. Reproduced for real on this dev
+machine (UTC+5): local time had already crossed into a new calendar day while UTC hadn't yet, so the
+query returned zero rows for data inserted moments earlier in the same test. Fixed with SQLite's own
+`datetime(created_at, 'localtime')` conversion in the `WHERE` clause, confirmed against the exact
+test that caught it (failed before, passed after).
+
+Settings → Campaign Safety gained a "📊 Recommended safe volume today: N/day — {reason}" label right
+below the warm-up status line, color-coded by risk (`T.SUCCESS` for low, `T.DANGER_ON_BADGE` for
+medium/high, `T.TEXT_MUTED` for unknown/no-data) via a new `_update_reputation_indicator()`. Wired to
+refresh from the single existing call site every other part of the app already uses for warm-up
+state (`_update_email_warmup_status_label`, itself called from settings-load, the warm-up toggle, and
+the daily-limit slider) rather than needing its own separate wiring scattered across the codebase.
+
+**Verified**: `tests/test_reputation.py` (9 tests, pure logic — unknown/low/medium/high
+classification boundaries, the never-exceed-the-warmup-cap guarantee, a floor so a tiny cap never
+recommends an unusably small number); `tests/test_email_stats_since_db.py` (3 tests, throwaway temp
+SQLite DB, including the UTC/local bug reproduced and confirmed fixed); `tests/ui/test_reputation_indicator.py`
+(5 tests, fresh-isolated-DB `MainWindow` — correct text/color at no-history, day-0 warm-up, real
+logged high-risk and medium-risk failure rates with the exact expected narrowed numbers, and
+confirms the indicator actually refreshes alongside the pre-existing warm-up-status refresh path).
+All 17 new tests pass. Full regression check: 83/83 functional (`-n 13`), 7/7 navigation-timing
+alone, 1/1 close-button alone, 69/69 plain `tests/`.
+
+**Explicit, not-silently-claimed limitation** (same as Item 3): the *mechanism* is verified — correct
+risk classification, correct narrowing math, correct real-data-only behavior. Whether these specific
+thresholds (10%/3% failure rate, 25%/50% cap reduction) actually track real-world ESP
+throttling/blocklist behavior cannot be verified without a live SMTP account and real send history,
+which this environment doesn't have — not attempted, not claimed.

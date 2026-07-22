@@ -762,6 +762,40 @@ class DatabaseManager:
             Logger.error(f"Error getting message logs: {e}")
             return []
 
+    def get_email_stats_since(self, since_date_iso: str) -> dict:
+        """Sent/failed counts of message_logs rows (the email path) created
+        on or after the given LOCAL calendar day, for the reputation
+        indicator's failure-rate signal. Uses `created_at` (always
+        populated by the DB default, unlike `sent_at` which is null for a
+        failed attempt) rather than `sent_at`, so failed sends are
+        correctly included in the window.
+
+        Real bug found and fixed while writing this method's own tests:
+        `created_at`'s DEFAULT CURRENT_TIMESTAMP is SQLite's own UTC clock,
+        but every caller in this app (get_email_sent_count_on, the warm-up
+        scheduler) reasons in local calendar dates via date.today(). A first
+        version compared the raw stored string directly against the local
+        date string and returned zero rows whenever local time had already
+        crossed into a new calendar day but UTC hadn't yet (reproduced for
+        real on this dev machine, UTC+5, confirmed by inserting rows and
+        reading back created_at). Fixed with SQLite's own `datetime(...,
+        'localtime')` conversion so this function's date parameter means
+        the same "local calendar day" as every other caller in the app,
+        not a silent UTC/local mismatch."""
+        try:
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "SELECT status, COUNT(*) FROM message_logs "
+                    "WHERE date(datetime(created_at, 'localtime')) >= date(?) GROUP BY status",
+                    (since_date_iso,)
+                )
+                counts = {row[0]: row[1] for row in cursor.fetchall()}
+                return {"sent": counts.get("sent", 0), "failed": counts.get("failed", 0)}
+        except Exception as e:
+            Logger.error(f"Error getting email stats since {since_date_iso}: {e}")
+            return {"sent": 0, "failed": 0}
+
     def get_email_sent_count_on(self, target_date_iso: str) -> int:
         """Count of message_logs rows (the email send path) with status
         'sent' whose sent_at falls on the given calendar day, for the

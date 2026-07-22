@@ -9,7 +9,7 @@ import re
 import sys
 import threading
 import time
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from tkinter import BooleanVar, IntVar, StringVar, filedialog, messagebox
 from typing import Dict, List, Optional
@@ -58,7 +58,7 @@ def _ensure_tcl_tk_paths() -> None:
 
 _ensure_tcl_tk_paths()
 
-from ..core import warmup_scheduler
+from ..core import reputation, warmup_scheduler
 from ..core.contact_manager import ContactManager
 from ..core.message_processor import MessageProcessor
 from ..core.whatsapp_sender import WhatsAppSender
@@ -2364,7 +2364,18 @@ class MainWindow(ctk.CTk):
             card, text="", text_color=T.TEXT_MUTED, font=ctk.CTkFont(size=11),
             wraplength=360, justify="left")
         self.email_warmup_status_label.grid(
-            row=7, column=0, columnspan=3, padx=16, pady=(2, 14), sticky="w")
+            row=7, column=0, columnspan=3, padx=16, pady=(2, 0), sticky="w")
+
+        self.reputation_label = ctk.CTkLabel(
+            card, text="", text_color=T.TEXT_MUTED, font=ctk.CTkFont(size=11, weight="bold"),
+            wraplength=360, justify="left")
+        self.reputation_label.grid(
+            row=8, column=0, columnspan=3, padx=16, pady=(6, 14), sticky="w")
+        add_tooltip(self.reputation_label,
+                    "A basic, honest recommendation combining your warm-up ramp with any real, "
+                    "recently-logged send failures — never recommends more than your warm-up cap "
+                    "allows. With no send history yet, this shows the ramp's conservative "
+                    "starting point, not fabricated data.")
 
         system_card = ctk.CTkFrame(frame, fg_color=T.BG_SURFACE, corner_radius=14,
                                    border_width=1, border_color=T.BG_BORDER)
@@ -3493,6 +3504,30 @@ class MainWindow(ctk.CTk):
         start = warmup_scheduler.parse_date(self._email_warmup_start_date)
         text = warmup_scheduler.ramp_status_text(start, date.today(), self.daily_limit_var.get())
         self.email_warmup_status_label.configure(text=text)
+        self._update_reputation_indicator()
+
+    def _update_reputation_indicator(self) -> None:
+        """"Recommended safe volume today" -- a basic, honest combination of
+        the warm-up ramp with any real, recently-logged failure rate. No
+        sample data is ever used: with zero send history the recommendation
+        is simply the ramp's own conservative default (see
+        core/reputation.py)."""
+        if not hasattr(self, "reputation_label"):
+            return
+        start = warmup_scheduler.parse_date(self._email_warmup_start_date)
+        since = date.today() - timedelta(days=reputation.RECENT_WINDOW_DAYS)
+        stats = self.db.get_email_stats_since(warmup_scheduler.format_date(since))
+        signal = reputation.compute_failure_signal(stats)
+        rec = reputation.recommended_safe_volume_today(
+            start, date.today(), self.daily_limit_var.get(), signal)
+
+        risk_color = {
+            "unknown": T.TEXT_MUTED, "low": T.SUCCESS,
+            "medium": T.DANGER_ON_BADGE, "high": T.DANGER_ON_BADGE,
+        }.get(rec.risk_level, T.TEXT_MUTED)
+        self.reputation_label.configure(
+            text=f"📊 Recommended safe volume today: {rec.recommended}/day — {rec.reason}",
+            text_color=risk_color)
 
     def _update_daily_limit_warning(self) -> None:
         limit = self.daily_limit_var.get()
