@@ -1790,3 +1790,59 @@ calls never leak into each other's tracked state);
 `_add_whatsapp_account`/`_remove_whatsapp_account` methods, duplicate-add rejected without creating
 a second row, empty state renders correctly). All 19 new tests pass. Full regression check: 87/87
 functional (`-n 14`), 7/7 navigation-timing alone, 1/1 close-button alone, 84/84 plain `tests/`.
+
+**CHECKPOINT: Item 8 (final report) complete — FINAL COMPLETION PASS COMPLETE.**
+
+Final, whole-suite regression run after all 7 items: **87/87 functional UI tests** (`-n 14
+--dist loadfile`), **7/7 navigation-timing tests alone**, **1/1 close-button test alone**, **84/84
+plain `tests/`** — 179/179 total, run exactly per `tests/ui/README.md`'s documented two-command
+pattern, not cherry-picked. Real production database reconfirmed untouched throughout the entire
+pass: 9 contacts, 0 campaigns, 0 message_logs — identical to its state before this pass began.
+
+**Fully built and verified this pass** (code + tests, all green):
+1. macOS bundle version-drift fix (`messagecannon_unix.spec` reads `MC_APP_VERSION` from the git tag
+   via CI, same pattern as the Windows fix) — structurally verified only, real macOS build unproven
+   (see item 1's own checkpoint).
+2. Per-row contact delete in the Contacts directory, wired to the pre-existing, already-DB-verified
+   `db.delete_contact()`.
+3. Email warm-up scheduler — a 14-day ramp schedule, real cumulative daily-send enforcement (closing
+   a pre-existing gap where email had no daily-limit enforcement at all), Settings UI + live status.
+4. App-wide keyboard accessibility — every `CTkButton`/`CTkSwitch`/`CTkCheckBox`/`CTkSlider` in the
+   entire app gained real Tab-reachability (a structural gap, not just missing Enter/Space), keyboard
+   activation, arrow-key slider control, and a visible focus ring; `<Escape>`-to-close extended to
+   the four dialog types Phase 5 had left undone.
+6. Reputation / "recommended safe volume today" indicator, combining the warm-up ramp with any real
+   logged failure rate — no fabricated data.
+7. Multi-number WhatsApp groundwork — account model, isolated per-account session storage, a tested
+   rotation algorithm, Settings UI — explicitly not wired into a live rotating send.
+
+**Built but needs the user's own real-world verification** (the mechanism is proven; real-world
+outcomes are not, and cannot be, verified in this environment):
+- Item 1: an actual macOS `PyInstaller`+`create-dmg` build succeeding on GitHub's real `macos-latest`
+  runner against a new tag (the Windows equivalent of this was verified for real this session; macOS
+  has not been, since there's no Mac here).
+- Item 3 + Item 6: whether the warm-up ramp/reputation thresholds actually track real-world ESP
+  deliverability — needs a live SMTP account and real send history over real calendar time.
+- Item 7: an actual live campaign rotating sends across two real, real-phone-verified WhatsApp
+  numbers without corrupting an in-flight send or delivery tracking.
+- Everything already listed at the top of this file under "What I still need to personally verify"
+  (Windows installer live experience, real SMTP send, real WhatsApp QR session, real AI content
+  quality, how the signature animation/status bar feel) remains exactly as-is — untouched by this
+  pass, still open.
+
+**Genuinely not done, flagged rather than silently skipped**:
+- Item 5's full visual-consistency audit was code-level only (grep sweep, confirmed clean) plus a
+  single successful screenshot (Campaigns, Warm Ivory) — screenshot verification of
+  Contacts/Compose/Settings/Cards was abandoned mid-attempt after a real safety issue surfaced
+  (`ImageGrab` captured the user's own unrelated browser window mid-script, since this is the user's
+  own live machine, not an isolated sandbox) — see item 5's own checkpoint for the full account.
+- A live Mac, live SMTP account, second live WhatsApp-registered phone, and this machine's own
+  screen/DPI limits are the recurring, genuine blockers behind every "needs your own verification"
+  item above — not oversights, structural constraints of this environment stated plainly each time
+  they mattered rather than worked around with fabricated evidence.
+
+**Git state**: all 7 items are committed locally on `main` (commits `84a1389` through `9b8b893`,
+7 commits total) but **not yet pushed** to `origin/main` — per this session's own established
+pattern (confirmed explicitly before the Windows-packaging release push earlier), pushing is a
+shared-state action requiring the user's own explicit go-ahead each time, not assumed from an
+earlier, unrelated approval.
