@@ -37,6 +37,15 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 os.chdir(PROJECT_ROOT)
 
+# Must run before the first Tk window is created in this process, same as
+# main.py -- see src/utils/dpi.py. Without it, this test process exhibits
+# the same geometry/winfo unit mismatch on a scaled display that main.py
+# would have had, which would make these tests measure different behavior
+# than the real shipped app.
+from src.utils.dpi import ensure_dpi_awareness  # noqa: E402
+
+ensure_dpi_awareness()
+
 # The real MainWindow.__init__ schedules a background GitHub Releases check
 # (self.after(1200, self._start_update_check)) that does a real DNS+TLS+HTTP
 # call. Patched to a no-op here, at import time, so it applies no matter which

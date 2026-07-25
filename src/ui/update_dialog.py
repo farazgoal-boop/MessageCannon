@@ -15,6 +15,7 @@ import customtkinter as ctk
 
 from . import theme as T
 from .toast import show_toast
+from .window_utils import center_on_parent
 from ..core.update_checker import UpdateInfo, can_silent_install, download_asset
 
 
@@ -24,7 +25,7 @@ class UpdateDialog(ctk.CTkToplevel):
         self.main_window = main_window
         self.info = info
         self.title("Update available")
-        self.geometry("480x420")
+        center_on_parent(self, 480, 420, main_window)
         self.resizable(False, False)
         self.transient(main_window)
         self.grab_set()
@@ -108,7 +109,17 @@ class UpdateDialog(ctk.CTkToplevel):
             try:
                 path = download_asset(self.info.asset_url, self.info.asset_name, on_progress)
             except Exception as exc:
-                self.after(0, lambda: self._on_download_failed(str(exc)))
+                # `exc` is deleted by Python at the end of the `except` block
+                # even though this lambda closes over it -- self.after()
+                # always defers to the next Tk idle tick, which runs after
+                # that deletion, so referencing `exc` there raises a NameError
+                # that Tk's callback handler silently swallows (prints to
+                # stderr, never shown to the user). Same bug Item 3 of the
+                # Live Testing Findings pass fixed at 10 other call sites;
+                # this file predates that sweep and was missed. Capture the
+                # message into a plain variable first instead.
+                message = str(exc)
+                self.after(0, lambda: self._on_download_failed(message))
                 return
             self.after(0, lambda: self._on_download_succeeded(path))
 

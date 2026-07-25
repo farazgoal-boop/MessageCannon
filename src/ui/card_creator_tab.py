@@ -28,6 +28,7 @@ from ..modules.data_importer import UniversalDataImporter
 from ..utils.validators import DataValidator, PhoneValidator
 from . import theme as T
 from .toast import show_toast
+from .window_utils import center_on_parent
 
 logger = logging.getLogger(__name__)
 
@@ -1370,7 +1371,12 @@ class CardCreatorV2(ctk.CTkFrame):
 
         dlg = ctk.CTkToplevel(self)
         dlg.title("Bulk Send Card")
-        dlg.geometry("560x780")
+        # Centered on the real top-level window (self.main_window), not on
+        # `self` -- `self` is an embedded CTkFrame inside the main window,
+        # not a Toplevel, so its winfo_x()/winfo_y() are relative to its own
+        # parent container rather than the screen; centering against it
+        # would compute a wrong, tiny-offset position.
+        center_on_parent(dlg, 560, 780, self.main_window)
         dlg.grab_set()
         dlg.configure(fg_color=T.BG_MAIN)
         dlg.grid_columnconfigure(0, weight=1)
@@ -1524,9 +1530,15 @@ class CardCreatorV2(ctk.CTkFrame):
             def worker():
                 try:
                     messages = ai_service.generate_personalized_messages(
-                        card_summary, contact_dicts, api_key, channel)
+                        card_summary, contact_dicts, api_key, channel,
+                        provider=self.main_window._ai_provider.get())
                 except AIServiceError as ex:
-                    dlg.after(0, lambda: _ai_failed(str(ex)))
+                    # Computed here, not inside the deferred lambda -- `ex` is
+                    # auto-deleted by Python at except-block exit, before
+                    # dlg.after()'s callback ever runs, which raised a NameError
+                    # Tk's default handler silently swallowed (stderr only).
+                    error_message = str(ex)
+                    dlg.after(0, lambda: _ai_failed(error_message))
                     return
                 dlg.after(0, lambda: _ai_done(messages))
 
@@ -1634,8 +1646,9 @@ class CardCreatorV2(ctk.CTkFrame):
                         sent, failed = result.get("sent", 0), result.get("failed", 0)
                     except Exception as ex:
                         failed = total
+                        error_message = str(ex)  # see generate_personalization's worker for why
                         dlg.after(0, lambda: messagebox.showerror(
-                            "Send failed", str(ex), parent=dlg))
+                            "Send failed", error_message, parent=dlg))
                 else:
                     meta = self._collect_meta()
                     recipients = []
@@ -1666,8 +1679,9 @@ class CardCreatorV2(ctk.CTkFrame):
                         sent, failed = result["sent"], result["failed"]
                     except Exception as ex:
                         failed = total
+                        error_message = str(ex)  # see generate_personalization's worker for why
                         dlg.after(0, lambda: messagebox.showerror(
-                            "Send failed", str(ex), parent=dlg))
+                            "Send failed", error_message, parent=dlg))
 
                 def finish():
                     btn_send.configure(state="normal")
@@ -1780,9 +1794,11 @@ class CardCreatorV2(ctk.CTkFrame):
         def worker():
             try:
                 data = ai_service.generate_card_copy(
-                    description, api_key, list(CARD_STYLE_TEMPLATES.keys()))
+                    description, api_key, list(CARD_STYLE_TEMPLATES.keys()),
+                    provider=self.main_window._ai_provider.get())
             except AIServiceError as ex:
-                self.after(0, lambda: self._on_ai_generate_failed(str(ex)))
+                error_message = str(ex)  # see generate_personalization's worker for why
+                self.after(0, lambda: self._on_ai_generate_failed(error_message))
                 return
             self.after(0, lambda: self._apply_ai_card_copy(data))
 

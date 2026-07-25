@@ -68,6 +68,7 @@ from ..models import Contact, Template, Campaign, MessageLog, MessageStatus
 from ..utils.constants import APP_NAME, APP_VERSION, DEVELOPER, WINDOW_HEIGHT, WINDOW_WIDTH, JITTER_RANGE
 from . import theme as T
 from .toast import show_toast
+from .window_utils import center_on_parent, center_on_screen
 from .confirm_dialogs import show_danger_confirm
 from .tooltip import add_tooltip
 from ..core import ai_service
@@ -337,6 +338,7 @@ class MainWindow(ctk.CTk):
         self._em_subj_var  = StringVar(value="Hello {name}!")
         self._em_tpl_var   = StringVar(value="(none)")
         self._ai_api_key       = StringVar()
+        self._ai_provider      = StringVar(value="anthropic")
         self._ai_key_visible   = BooleanVar(value=False)
         self._ai_key_status_var = StringVar(value="No API key saved")
         self._em_stop_flag = threading.Event()
@@ -350,8 +352,17 @@ class MainWindow(ctk.CTk):
         self._em_compose_count_var = StringVar(value="0 contacts with email")
 
         self.title(f"{APP_NAME} v{APP_VERSION}")
-        self.geometry(f"{WINDOW_WIDTH}x{WINDOW_HEIGHT}")
-        self.minsize(1220, 760)
+        # Real bug found via live testing: geometry() alone leaves placement
+        # to the window manager, which on Windows normally means the
+        # top-left corner, not centered. Also: WINDOW_WIDTH/HEIGHT
+        # (1100x750) are actually smaller than the minsize below
+        # (1220x760) -- Tk enforces minsize immediately, so the window
+        # always really opens at 1220x760 regardless of what geometry() was
+        # asked for; centering math uses the real enforced size so it isn't
+        # computed against a size the window will never actually be.
+        MIN_W, MIN_H = 1220, 760
+        center_on_screen(self, max(WINDOW_WIDTH, MIN_W), max(WINDOW_HEIGHT, MIN_H))
+        self.minsize(MIN_W, MIN_H)
         self.configure(fg_color=T.BG_MAIN)
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
@@ -605,14 +616,20 @@ class MainWindow(ctk.CTk):
         # in a slot frame that's packed exactly once, immediately, at this
         # position fixes it: the slot's position never changes, only its one
         # child's presence inside it does.
-        # width=1 (not CTkFrame's ~200px default): this is a pack()-managed
-        # child of the sidebar, so its *requested* width feeds directly into
-        # the sidebar's own natural width computation and would otherwise
-        # silently override grid_columnconfigure(0, minsize=...) on column 0
-        # — the same root cause found and fixed for every unsized
-        # divider/slot frame in this sidebar, see CLAUDE.md "cold-start
-        # sidebar position bug" checkpoint.
-        self._update_badge_slot = ctk.CTkFrame(self.sidebar, fg_color="transparent", width=1)
+        # width=1, height=1 (not CTkFrame's ~200x200px default): this is a
+        # pack()-managed child of the sidebar, so its *requested* size feeds
+        # directly into the sidebar's own natural size computation. width=1
+        # was already fixed for the "cold-start sidebar position bug"
+        # checkpoint in CLAUDE.md, but height was missed there -- real bug
+        # found via live user testing ("unnecessary blank space at the top
+        # of the sidebar") and confirmed by direct widget-geometry
+        # measurement: with only width=1 set, this slot silently defaulted
+        # to CTkFrame's ~200px height (measured 250px on this machine's
+        # 125% DPI scale) even while its one child (_update_badge_row) was
+        # unmapped/hidden -- a large, empty, invisible-cause gap between the
+        # brand block and the nav items whenever no update is available
+        # (the common case). height=1 closes it the same way width=1 did.
+        self._update_badge_slot = ctk.CTkFrame(self.sidebar, fg_color="transparent", width=1, height=1)
         self._update_badge_slot.pack(side="top", fill="x")
 
         # Round 2 item 2: JobMind Match's real `.sidebar-update-pill`
@@ -912,7 +929,7 @@ class MainWindow(ctk.CTk):
         dialog = ctk.CTkToplevel(self)
         self.license_dialog = dialog
         dialog.title("Activate MessageCannon")
-        dialog.geometry("720x520")
+        center_on_parent(dialog, 720, 520, self)
         dialog.resizable(False, False)
         dialog.transient(self)
         dialog.grab_set()
@@ -1667,6 +1684,14 @@ class MainWindow(ctk.CTk):
 
         self._em_user.trace_add("write", _smtp_changed)
         self._em_provider.trace_add("write", _smtp_changed)
+        # Real bug found via live testing: _em_user/_em_provider are already
+        # loaded from saved settings by the time this view is built (Compose
+        # is built once at startup, after _load_settings()), so the trace
+        # above never fires for that already-loaded value -- the chip stayed
+        # stuck on its hardcoded "Not configured" default until something
+        # else happened to re-touch those StringVars later. Sync once here
+        # against whatever is actually configured right now.
+        _smtp_changed()
 
         # ── Row 2: Shared send controls ────────────────────────────────────────
         controls = ctk.CTkFrame(frame, fg_color=T.BG_SURFACE, corner_radius=14,
@@ -1837,7 +1862,14 @@ class MainWindow(ctk.CTk):
                     recipients, campaign_name, progress_callback=progress,
                     stop_flag=self._em_stop_flag, pause_event=self._em_pause_event)
             except Exception as ex:
-                self.after(0, lambda: self.progress_status_var.set(f"⚠ SMTP error: {ex}"))
+                # Computed here, not inside the deferred lambda -- `ex` is
+                # auto-deleted by Python at except-block exit, before
+                # self.after()'s callback runs; an f-string referencing `ex`
+                # there raises a NameError that Tk's default handler silently
+                # swallows (stderr only), leaving progress_status_var
+                # unchanged instead of showing the real SMTP error.
+                error_message = str(ex)
+                self.after(0, lambda: self.progress_status_var.set(f"⚠ SMTP error: {error_message}"))
                 return
 
             def finish():
@@ -2011,7 +2043,10 @@ class MainWindow(ctk.CTk):
                 self.after(0, lambda: callback(
                     False, "Wrong username/password.\nFor Gmail use an App Password."))
             except Exception as ex:
-                self.after(0, lambda: callback(False, str(ex)))
+                # Computed here, not inside the deferred lambda -- see the
+                # SMTP-error fix above in this same file for why.
+                error_message = str(ex)
+                self.after(0, lambda: callback(False, error_message))
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -2595,15 +2630,49 @@ class MainWindow(ctk.CTk):
                      wraplength=700, justify="left").grid(
             row=1, column=0, columnspan=3, padx=16, pady=(0, 12), sticky="w")
 
+        provider_lbl = ctk.CTkLabel(ai_card, text="AI provider", text_color=T.TEXT_HEAD)
+        provider_lbl.grid(row=2, column=0, padx=16, pady=6, sticky="w")
+        add_tooltip(provider_lbl, "Which AI provider generates card copy and personalized "
+                                    "messages. Google Gemini has a genuine free tier if you "
+                                    "don't want to pay for Anthropic Claude.")
+        provider_labels = list(ai_service.PROVIDER_LABELS.values())
+        provider_keys_by_label = {v: k for k, v in ai_service.PROVIDER_LABELS.items()}
+
         ai_key_lbl = ctk.CTkLabel(ai_card, text="API key", text_color=T.TEXT_HEAD)
-        ai_key_lbl.grid(row=2, column=0, padx=16, pady=6, sticky="w")
-        add_tooltip(ai_key_lbl, "Get this from your Anthropic account's API console. It's "
-                                 "stored encrypted on this device only and is never sent "
-                                 "anywhere except directly to Anthropic when generating content.")
+
+        def _update_ai_key_tooltip():
+            provider = self._ai_provider.get()
+            if provider == "gemini":
+                add_tooltip(ai_key_lbl, "Get a free-tier key from aistudio.google.com/apikey "
+                                         "(no fixed prefix format). Stored encrypted on this "
+                                         "device only and is never sent anywhere except "
+                                         "directly to Google when generating content.")
+            else:
+                add_tooltip(ai_key_lbl, "Get this from console.anthropic.com — starts with "
+                                         "\"sk-ant-...\". Stored encrypted on this device only "
+                                         "and is never sent anywhere except directly to "
+                                         "Anthropic when generating content.")
+
+        def _on_provider_change(label: str) -> None:
+            self._ai_provider.set(provider_keys_by_label.get(label, "anthropic"))
+            _update_ai_key_tooltip()
+            self._save_settings()
+
+        provider_menu = ctk.CTkOptionMenu(
+            ai_card, values=provider_labels,
+            command=_on_provider_change, fg_color=T.BG_INNER, button_color=T.BG_INNER,
+            button_hover_color=T.BG_BORDER, text_color=T.TEXT_HEAD,
+            dropdown_fg_color=T.BG_SURFACE, dropdown_hover_color=T.BG_BORDER,
+            dropdown_text_color=T.TEXT_HEAD)
+        provider_menu.set(ai_service.PROVIDER_LABELS.get(self._ai_provider.get(), provider_labels[0]))
+        provider_menu.grid(row=2, column=1, columnspan=2, padx=(4, 16), pady=6, sticky="ew")
+
+        ai_key_lbl.grid(row=3, column=0, padx=16, pady=6, sticky="w")
+        _update_ai_key_tooltip()
         self._ai_key_entry = ctk.CTkEntry(
             ai_card, textvariable=self._ai_api_key, show="●",
             fg_color=T.BG_INNER, border_color=T.BG_BORDER, text_color=T.TEXT_HEAD)
-        self._ai_key_entry.grid(row=2, column=1, padx=(4, 8), pady=6, sticky="ew")
+        self._ai_key_entry.grid(row=3, column=1, padx=(4, 8), pady=6, sticky="ew")
 
         def _toggle_ai_key_visible():
             visible = not self._ai_key_visible.get()
@@ -2615,7 +2684,7 @@ class MainWindow(ctk.CTk):
             ai_card, text="Show", width=70, corner_radius=8,
             fg_color=T.BG_INNER, hover_color=T.BG_BORDER, text_color=T.TEXT_HEAD,
             command=_toggle_ai_key_visible)
-        self._ai_key_toggle_btn.grid(row=2, column=2, padx=(0, 16), pady=6, sticky="e")
+        self._ai_key_toggle_btn.grid(row=3, column=2, padx=(0, 16), pady=6, sticky="e")
 
         def _save_ai_key():
             self._save_settings()
@@ -2630,7 +2699,7 @@ class MainWindow(ctk.CTk):
         self._ai_key_entry.bind("<Return>",   lambda _e: _save_ai_key())
 
         ai_actions = ctk.CTkFrame(ai_card, fg_color="transparent")
-        ai_actions.grid(row=3, column=0, columnspan=3, padx=16, pady=(0, 16), sticky="ew")
+        ai_actions.grid(row=4, column=0, columnspan=3, padx=16, pady=(0, 16), sticky="ew")
         ctk.CTkButton(ai_actions, text="Save key", corner_radius=8,
                       fg_color=T.ACCENT, hover_color=T.ACCENT_HOVER, text_color=T.TEXT_HEAD,
                       command=_save_ai_key).pack(side="left", padx=(0, 10))
@@ -2644,17 +2713,37 @@ class MainWindow(ctk.CTk):
                 messagebox.showwarning("No API key", "Save an API key first.")
                 return
 
+            test_key_btn.configure(state="disabled", text="Testing…")
+
             def worker():
                 try:
-                    ai_service.validate_api_key(api_key)
-                    self.after(0, lambda: messagebox.showinfo("AI key test", "Key is valid ✅"))
+                    ai_service.validate_api_key(api_key, provider=self._ai_provider.get())
                 except AIServiceError as ex:
-                    self.after(0, lambda: messagebox.showerror("AI key test failed", str(ex)))
+                    # Computed here, not inside the deferred lambda -- `ex` is
+                    # auto-deleted by Python at except-block exit, before
+                    # self.after()'s callback runs; referencing it there
+                    # raised a NameError Tk's default handler silently
+                    # swallowed (stderr only) -- this is the real root cause
+                    # of "Test key"/"Generate with AI" appearing to do
+                    # nothing (or show a stale/blank result) on failure.
+                    error_message = str(ex)
+                    self.after(0, lambda: finish(False, error_message))
+                    return
+                self.after(0, lambda: finish(True, "Key is valid ✅"))
+
+            def finish(ok: bool, message: str) -> None:
+                test_key_btn.configure(state="normal", text="Test key")
+                if ok:
+                    messagebox.showinfo("AI key test", message)
+                else:
+                    messagebox.showerror("AI key test failed", message)
+
             threading.Thread(target=worker, daemon=True).start()
 
-        ctk.CTkButton(ai_actions, text="Test key", corner_radius=8,
+        test_key_btn = ctk.CTkButton(ai_actions, text="Test key", corner_radius=8,
                       fg_color=T.BG_INNER, hover_color=T.BG_BORDER, text_color=T.TEXT_HEAD,
-                      command=_test_ai_key).pack(side="left", padx=(0, 10))
+                      command=_test_ai_key)
+        test_key_btn.pack(side="left", padx=(0, 10))
         ctk.CTkLabel(ai_actions, textvariable=self._ai_key_status_var,
                      text_color=T.TEXT_MUTED, font=ctk.CTkFont(size=12)).pack(side="left")
 
@@ -3301,6 +3390,7 @@ class MainWindow(ctk.CTk):
         # AI Cards API key — encrypted at rest, decrypted only into memory here
         ai_key = decrypt_secret(str(settings.get("ai_api_key_enc", "")))
         self._ai_api_key.set(ai_key)
+        self._ai_provider.set(str(settings.get("ai_provider", "anthropic")))
         self._ai_key_status_var.set("API key saved (encrypted)" if ai_key else "No API key saved")
 
         # First-run setup wizard progress (plain attrs, not Tk Variables —
@@ -3334,6 +3424,7 @@ class MainWindow(ctk.CTk):
                 "smtp_delay":      self._em_delay.get(),
                 # AI Cards
                 "ai_api_key_enc":  encrypt_secret(self._ai_api_key.get()),
+                "ai_provider":     self._ai_provider.get(),
                 # Setup wizard progress
                 "setup_wizard_completed":     self.setup_wizard_completed,
                 "setup_wizard_skipped":       self.setup_wizard_skipped,
@@ -3441,7 +3532,14 @@ class MainWindow(ctk.CTk):
 
     def _update_compose_summary(self) -> None:
         selected_count = len(self._get_selected_contacts()) if hasattr(self, "compose_contacts_frame") else 0
-        self.compose_contacts_var.set(f"{selected_count} selected")
+        # "N selected" alone reads as an eligibility count ("only N of my
+        # contacts are usable") rather than what it actually is -- how many
+        # checkboxes the user has ticked, starting at 0 by default. Shows
+        # the denominator explicitly so "1 selected" can't be misread as
+        # "only 1 of my contacts showed up" (real user confusion, live
+        # testing) when in fact all contacts render, none are pre-checked.
+        available_count = len([c for c in self.contacts if not c.opted_out])
+        self.compose_contacts_var.set(f"{selected_count} of {available_count} selected")
         self.compose_delay_var.set(f"{self.delay_var.get()} sec cadence")
         self.compose_limit_var.set(f"Daily cap {self.daily_limit_var.get()}")
 
@@ -3961,7 +4059,7 @@ class MainWindow(ctk.CTk):
 
         dlg = ctk.CTkToplevel(self)
         dlg.title("Save as Template")
-        dlg.geometry("420x280")
+        center_on_parent(dlg, 420, 280, self)
         dlg.resizable(False, False)
         dlg.transient(self)
         dlg.grab_set()

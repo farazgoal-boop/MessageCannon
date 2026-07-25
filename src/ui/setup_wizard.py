@@ -23,12 +23,27 @@ SMTP_PRESETS = {
 
 
 class SetupWizard(ctk.CTkToplevel):
+    # Real bug found via live user testing (not caught by any prior driver-
+    # based verification): a fixed 620x660, non-resizable, non-scrolling
+    # window meant the email_creds step's ~30 stacked widgets could exceed
+    # the pack cavity on a real user's screen/DPI scaling -- the footer
+    # (Continue/Test buttons) then got squeezed out and unmapped entirely,
+    # so neither the mouse nor Tab traversal could ever reach it. Fixed by
+    # separating a pinned, always-visible footer from a genuinely scrollable
+    # content area, plus a resizable window with a sane minsize as a second
+    # safety net.
+    DEFAULT_WIDTH = 640
+    DEFAULT_HEIGHT = 720
+    MIN_WIDTH = 480
+    MIN_HEIGHT = 420
+
     def __init__(self, main_window, force_restart: bool = False):
         super().__init__(main_window)
         self.main_window = main_window
         self.title("MessageCannon Pro — Setup")
-        self.geometry("620x660")
-        self.resizable(False, False)
+        self._size_and_center()
+        self.resizable(True, True)
+        self.minsize(self.MIN_WIDTH, self.MIN_HEIGHT)
         self.transient(main_window)
         self.grab_set()
         self.configure(fg_color=T.BG_MAIN)
@@ -46,11 +61,35 @@ class SetupWizard(ctk.CTkToplevel):
             self.substep = main_window.setup_wizard_substep or "welcome"
 
         self.grid_columnconfigure(0, weight=1)
-        self.grid_rowconfigure(0, weight=1)
-        self.content = ctk.CTkFrame(self, fg_color="transparent")
-        self.content.grid(row=0, column=0, sticky="nsew", padx=32, pady=20)
+        self.grid_rowconfigure(0, weight=1)  # scrollable step content
+        self.grid_rowconfigure(1, weight=0)  # pinned footer -- never scrolls away
+
+        # The actual step content (headings, fields, status pills) goes in
+        # here -- a real CTkScrollableFrame, so it can never silently exceed
+        # the window and hide anything below it.
+        self.content = ctk.CTkScrollableFrame(self, fg_color="transparent")
+        self.content.grid(row=0, column=0, sticky="nsew", padx=32, pady=(20, 0))
+
+        # Continue/Back/Test buttons live here instead, outside the scroll
+        # region, so they are always visible and reachable regardless of how
+        # tall a given step's content is.
+        self.footer = ctk.CTkFrame(self, fg_color="transparent")
+        self.footer.grid(row=1, column=0, sticky="ew", padx=32, pady=(8, 20))
 
         self._render()
+
+    def _size_and_center(self) -> None:
+        """Open at a size that's guaranteed to fit the real screen, and
+        centered on it -- rather than a fixed geometry string that assumes
+        a screen/DPI scale this app has no control over."""
+        self.update_idletasks()
+        screen_w = self.winfo_screenwidth()
+        screen_h = self.winfo_screenheight()
+        width = min(self.DEFAULT_WIDTH, max(self.MIN_WIDTH, screen_w - 80))
+        height = min(self.DEFAULT_HEIGHT, max(self.MIN_HEIGHT, screen_h - 80))
+        x = max(0, (screen_w - width) // 2)
+        y = max(0, (screen_h - height) // 2)
+        self.geometry(f"{width}x{height}+{x}+{y}")
 
     # ─── Navigation ───────────────────────────────────────────────────────
 
@@ -84,6 +123,8 @@ class SetupWizard(ctk.CTkToplevel):
     def _render(self) -> None:
         for w in self.content.winfo_children():
             w.destroy()
+        for w in self.footer.winfo_children():
+            w.destroy()
         renderers = {
             "welcome": self._render_welcome,
             "channel_choice": self._render_channel_choice,
@@ -97,8 +138,10 @@ class SetupWizard(ctk.CTkToplevel):
         renderers.get(self.substep, self._render_welcome)()
 
     def _footer(self, next_cmd, back_cmd=None, next_label="Continue"):
-        row = ctk.CTkFrame(self.content, fg_color="transparent")
-        row.pack(side="bottom", fill="x", pady=(20, 0))
+        # Pinned in self.footer -- a sibling of the scrollable self.content,
+        # never inside it -- so Continue/Back are always visible and never
+        # get pushed out of the pack cavity by tall step content.
+        row = self.footer
         if back_cmd:
             ctk.CTkButton(row, text="← Back", width=90, fg_color=T.BADGE_BG,
                           hover_color=T.BG_BORDER, text_color=T.TEXT_HEAD,

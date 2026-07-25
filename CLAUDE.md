@@ -1846,3 +1846,407 @@ outcomes are not, and cannot be, verified in this environment):
 pattern (confirmed explicitly before the Windows-packaging release push earlier), pushing is a
 shared-state action requiring the user's own explicit go-ahead each time, not assumed from an
 earlier, unrelated approval.
+
+## Live Testing Findings pass (started 2026-07-24) — 13 items from real product-owner testing
+
+Direction: the user personally ran the real app against real Gmail SMTP and real contact imports
+and filed 13 concrete findings (🔴 high-priority correctness bugs first, then 🟡 polish), asking
+for the same standing discipline as every prior pass in this file: real evidence per item, a
+`CHECKPOINT:` after each so "ok continue" can resume cleanly, plain disclosure of anything this
+environment genuinely can't verify.
+
+**CHECKPOINT: Item 1 (Setup Wizard unreachable Continue/Test buttons) complete.**
+
+**Root cause, found by direct investigation, not guessed**: the wizard was a fixed `620x660`,
+`resizable(False, False)` `CTkToplevel` with a single, non-scrollable content frame. The
+`email_creds` step alone packs ~30 widgets (provider dropdown + 6 fields x label/entry/help-text).
+On a real, differently-scaled screen this can exceed the pack cavity, squeezing the footer
+(Continue/Test buttons) out entirely -- unmapped, so neither a mouse click nor Tab traversal could
+ever reach it (a widget that never gets mapped has nothing for either to land on). This matches the
+reported symptom exactly, including "Tab didn't move focus to any button" -- Tab has nothing to
+move *to* if the button was never mapped in the first place.
+
+**A second, deeper root cause found while building the fix, more consequential than the wizard
+itself**: reproduced the exact mismatch directly -- requesting a 720px-tall window rendered at a
+real, measured 900px (`900 / 720 = 1.25`, this dev machine's real Windows display scale). Confirmed
+via `grep` that **this app has never declared itself DPI-aware to Windows anywhere** (`main.py`, all
+of `src/`). Without that declaration, Windows silently bitmap-stretches the whole rendered window,
+while `winfo_screenwidth()/winfo_screenheight()` keep reporting the *virtualized*, un-scaled screen
+size Windows presents to non-DPI-aware apps -- any sizing/centering math that mixes actual window
+geometry with those screen-size calls (exactly what the wizard's old fixed geometry, and `main.py`'s
+own `_center_window()`, both effectively did) is comparing numbers in two different units. This is
+almost certainly the same underlying mechanism behind other DPI oddities already logged elsewhere in
+this file as unexplained "environment limitations" (the status-bar screenshot note under "Round 2"
+explicitly measured "~950px tall at 125% scaling" without ever identifying *why* -- this is why).
+
+**Fix:**
+- New `src/utils/dpi.py` (`ensure_dpi_awareness()`) -- calls `SetProcessDpiAwareness(2)`
+  (per-monitor, correct on whichever screen the window ends up on) with a `SetProcessDPIAware()`
+  fallback for older Windows, a no-op on non-Windows. Called at the very top of `main.py`, before
+  any other import that could construct a Tk window, and mirrored in `tests/ui/conftest.py` so the
+  test process exhibits the same corrected, unit-consistent geometry behavior as the real shipped
+  app rather than silently testing different arithmetic.
+- `setup_wizard.py`: split the single content frame into a real `CTkScrollableFrame` (`self.content`,
+  step fields/headings) and a separate, pinned `self.footer` (Continue/Back/Test buttons) that lives
+  outside the scroll region as a sibling grid row -- so the footer can never be squeezed out
+  regardless of how tall a given step's content is, even before accounting for the DPI fix. Window
+  is now resizable with a `480x420` minsize, and `_size_and_center()` sizes/centers it against the
+  real screen (now unit-consistent, post-DPI-fix) instead of a hardcoded `620x660` string.
+- Tab-reachability itself was already covered app-wide by `accessibility.py` (Final Completion Pass
+  Item 4) -- confirmed still wired (`enable_keyboard_accessibility()` called at `main_window.py`
+  import time, before any widget construction), so no new keyboard-nav code was needed once buttons
+  are actually mapped again.
+
+**Verified**: new `tests/ui/test_setup_wizard_layout.py` (6 tests) -- `self.content` is really a
+`CTkScrollableFrame`; footer is a separate sibling grid row, not nested inside the scrollable area;
+window is resizable; the heaviest step (`email_creds`) forced into a deliberately tiny `500x260`
+geometry still leaves the footer mapped with real nonzero-size, clickable buttons (the literal repro
+of the reported bug, now passing); all 6 email fields remain real children of the scrollable area
+under the same shrink; the wizard's actual rendered width/height/position stay within real screen
+bounds. All 6 pass. Confirmed the DPI fix itself is real and load-bearing, not just plausible: the
+exact 900-vs-720 (1.25x) mismatch reproduced once, then disappeared once `ensure_dpi_awareness()`
+was wired into `conftest.py`. Full regression check per this file's standing discipline: 93/93
+functional (`-n 15`, worker count bumped for the new test file, updated in `tests/ui/README.md`),
+7/7 navigation-timing alone, 1/1 close-button alone, 84/84 plain `tests/` -- 185/185, no
+regressions from either the wizard layout change or the process-wide DPI-awareness change.
+
+**Not done / explicit scope note**: the DPI-awareness fix is applied process-wide (benefits the
+main window and every dialog, not just the wizard), but re-screenshotting every other screen under
+the corrected DPI behavior was not done as part of this item -- that risk is covered by the full
+regression suite passing unchanged, and any further visual confirmation is left to items 6/7 below
+and the user's own eyes, consistent with this file's existing "needs your own screen" pattern.
+
+**CHECKPOINT: Item 2 (email-only contacts wrongly marked Invalid) complete.**
+
+This closes the exact "known follow-up" the Phase 2 contact-import work explicitly deferred at the
+time ("too risky to do inline against a live production database in this pass") — the user's live
+test hit precisely that gap: 12 real contacts with a valid email and no phone were all rejected.
+
+**Root cause, confirmed directly against a copy of the real production database, not assumed**:
+`contacts.phone` really is `NOT NULL` on the actual deployed DB (`PRAGMA table_info` on a copy of
+the live file confirmed `notnull=1`), an older schema than the nullable `phone TEXT UNIQUE` that
+`DEFAULT_SCHEMA_SQL`/`schema.sql` already declare — which only applies to brand-new installs, never
+retrofits an existing table.
+
+**Fix:**
+- `db_manager.py`: new `_migrate_contacts_phone_nullable()`, run from `_run_migrations()` on every
+  startup — cheap no-op PRAGMA check when already nullable, otherwise: back up the DB file
+  (`<path>.pre-phone-migration.bak`, taken once, same safety pattern as the earlier SMTP-password-
+  encryption migration), rename the old table, recreate it from the current schema, copy every row
+  across converting stored `''` phone to real `NULL` (SQLite's `UNIQUE` allows unlimited `NULL`s but
+  only one `''` — this is what actually lets multiple email-only contacts coexist), drop the old
+  table, recreate the index.
+- `add_contact`/`add_contacts_batch` now insert `contact.phone or None` instead of the raw value, so
+  new email-only contacts get real `NULL` too, not `''`.
+- New `get_existing_emails()` / `update_contact_by_email()` — the email-side equivalents of the
+  existing phone-keyed duplicate-detection/merge helpers, needed since a phone-less row has nothing
+  to match duplicates on except email.
+- `contact_manager.py`'s `analyze_import()`: a row is "invalid" only when it has **neither** a
+  usable phone **nor** a usable email (previously: no phone at all = invalid, unconditionally). Valid
+  rows now carry a `channel` field (`"whatsapp"` / `"email"` / `"both"`), and duplicate detection
+  keys off phone when present, else email (case-insensitive). `commit_import()` merges by phone or
+  by email depending on which the duplicate row actually has.
+- `contact_import_review.py`: summary pills replaced the single blanket "Ready to import" count with
+  "Email-only / WhatsApp-only / Both channels" tallies, and each row's status pill now reads e.g.
+  "✅ Ready (Email only)" instead of a generic ready label — channel eligibility is visible at a
+  glance instead of requiring the user to infer it from raw phone/email columns.
+
+**Verified**: new `tests/test_contact_import_channels.py` (7 tests) — the migration actually drops
+the `NOT NULL` constraint and preserves every existing row's data untouched; it takes a real backup
+file first; it's a safe no-op against an already-nullable schema; multiple email-only contacts can
+coexist post-migration (the actual `UNIQUE`/`NULL` mechanics, not just the schema check);
+`analyze_import` classifies email-only/phone-only/both/neither correctly; `commit_import` actually
+persists 12 email-only contacts end-to-end (the literal reported repro) with zero skipped-invalid;
+merge-by-email correctly fills a blank name on an existing phone-less duplicate. All 7 pass.
+
+Every test that touches `DatabaseManager`/`ContactManager` bypasses their real singleton/`__init__`
+construction (`DatabaseManager.__new__`, and a new equivalent `_make_contact_manager` helper for
+`ContactManager`) — calling either constructor normally would go through the real
+`DatabaseManager()` singleton and could initialize against the **real production DB path** the
+first time it's constructed in a test process, which must never happen from an automated test.
+
+**Extra verification given this migration rewrites a live table**: rather than trust the throwaway-
+DB tests alone, copied the real production database file into the scratch directory (never touched
+the live file itself) and ran the actual migration against that copy end-to-end: confirmed
+`notnull` really drops to `0`, all 9 real contacts' `id`/`phone`/`email`/`name` are byte-for-byte
+identical before and after, a real `.bak` file was written, and two new email-only contacts insert
+successfully afterward with `phone=NULL` as designed. The real production database itself was never
+opened by this verification — only a copy — and was reconfirmed untouched (still 9 contacts)
+afterward. Full regression check: 91/91 plain `tests/` (was 84), 93/93 functional UI tests, 7/7
+navigation-timing alone, 1/1 close-button alone — no regressions from either this item or Item 1.
+
+**Not done / explicit scope note**: the old `import_from_file()` method in `contact_manager.py`
+(confirmed dead — no call sites anywhere in `src/`, superseded by `analyze_import`/`commit_import`
+since Phase 2) was left as-is rather than updated to match, since it isn't reachable from the UI;
+flagged here rather than silently touched or silently ignored.
+
+**CHECKPOINT: Item 3 ("None" shown by AI Test Key / Generate with AI) complete.**
+
+**Root cause, found by direct reproduction, not guessed** — and it turned out to be far more
+widespread than the two features named in the report. Every AI failure path in the app followed
+this shape:
+
+```python
+except AIServiceError as ex:
+    self.after(0, lambda: something(str(ex)))
+```
+
+Python auto-deletes an `except ... as ex` binding at the end of the except block — unconditionally,
+even when a closure references it (confirmed directly with a minimal repro under a real
+`mainloop()`, not just read in the docs). `self.after(0, ...)` always defers the lambda to the next
+Tk idle tick, which runs *after* the except block has already exited — so by the time the lambda
+fires, `ex` no longer exists. Referencing it raises `NameError`, which Tk's default callback-
+exception handler prints to stderr and otherwise silently swallows — invisible in a
+windowed/frozen build. This explains the report better than a literal "None" string would: the
+actual effect is closer to "nothing visibly happens," which is what a user might describe from
+memory as a blank/placeholder-looking result. A `grep` sweep for the same shape found **10 real
+instances**, not just the two named in the report: `main_window.py` (SMTP test-connection failure,
+SMTP send-progress error, AI key test), `card_creator_tab.py` (AI personalization failure, two AI
+Cards bulk-send failure paths, single-card AI generation failure), `ai_compose_dialog.py` (Compose
+AI generation failure), `contact_import_review.py` (import analysis failure, commit failure — a
+second, previously-unknown instance of the exact bug Item 2's own dialog could have hit). Fixed all
+10 identically: compute `str(ex)` into a plain variable *inside* the except block, before
+deferring, and reference that variable in the lambda instead of `ex` itself — the same correct
+pattern `setup_wizard.py` already happened to use in three places, which is how the fix shape was
+confirmed rather than invented from scratch.
+
+Also improved `_test_ai_key` itself (previously gave zero visual feedback while a test was running,
+button stayed clickable): now disables and re-labels "Testing…" during the call, always re-enables
+afterward, and always shows a real success or failure messagebox.
+
+**Provider question, answered directly per the report's own ask**: the feature calls **Anthropic
+Claude** (`api.anthropic.com/v1/messages`, model `claude-sonnet-5`) by default. Key format: starts
+with `sk-ant-...`, from console.anthropic.com — paid, no free tier.
+
+**Free-tier provider added**: `src/core/ai_service.py` now supports **Google Gemini**
+(`generativelanguage.googleapis.com`, model `gemini-2.0-flash`) as a second option, chosen via a new
+`provider` parameter (default `"anthropic"` for backward compatibility with settings saved before
+this existed) threaded through all four public functions (`validate_api_key`, `generate_card_copy`,
+`generate_personalized_messages`, `generate_message_variations`) and every real call site. Gemini
+key format: a plain alphanumeric string (no fixed prefix), from aistudio.google.com/apikey — has a
+genuine free tier, no card required, specifically so this feature is usable without paying.
+Settings → AI Cards gained an "AI provider" dropdown (persisted as `ai_provider` in the existing
+settings blob) with a provider-aware tooltip on the API key field (different instructions/format
+note for each). Gemini's own error shapes are handled distinctly (it reports a bad/missing key as
+400 or 403, not 401 like Anthropic — checked the response body for "API key" rather than assuming
+which status code means what) and a blocked-response case (`promptFeedback.blockReason`, e.g.
+safety filtering) surfaces its real reason instead of a generic "no candidates" message.
+
+**Verified**: new `tests/test_ai_service.py` (11 tests) — missing-key message names the actual
+provider; unknown-provider rejection; Anthropic and Gemini each dispatch to the correct URL with the
+correct auth shape (header vs query param); Gemini's bad-key/rate-limit/blocked-response error
+shapes each produce the right specific message; all four public functions correctly thread a
+non-default `provider` through to the underlying call; the default stays `"anthropic"` when
+`provider` is omitted (backward compatibility, confirmed not just assumed). New
+`tests/ui/test_ai_error_reporting.py` (4 tests) — a from-scratch minimal repro proving the
+except-binding deletion mechanism is real on this interpreter; a real click on Settings' "Test key"
+button (via a `_SynchronousThread` stand-in for `threading.Thread`, needed because this harness
+drives the app via `update()` polling rather than a real `mainloop()`, and cross-thread `self.after()`
+registration requires Tcl to consider itself inside a running one — confirmed directly, not assumed
+— so only the concurrency, not the logic under test, is stubbed) now correctly shows a real error
+message on failure and a real success message on success, proving the fix end-to-end through the
+actual button command, not just the isolated mechanism; the real `AIComposeDialog._generate` failure
+path likewise now sets a real, non-empty status message instead of leaving it blank. All 15 new
+tests pass. Full regression check: 102/102 plain `tests/` (was 91), 97/97 functional UI tests, 7/7
+navigation-timing alone, 1/1 close-button alone (run in its own process per this suite's documented
+pattern — combining it with navigation-timing in one invocation hit the suite's own pre-existing,
+already-documented "more than ~2-3 Tk roots per process" limitation, not a regression) —
+`tests/ui/README.md` worker count bumped 15→16 for the new file.
+
+**Not done / explicit scope note**: no real Anthropic or Gemini API key is available in this
+environment, so a live successful generation through either provider was not performed — every test
+above mocks the network boundary (`requests.post`) or the provider dispatch (`_call_ai`) rather than
+making a real call, consistent with this file's established practice everywhere a real key/session
+isn't available. The user's own key is needed to confirm real output quality for either provider.
+
+**CHECKPOINT: Item 4 (Compose "SMTP: Not configured" despite a verified working connection)
+complete.**
+
+**Root cause, found by reading `_build_compose_view` directly, not guessed** — and simpler than the
+report's own "two different places checking this" hypothesis turned out to be true: there was only
+ever **one** source of truth (`_em_user`/`_em_pass`/`_em_provider`, the same StringVars Settings, the
+Setup Wizard, and `_start_email_from_compose`'s own send-gate all already read) — the bug was that
+Compose's SMTP status chip only ever updates *reactively*, via `self._em_user.trace_add("write",
+_smtp_changed)`. But `_em_user`/`_em_provider` are already loaded from saved settings by
+`_load_settings()` at startup, **before** Compose is first built — so the trace, registered after
+that load already happened, never fires for the value that's already sitting there. The chip stayed
+stuck on its hardcoded `"Not configured"` default until something else happened to re-touch those
+StringVars later (e.g. actually retyping the SMTP username in Settings while Compose was open),
+which is exactly consistent with "Setup Wizard confirmed it works, but Compose still says
+unconfigured."
+
+**Fix**: call `_smtp_changed()` once immediately after registering the traces, so the chip is synced
+to whatever is actually configured right now at build time, not just on the next edit.
+
+**Verified**: new `tests/ui/test_compose_smtp_status.py` (3 tests) — configuring SMTP first, then
+building/rebuilding Compose, shows the real configured state immediately (the literal repro);
+leaving it unconfigured still correctly shows "Not configured" (not a blanket always-green fix);
+`_start_email_from_compose`'s own send gate is confirmed to read the identical StringVars the chip
+now syncs against (proving there was never a second, divergent source, per the report's own
+question). Confirmed the first test actually fails against the pre-fix code (temporarily commented
+out the new `_smtp_changed()` call, re-ran, saw it fail, restored) before trusting it. Full
+regression check: 100/100 functional UI tests (was 97, `tests/ui/README.md` worker count bumped
+16→17), no regressions from either this item or the SMTP-error deferred-lambda fix bundled into
+this same file's Item 3 sweep.
+
+**CHECKPOINT: Item 5 (Compose WhatsApp tab appeared to show 1 of 9 contacts) complete — confirmed
+correct behavior, UI clarity fixed.**
+
+Investigated with direct empirical inspection against the real 9-contact production database (not
+just code reading): drove a real `MainWindow`, navigated to Compose, and counted actual rendered
+`CTkCheckBox` rows in `compose_contacts_frame` — **all 9 real contacts rendered correctly**, each
+with its real name/phone. `_render_compose_contacts()` iterates `self.contacts` unconditionally, no
+phone/email filtering at all (this checklist is WhatsApp-specific but was never the source of a
+missing-contacts bug). The real "1" was `compose_contacts_var`, a **selection** counter driven by
+`_get_selected_contacts()` (which checkboxes are actually ticked — starts at 0, nothing pre-checked)
+— previously rendered as a bare `"{n} selected"` with no denominator, so `"1 selected"` is trivially
+misreadable as "the app only found 1 of my 9 contacts" when it actually meant "I've ticked 1 box."
+This was correct behavior, not a bug — per the item's own explicit fallback for exactly this case,
+fixed the display instead of chasing a non-existent filtering bug.
+
+**Fix**: `_update_compose_summary()` now sets `f"{selected_count} of {available_count} selected"`,
+where `available_count` excludes opted-out contacts (shown in the list, but permanently disabled/
+unselectable — counting them as "available" would just move the same confusion one level down).
+
+**Verified**: new `tests/ui/test_compose_whatsapp_contact_list.py` (3 tests) — every contact
+(phone-only/email-only/both) renders as a real checklist row, unfiltered; the summary text now
+reads `"0 of 3 selected"` before any pick and `"1 of 3 selected"` after ticking one, instead of a
+bare count; an opted-out contact still renders (disabled) but is excluded from the denominator. All
+3 pass. Full regression check: 103/103 functional UI tests (was 100, `tests/ui/README.md` worker
+count bumped 17→18), no regressions.
+
+**CHECKPOINT: Item 7 (center main window and dialogs) complete.**
+
+Mechanical sweep completed across every real dialog: `src/ui/window_utils.py`
+(`center_on_screen`/`center_on_parent`) is now wired into `main_window.py` (main window itself,
+the license-activation dialog, the Save-as-Template dialog), `send_dialogs.py` (both
+`SendConfirmationDialog`/`SendReportDialog`), `card_creator_tab.py` (Bulk Send Card dialog,
+centered on `self.main_window` since the tab itself is an embedded frame, not a Toplevel),
+`update_dialog.py`, `ai_compose_dialog.py`, `contact_import_review.py`, and `confirm_dialogs.py`.
+Also fixed a second, related bug found while wiring the main window itself: `WINDOW_WIDTH/
+WINDOW_HEIGHT` (1100x750) are smaller than the hardcoded `minsize(1220, 760)`, so Tk always
+enforces the larger minsize regardless of what `geometry()` requests — centering math now uses
+`max(WINDOW_WIDTH, 1220) x max(WINDOW_HEIGHT, 760)`, the size the window will actually be.
+
+**A third, more subtle real bug found while writing this item's own regression test, not by
+reading the code** (the same discipline this file has applied throughout — a test that failed by
+~150px, not a rounding error, is what caught this): CustomTkinter overrides `.geometry()` to
+silently multiply *only* the width/height component by its own internal per-monitor DPI scaling
+factor (confirmed by reading `ScalingBaseClass._apply_geometry_scaling` directly — e.g. 1.25 at
+125% Windows scaling) before handing off to real Tk, but leaves any `+x+y` position component
+completely unscaled. A `.geometry("1220x760+350+160")` call therefore renders as a real, physical
+`1525x950` window still positioned at logical `(350, 160)` — centering math that computes `x`/`y`
+from the *requested* (pre-scale) width/height is always off by half the scaling delta. This is a
+CustomTkinter-wide characteristic, not specific to this app's code, and would have silently
+undermined every centering call in this item without the regression test catching it.
+
+**Two fix iterations, the first one measured as unreliable and replaced before being trusted:**
+1. First attempt: set size only, call `.update()`, read back the real post-scale
+   `winfo_width()/winfo_height()`, then compute/position against those. Worked for the main window
+   (already mapped, existing event loop) but a direct reproduction showed it fails for freshly
+   created `CTkToplevel` dialogs — `winfo_width()` can still report CTk's un-rendered 200x200
+   placeholder immediately after `.update()`, because a brand-new toplevel's window-manager-level
+   configure round-trip isn't guaranteed to complete within a single `update()` call the way an
+   already-mapped root's does. Confirmed directly rather than assumed: a step-by-step repro showed
+   `winfo_width()` still `200` immediately after a `geometry()`+`update()` on a fresh
+   `CTkToplevel`, only settling to the correct scaled value on a *later*, unrelated widget
+   operation — a real timing race, not usable as a reliable fix.
+2. Final fix: `window_utils._real_dimensions()` calls CustomTkinter's own internal
+   `_apply_window_scaling()` (the exact method its `.geometry()` override already uses internally)
+   directly and synchronously — no event-loop race at all, deterministic regardless of whether the
+   window has been mapped yet. Plain `tk.Tk()`/`tk.Toplevel` windows (no such method) fall back to
+   the unscaled request.
+
+**A fourth, pre-existing bug found in this item's own first-draft test file, also via a real
+failure, not code review**: the first version of `test_window_utils.py` created 3 separate
+`tk.Tk()` roots across its 3 tests (one per test function) — this suite's own README already
+documents that more than ~2-3 real `Tk()`/`CTk()` roots created in sequence within one process is
+unreliable ("Can't find a usable init.tcl"), and running this file in its own dedicated process
+(exactly as `-n <file-count> --dist loadfile` does) still hit that limit on the 2nd/3rd root.
+Fixed by switching to a single module-scoped `tk.Tk()` root shared across all three tests, with
+`tk.Toplevel(root)` children (not new roots) standing in for what each test needs to center —
+matching the same one-root-per-file discipline every other file in this suite already follows.
+
+**Verified**: `tests/ui/test_window_utils.py` (3 tests, rewritten as above) — `center_on_screen`
+and `center_on_parent` (both the real-parent and no-real-geometry-yet-fallback cases) position a
+real, mapped `Toplevel` correctly. `tests/ui/test_dialog_centering.py` (4 tests) — drives real
+`AIComposeDialog`, `ContactImportReviewDialog`, and `DangerConfirmDialog` instances against the
+real `app` fixture and confirms actual on-screen position matches expected (computed via the same
+`_apply_window_scaling` approach, not a live `winfo_width()` read, for the reason noted above);
+plus the main window itself centers correctly on the real screen. All 7 pass. Full regression
+check per this file's standing discipline: **112/112 functional** (`-n 21 --dist loadfile`, worker
+count bumped 18→21 in `tests/ui/README.md` to match the file count), **7/7 navigation-timing**
+alone, **1/1 close-button** alone, **102/102 plain `tests/`** — no regressions from either the
+dialog-centering change or the DPI-scaling fix inside `window_utils.py` itself. (Two tests that
+appeared to fail during an intermediate debugging run — `test_light_theme_default.py` and
+`test_theme_toggle_after_rebuild.py` — were confirmed to be an artifact of manually combining
+multiple test files into one ad hoc process outside the documented per-file-process pattern, not a
+real regression: both pass cleanly when run alone, exactly as the README prescribes.)
+
+**Not done / explicit scope note**: no screenshot-level visual confirmation that dialogs *look*
+centered on the user's own screen — the same category of "needs your own eyes" item already
+logged elsewhere in this file, since this dev machine's screen/DPI limits already block reliable
+screenshot capture (see Item 5's own checkpoint above).
+
+Items 1-7 of this pass are now all complete.
+
+**CHECKPOINT: Item 8 ("verify sidebar update badge end-to-end") complete.**
+
+Note on scope: only Item 8's one-line description ("verify sidebar update badge end-to-end") was
+available for this item — items 9-13 of the original 13 live-testing findings were never recorded
+in this file beyond that single line, and the user confirmed proceeding on just that description
+rather than restating the rest right away; 9-13 remain unrecorded and unstarted.
+
+Drove the real path a user's click actually takes — sidebar badge -> `UpdateDialog` -> Download &
+Install -> success/failure — rather than re-checking the badge's own show/hide/pulse mechanics,
+which `test_sidebar_update_pill.py` (Round 2 item 2) already covers.
+
+**Real bug found, not by reading the code and assuming it was fine**: `update_dialog.py`'s
+`_start_download`'s failure branch had the exact deferred-lambda-closes-over-a-deleted-except-
+binding bug that Item 3 of this same pass found and fixed at 10 other call sites (`except
+Exception as exc: ... self.after(0, lambda: ...(str(exc)))` — Python deletes the `except` binding
+at the end of the block even though the lambda closes over it, and `self.after(0, ...)` always
+defers past that point, so referencing `exc` there raises a `NameError` that Tk's callback handler
+silently swallows, printing to stderr and never surfacing to the user). `update_dialog.py` predates
+Item 3's grep sweep and was missed — confirmed directly with a minimal repro on this interpreter
+before touching the fix, then confirmed the real symptom end-to-end: a simulated download failure
+left the dialog stuck on "Downloading MessageCannon_Setup.exe..." forever, with the real
+`NameError` visible only in stderr — never the intended "Download failed..." message. Fixed the
+same way Item 3 did: capture `str(exc)` into a plain variable before deferring.
+
+**A related, already-fixed gap incidentally confirmed still solid**: `update_dialog.py` also still
+had the plain `self.geometry("480x420")` from before Item 7 — already wired to `center_on_parent`
+in this pass's own Item 7 work (both are part of this file's still-uncommitted working-tree
+changes). While isolating the NameError fix for a clean before/after test (temporarily reverting
+just that one hunk via a small script, to prove the new regression test actually fails on old
+code), a `git checkout -- src/ui/update_dialog.py` run to restore it wiped **both** uncommitted
+changes at once (the checkout restores the whole file to HEAD, not just the reverted hunk) — caught
+immediately via `git diff` showing zero changes remaining, both fixes (centering + the NameError
+fix) were manually reapplied and re-verified byte-for-byte identical to before via `git diff`
+afterward. Noting this here as a real, self-caught process mistake (restore via checkout instead of
+a scoped edit undo) rather than silently correcting it without mention.
+
+**Verified**: new `tests/ui/test_update_dialog_e2e.py` (5 tests, module-scoped fresh-DB
+`MainWindow` — same pattern as `test_sidebar_update_pill.py`) — clicking the real sidebar badge
+(`window._show_update_dialog`, confirmed to be the actual bound `command` on
+`sidebar_update_badge`) opens a real `UpdateDialog` containing the correct version tag and "You
+have vX installed" text; a simulated download failure (mocked `download_asset` raising, a
+synchronous-thread stand-in standing in for a real background thread for the same reason Item 3's
+`test_ai_error_reporting.py` needed one — this harness drives Tk via `.update()` polling, not a
+real `mainloop()`, and a genuine cross-thread `self.after()` call requires Tcl to consider itself
+inside a running one) now shows the real, correct failure message and re-enables the install
+button, not a silently-swallowed exception; a simulated download success correctly schedules
+`main_window._apply_downloaded_update(path)` and self-destroys the dialog; the "Later" button
+closes the dialog; a release with no platform asset correctly disables the install button with the
+right reason text. **Confirmed the regression test is meaningful, not just trivially green**:
+temporarily restored the pre-fix code and reran
+`test_download_failure_shows_real_message_not_swallowed_nameerror` — it failed with the real
+`NameError` visible in stderr and the status stuck on "Downloading...", exactly the reported-shape
+symptom — then reapplied the fix and confirmed it passes. Full regression check per this file's
+standing discipline: **117/117 functional** (`-n 22 --dist loadfile`, worker count bumped 21→22 in
+`tests/ui/README.md` for the new test file), **7/7 navigation-timing** alone, **1/1 close-button**
+alone, **102/102 plain `tests/`** — no regressions.
+
+**Not done / explicit scope note**: items 9-13 of the original 13 live-testing findings are not
+recorded anywhere in this file and were not addressed this pass — restate them to continue past
+Item 8.

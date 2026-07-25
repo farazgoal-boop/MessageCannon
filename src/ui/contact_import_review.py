@@ -12,6 +12,7 @@ from tkinter import filedialog, messagebox
 import customtkinter as ctk
 
 from . import theme as T
+from .window_utils import center_on_parent
 
 try:
     from tkinterdnd2 import DND_FILES
@@ -20,11 +21,22 @@ except ImportError:
     HAS_DND = False
 
 STATUS_META = {
-    "valid":       ("✅ Ready to import", T.SUCCESS),
     "invalid":     ("⚠ Invalid", T.DANGER_ON_BADGE),
     "dup_in_db":   ("⟳ Already in contacts", T.TEXT_MUTED),
     "dup_in_file":  ("⟳ Duplicate in file", T.TEXT_MUTED),
 }
+
+CHANNEL_META = {
+    "both":     "✅ Ready (Email + WhatsApp)",
+    "email":    "✅ Ready (Email only)",
+    "whatsapp": "✅ Ready (WhatsApp only)",
+}
+
+
+def _status_label(row: dict) -> tuple:
+    if row["status"] == "valid":
+        return CHANNEL_META.get(row["channel"], "✅ Ready to import"), T.SUCCESS
+    return STATUS_META.get(row["status"], ("Unknown", T.TEXT_MUTED))
 
 SUPPORTED_FILETYPES = [
     ("Supported files", "*.csv *.xls *.xlsx *.xlsm *.html *.htm *.json *.vcf"),
@@ -38,7 +50,7 @@ class ContactImportReviewDialog(ctk.CTkToplevel):
         super().__init__(main_window)
         self.main_window = main_window
         self.title("Import Contacts")
-        self.geometry("760x680")
+        center_on_parent(self, 760, 680, main_window)
         self.transient(main_window)
         self.grab_set()
         self.configure(fg_color=T.BG_MAIN)
@@ -127,7 +139,15 @@ class ContactImportReviewDialog(ctk.CTkToplevel):
             try:
                 analysis = self.main_window.contact_manager.analyze_import(path)
             except Exception as ex:
-                self.after(0, lambda: self._analysis_failed(str(ex)))
+                # str(ex) must be computed HERE, not inside the deferred lambda:
+                # Python auto-deletes an `except ... as ex` binding as soon as the
+                # except block exits, which happens before self.after()'s callback
+                # ever runs -- referencing `ex` inside it raises a NameError that
+                # Tk's default handler swallows (prints to stderr only), silently
+                # dropping the whole error report. Real bug, found while chasing
+                # a live report of AI-related errors going missing app-wide.
+                error_message = str(ex)
+                self.after(0, lambda: self._analysis_failed(error_message))
                 return
             self.after(0, lambda: self._analysis_done(analysis))
 
@@ -148,9 +168,12 @@ class ContactImportReviewDialog(ctk.CTkToplevel):
     # ─── Step 3: review table ───────────────────────────────────────────────
 
     def _counts(self) -> dict:
-        c = {"valid": 0, "invalid": 0, "dup_in_db": 0, "dup_in_file": 0}
+        c = {"valid": 0, "invalid": 0, "dup_in_db": 0, "dup_in_file": 0,
+             "both": 0, "email": 0, "whatsapp": 0}
         for r in self.rows:
             c[r["status"]] = c.get(r["status"], 0) + 1
+            if r["status"] == "valid":
+                c[r["channel"]] = c.get(r["channel"], 0) + 1
         return c
 
     def _render_review(self) -> None:
@@ -172,11 +195,15 @@ class ContactImportReviewDialog(ctk.CTkToplevel):
                       font=ctk.CTkFont(size=11), command=self._render_dropzone).grid(
             row=0, column=1, sticky="e")
 
-        # Summary pills
+        # Summary pills — channel-specific eligibility instead of one blanket
+        # "Ready to import" count, so it's clear at a glance who's reachable
+        # by which channel(s) rather than leaving that to per-row reading.
         pills = ctk.CTkFrame(self.content, fg_color="transparent")
         pills.grid(row=1, column=0, sticky="w", pady=(0, 10))
         for label, count, color in [
-            ("Ready to import", counts["valid"], T.SUCCESS),
+            ("Email-only", counts["email"], T.SUCCESS),
+            ("WhatsApp-only", counts["whatsapp"], T.SUCCESS),
+            ("Both channels", counts["both"], T.SUCCESS),
             ("Duplicates", total_dupes, T.TEXT_MUTED),
             ("Invalid", counts["invalid"], T.DANGER_ON_BADGE),
         ]:
@@ -238,14 +265,14 @@ class ContactImportReviewDialog(ctk.CTkToplevel):
         self._import_btn.configure(text=text)
 
     def _build_row_widget(self, parent, row: dict, grid_row: int) -> None:
-        status_label, status_color = STATUS_META.get(row["status"], ("Unknown", T.TEXT_MUTED))
+        status_label, status_color = _status_label(row)
         card = ctk.CTkFrame(parent, fg_color=T.BG_SURFACE, corner_radius=8)
         card.grid(row=grid_row, column=0, sticky="ew", padx=4, pady=3)
         card.grid_columnconfigure(1, weight=1)
 
         ctk.CTkLabel(card, text=status_label, fg_color=T.BADGE_BG, corner_radius=999,
                      text_color=status_color, font=ctk.CTkFont(size=10, weight="bold"),
-                     padx=8, pady=3, width=150).grid(row=0, column=0, rowspan=2, padx=10, pady=8, sticky="w")
+                     padx=8, pady=3, width=190).grid(row=0, column=0, rowspan=2, padx=10, pady=8, sticky="w")
 
         name = row["name"] or "(no name)"
         contact_line = " · ".join(x for x in [row["phone"], row["email"]] if x) or "(no phone/email)"
@@ -272,7 +299,8 @@ class ContactImportReviewDialog(ctk.CTkToplevel):
                 result = self.main_window.contact_manager.commit_import(
                     self.rows, dup_resolution=self.dup_resolution.get())
             except Exception as ex:
-                self.after(0, lambda: self._commit_failed(str(ex)))
+                error_message = str(ex)  # see _start_analysis's worker for why
+                self.after(0, lambda: self._commit_failed(error_message))
                 return
             self.after(0, lambda: self._render_summary(result))
 

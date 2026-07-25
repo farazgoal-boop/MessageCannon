@@ -1,8 +1,20 @@
-"""Thin BYO-key wrapper around Anthropic's Messages API for AI Cards.
+"""Thin BYO-key wrapper around AI providers for AI Cards.
 
 No key is ever bundled, proxied, or logged — callers pass the user's own
-key straight through to Anthropic on every call, and nothing here persists
-it (persistence + encryption is handled by utils/crypto.py + Settings).
+key straight through to the chosen provider on every call, and nothing here
+persists it (persistence + encryption is handled by utils/crypto.py +
+Settings).
+
+Two providers, chosen per-call via `provider` ("anthropic" or "gemini"),
+default "anthropic" for backward compatibility with settings saved before
+this option existed:
+- **Anthropic Claude** — api.anthropic.com. Key format: starts with
+  `sk-ant-...`, from console.anthropic.com. Paid, no free tier.
+- **Google Gemini** — generativelanguage.googleapis.com. Key format: a
+  plain alphanumeric string (no fixed prefix), from
+  aistudio.google.com/apikey. Has a genuine free tier (rate-limited, no
+  card required) — added specifically so this feature is usable without a
+  paid key, per explicit request.
 """
 
 from __future__ import annotations
@@ -13,31 +25,38 @@ from typing import Any, Dict, List, Optional
 
 import requests
 
-API_URL = "https://api.anthropic.com/v1/messages"
+ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages"
 ANTHROPIC_VERSION = "2023-06-01"
-AI_MODEL = "claude-sonnet-5"
+ANTHROPIC_MODEL = "claude-sonnet-5"
+
+GEMINI_MODEL = "gemini-2.0-flash"
+GEMINI_API_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
+
 REQUEST_TIMEOUT = 30
 PERSONALIZATION_BATCH_SIZE = 15
+
+PROVIDERS = ("anthropic", "gemini")
+PROVIDER_LABELS = {
+    "anthropic": "Anthropic Claude",
+    "gemini": "Google Gemini (free tier available)",
+}
 
 
 class AIServiceError(Exception):
     """Raised for any failure calling the AI provider (auth, network, malformed output)."""
 
 
-def _call_claude(api_key: str, system: str, user: str, max_tokens: int = 1024) -> str:
-    if not api_key:
-        raise AIServiceError("No API key configured. Add one in Settings.")
-
+def _call_anthropic(api_key: str, system: str, user: str, max_tokens: int) -> str:
     try:
         response = requests.post(
-            API_URL,
+            ANTHROPIC_API_URL,
             headers={
                 "x-api-key": api_key,
                 "anthropic-version": ANTHROPIC_VERSION,
                 "content-type": "application/json",
             },
             json={
-                "model": AI_MODEL,
+                "model": ANTHROPIC_MODEL,
                 "max_tokens": max_tokens,
                 "system": system,
                 "messages": [{"role": "user", "content": user}],
@@ -66,6 +85,61 @@ def _call_claude(api_key: str, system: str, user: str, max_tokens: int = 1024) -
         raise AIServiceError(f"Unexpected response from Anthropic: {exc}")
 
 
+def _call_gemini(api_key: str, system: str, user: str, max_tokens: int) -> str:
+    try:
+        response = requests.post(
+            GEMINI_API_URL,
+            params={"key": api_key},
+            headers={"content-type": "application/json"},
+            json={
+                "system_instruction": {"parts": [{"text": system}]},
+                "contents": [{"role": "user", "parts": [{"text": user}]}],
+                "generationConfig": {"maxOutputTokens": max_tokens},
+            },
+            timeout=REQUEST_TIMEOUT,
+        )
+    except requests.exceptions.Timeout:
+        raise AIServiceError("Request to Google Gemini timed out. Check your connection and try again.")
+    except requests.exceptions.RequestException as exc:
+        raise AIServiceError(f"Network error contacting Google Gemini: {exc}")
+
+    if response.status_code in (400, 401, 403):
+        # Gemini reports a bad/missing key as 400 or 403, not 401 — check the
+        # body for the specific reason rather than assuming which one it is.
+        body_lower = response.text.lower()
+        if "api key" in body_lower or "api_key" in body_lower:
+            raise AIServiceError("Invalid API key. Check the key saved in Settings.")
+        raise AIServiceError(f"Google Gemini API error ({response.status_code}): {response.text[:200]}")
+    if response.status_code == 429:
+        raise AIServiceError("Rate limited by Google Gemini. Wait a moment and try again.")
+    if response.status_code != 200:
+        raise AIServiceError(f"Google Gemini API error ({response.status_code}): {response.text[:200]}")
+
+    try:
+        data = response.json()
+        candidates = data.get("candidates") or []
+        if not candidates:
+            reason = data.get("promptFeedback", {}).get("blockReason")
+            if reason:
+                raise AIServiceError(f"Google Gemini blocked this request: {reason}")
+            raise AIServiceError("Google Gemini returned no candidates.")
+        parts = candidates[0].get("content", {}).get("parts", [])
+        return "".join(p.get("text", "") for p in parts)
+    except (ValueError, KeyError, IndexError) as exc:
+        raise AIServiceError(f"Unexpected response from Google Gemini: {exc}")
+
+
+def _call_ai(provider: str, api_key: str, system: str, user: str, max_tokens: int = 1024) -> str:
+    if not api_key:
+        provider_name = PROVIDER_LABELS.get(provider, provider)
+        raise AIServiceError(f"No {provider_name} API key configured. Add one in Settings.")
+    if provider == "gemini":
+        return _call_gemini(api_key, system, user, max_tokens)
+    if provider == "anthropic":
+        return _call_anthropic(api_key, system, user, max_tokens)
+    raise AIServiceError(f"Unknown AI provider: {provider!r}")
+
+
 def _parse_json_response(text: str) -> Any:
     """Parse a JSON object/array out of a model response, tolerating markdown fences."""
     cleaned = text.strip()
@@ -78,16 +152,17 @@ def _parse_json_response(text: str) -> Any:
         raise AIServiceError(f"AI response wasn't valid JSON: {exc}")
 
 
-def validate_api_key(api_key: str) -> bool:
+def validate_api_key(api_key: str, provider: str = "anthropic") -> bool:
     """Minimal round trip to confirm the key works.
 
     Raises AIServiceError with a human-readable reason on failure.
     """
-    _call_claude(api_key, system="Reply with exactly: OK", user="ping", max_tokens=8)
+    _call_ai(provider, api_key, system="Reply with exactly: OK", user="ping", max_tokens=8)
     return True
 
 
-def generate_card_copy(product_description: str, api_key: str, style_names: List[str]) -> Dict[str, Any]:
+def generate_card_copy(product_description: str, api_key: str, style_names: List[str],
+                        provider: str = "anthropic") -> Dict[str, Any]:
     """Draft marketing-card copy from a plain-language product description.
 
     Returns a dict shaped like a card_creator_tab.py preset:
@@ -109,7 +184,7 @@ def generate_card_copy(product_description: str, api_key: str, style_names: List
         'price or empty>", "price_note": "<short note or empty>", '
         f'"style_name": "<exactly one of: {", ".join(style_names)}>"}}'
     )
-    raw = _call_claude(api_key, system=system, user=product_description.strip(), max_tokens=600)
+    raw = _call_ai(provider, api_key, system=system, user=product_description.strip(), max_tokens=600)
     data = _parse_json_response(raw)
     if not isinstance(data, dict):
         raise AIServiceError("AI response wasn't a JSON object.")
@@ -125,6 +200,7 @@ def generate_personalized_messages(
     contacts: List[Dict[str, Any]],
     api_key: str,
     channel: str,
+    provider: str = "anthropic",
 ) -> Dict[str, str]:
     """Generate a genuinely personalized outgoing message per contact.
 
@@ -161,7 +237,7 @@ def generate_personalized_messages(
             "contacts": batch,
         })
         try:
-            raw = _call_claude(api_key, system=system, user=user, max_tokens=2000)
+            raw = _call_ai(provider, api_key, system=system, user=user, max_tokens=2000)
             parsed = _parse_json_response(raw)
             if not isinstance(parsed, list):
                 continue
@@ -178,7 +254,7 @@ def generate_personalized_messages(
 
 def generate_message_variations(
     brief: str, channel: str, api_key: str, count: int = 3,
-    sample_variables: Optional[List[str]] = None,
+    sample_variables: Optional[List[str]] = None, provider: str = "anthropic",
 ) -> List[Dict[str, str]]:
     """Draft `count` distinct outgoing-message variations from a short brief
     (product, tone, goal) — never a single forced output. Returns
@@ -215,7 +291,7 @@ def generate_message_variations(
         '"text": "<the message, with {variables} inline>", '
         '"subject": "<email subject line, or empty string if not email>"}, ...]'
     )
-    raw = _call_claude(api_key, system=system, user=brief.strip(), max_tokens=1500)
+    raw = _call_ai(provider, api_key, system=system, user=brief.strip(), max_tokens=1500)
     data = _parse_json_response(raw)
     if not isinstance(data, list) or not data:
         raise AIServiceError("AI response wasn't a JSON array of variations.")

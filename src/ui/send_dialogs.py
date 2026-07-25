@@ -9,6 +9,7 @@ from __future__ import annotations
 import customtkinter as ctk
 
 from . import theme as T
+from .window_utils import center_on_parent
 
 
 def format_eta(total_seconds: float) -> str:
@@ -31,7 +32,7 @@ class SendConfirmationDialog(ctk.CTkToplevel):
         super().__init__(main_window)
         self.on_confirm = on_confirm
         self.title("Confirm Send")
-        self.geometry("560x520")
+        center_on_parent(self, 560, 520, main_window)
         self.transient(main_window)
         self.grab_set()
         self.configure(fg_color=T.BG_MAIN)
@@ -99,7 +100,7 @@ class SendReportDialog(ctk.CTkToplevel):
                  failed_details: list, on_retry_failed=None, on_export=None):
         super().__init__(main_window)
         self.title("Campaign Report")
-        self.geometry("520x560")
+        center_on_parent(self, 520, 560, main_window)
         self.transient(main_window)
         self.grab_set()
         self.configure(fg_color=T.BG_MAIN)

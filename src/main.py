@@ -5,6 +5,14 @@ import sys
 import tkinter as tk
 from pathlib import Path
 
+# Must happen before any Tk/Toplevel is created in this process -- see
+# src/utils/dpi.py's module docstring for why (root cause of the Setup
+# Wizard sizing bug, and likely of other "only wrong on some screens" issues
+# noted elsewhere in this project's history).
+from src.utils.dpi import ensure_dpi_awareness
+
+ensure_dpi_awareness()
+
 import customtkinter as ctk
 from PIL import Image
 from src.ui import theme as T

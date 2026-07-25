@@ -8,6 +8,7 @@ from __future__ import annotations
 import customtkinter as ctk
 
 from . import theme as T
+from .window_utils import center_on_parent
 
 
 class DangerConfirmDialog(ctk.CTkToplevel):
@@ -17,7 +18,7 @@ class DangerConfirmDialog(ctk.CTkToplevel):
         self.on_confirm = on_confirm
         self.confirm_word = confirm_word
         self.title(title)
-        self.geometry("440x320")
+        center_on_parent(self, 440, 320, main_window)
         self.resizable(False, False)
         self.transient(main_window)
         self.grab_set()

@@ -176,8 +176,84 @@ class DatabaseManager:
                         Logger.info("Added subject column to message_logs table")
                     except Exception as e:
                         Logger.error(f"Migration error (message_logs.subject): {e}")
+
+            self._migrate_contacts_phone_nullable()
         except Exception as e:
             Logger.error(f"Error running database migrations: {e}")
+
+    def _migrate_contacts_phone_nullable(self) -> None:
+        """Rebuild `contacts` without a NOT NULL constraint on `phone`, if the
+        real on-disk table still has one.
+
+        This is the deferred migration flagged (not silently skipped) when
+        the import-review flow was first built: `DEFAULT_SCHEMA_SQL`/
+        `schema.sql`'s `CREATE TABLE IF NOT EXISTS contacts` has always
+        declared `phone TEXT UNIQUE` (nullable) -- but that only applies to a
+        brand-new install. Any database created under an older version of
+        this app, before that column was ever NOT NULL-free, keeps the
+        constraint forever, since `CREATE TABLE IF NOT EXISTS` never alters
+        an existing table. SQLite has no `ALTER TABLE ... DROP CONSTRAINT`,
+        so the standard, safe rebuild is: rename the old table, create a
+        fresh one from the current schema, copy every row across (converting
+        any stored `''` phone to a real `NULL`, which is what makes multiple
+        email-only contacts able to coexist under the `UNIQUE` phone index --
+        SQLite allows any number of NULLs in a UNIQUE column, but only one
+        `''`), drop the old table, recreate the index.
+
+        A real file-level `.bak` copy is taken first (same safety pattern
+        already used in this codebase for the SMTP-password-encryption
+        migration) -- this only ever runs once per real install (idempotent:
+        a fresh/already-migrated DB has no NOT NULL to find and this becomes
+        a no-op PRAGMA check on every subsequent startup).
+        """
+        try:
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("PRAGMA table_info(contacts)")
+                info = cursor.fetchall()
+                phone_col = next((r for r in info if r[1] == "phone"), None)
+                if phone_col is None or phone_col[3] != 1:
+                    return  # no NOT NULL on phone -- nothing to do
+
+            import shutil
+            backup_path = f"{self.db_path}.pre-phone-migration.bak"
+            if not Path(backup_path).exists():
+                shutil.copy2(self.db_path, backup_path)
+                Logger.info(f"Backed up database to {backup_path} before phone-nullable migration")
+
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("PRAGMA table_info(contacts)")
+                cols = [r[1] for r in cursor.fetchall()]
+                has_email = "email" in cols
+                has_opted_out = "opted_out" in cols
+
+                cursor.execute("ALTER TABLE contacts RENAME TO contacts_pre_phone_migration")
+                cursor.execute("""
+                    CREATE TABLE contacts (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        phone TEXT UNIQUE,
+                        email TEXT,
+                        name TEXT,
+                        tags TEXT,
+                        custom_fields TEXT,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        opted_out INTEGER DEFAULT 0
+                    )
+                """)
+                email_expr = "email" if has_email else "NULL"
+                opted_out_expr = "opted_out" if has_opted_out else "0"
+                cursor.execute(f"""
+                    INSERT INTO contacts (id, phone, email, name, tags, custom_fields, created_at, opted_out)
+                    SELECT id, NULLIF(phone, ''), {email_expr}, name, tags, custom_fields, created_at, {opted_out_expr}
+                    FROM contacts_pre_phone_migration
+                """)
+                cursor.execute("DROP TABLE contacts_pre_phone_migration")
+                cursor.execute("CREATE INDEX IF NOT EXISTS idx_contacts_phone ON contacts(phone)")
+                conn.commit()
+                Logger.info("Migrated contacts.phone to nullable — email-only contacts can now be saved")
+        except Exception as e:
+            Logger.error(f"Migration error (contacts.phone nullable): {e}")
 
     def _load_schema_sql(self) -> str:
         """Load schema SQL from source/package paths with safe fallback."""
@@ -240,7 +316,7 @@ class DatabaseManager:
                     VALUES (?, ?, ?, ?, ?)
                     """,
                     (
-                        contact.phone,
+                        contact.phone or None,
                         contact.email,
                         contact.name,
                         ','.join(contact.tags) if contact.tags else '',
@@ -278,7 +354,7 @@ class DatabaseManager:
                             VALUES (?, ?, ?, ?, ?)
                             """,
                             (
-                                contact.phone,
+                                contact.phone or None,
                                 contact.email,
                                 contact.name,
                                 ','.join(contact.tags) if contact.tags else '',
@@ -339,6 +415,51 @@ class DatabaseManager:
                 return True
         except Exception as e:
             Logger.error(f"Error merging contact {phone}: {e}")
+            return False
+
+    def get_existing_emails(self) -> set:
+        """Cheap set of every email already saved — the email-side equivalent
+        of `get_existing_phones()`, needed once email-only contacts (no
+        phone, so nothing to key duplicate detection off via phone) became
+        importable."""
+        try:
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("SELECT email FROM contacts WHERE email IS NOT NULL AND email != ''")
+                return {row[0].lower() for row in cursor.fetchall()}
+        except Exception as e:
+            Logger.error(f"Error reading existing emails: {e}")
+            return set()
+
+    def update_contact_by_email(self, email: str, name: str = "", phone: str = "",
+                                 custom_fields: Optional[dict] = None) -> bool:
+        """Merge new data into an existing, phone-less contact matched by
+        email — same existing-data-wins/fill-blanks-only semantics as
+        `update_contact_by_phone`, for rows that have no phone to match on."""
+        try:
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "SELECT id, name, phone, custom_fields FROM contacts WHERE email = ? COLLATE NOCASE",
+                    (email,))
+                row = cursor.fetchone()
+                if row is None:
+                    return False
+                merged_name = row["name"] or name or ""
+                merged_phone = row["phone"] or (phone or None)
+                try:
+                    existing_custom = json.loads(row["custom_fields"] or "{}")
+                except (TypeError, ValueError):
+                    existing_custom = {}
+                existing_custom.update({k: v for k, v in (custom_fields or {}).items() if v})
+                cursor.execute(
+                    "UPDATE contacts SET name = ?, phone = ?, custom_fields = ? WHERE id = ?",
+                    (merged_name, merged_phone, json.dumps(existing_custom), row["id"]),
+                )
+                conn.commit()
+                return True
+        except Exception as e:
+            Logger.error(f"Error merging contact {email}: {e}")
             return False
 
     def get_contacts(self, limit: Optional[int] = None, offset: int = 0) -> List[Contact]:

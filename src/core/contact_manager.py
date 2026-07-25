@@ -24,21 +24,22 @@ class ContactManager:
     def analyze_import(self, file_path: str) -> dict:
         """Parse and classify every row from file_path WITHOUT writing to the
         DB — powers the import review UI. Each row dict: {index, name, phone,
-        email, custom_fields, status, reason} where status is one of "valid",
-        "invalid", "dup_in_file", "dup_in_db".
+        email, custom_fields, status, channel, reason} where status is one
+        of "valid", "invalid", "dup_in_file", "dup_in_db", and channel (only
+        meaningful when status != "invalid") is one of "whatsapp", "email",
+        "both" — which campaign channel(s) this contact is eligible for.
 
-        A phone number is REQUIRED to save a contact: `contacts.phone` is
-        NOT NULL + UNIQUE in the actual deployed database (older than the
-        aspirational `phone TEXT UNIQUE` in db_manager.py's own CREATE TABLE,
-        which only applies to brand-new installs). An email-derived
-        placeholder was considered to work around this, but phone is used
-        as the literal WhatsApp send target and gets substituted into
-        `{phone}` in real message templates elsewhere in the app — a fake
-        placeholder value would leak into both. So email-only rows are
-        classified "invalid" with a clear reason instead, which is honestly
-        an improvement over the pre-existing behavior: the old import path
-        silently discarded email-only contacts via a caught IntegrityError,
-        with no explanation ever shown to the user.
+        A contact needs a usable phone OR a usable email, not necessarily
+        both — `contacts.phone` is nullable (see
+        `DatabaseManager._migrate_contacts_phone_nullable`, which rebuilds
+        any older on-disk table that still had a NOT NULL constraint on
+        phone, the real reason email-only contacts used to be rejected
+        outright). Only a row with *neither* a usable phone nor a usable
+        email is genuinely "invalid".
+
+        Duplicate detection keys off phone when the row has one (phone is
+        the more stable identity — a WhatsApp number), and falls back to
+        email (case-insensitively) for phone-less rows.
         """
         from ..modules.data_importer import UniversalDataImporter
 
@@ -47,7 +48,9 @@ class ContactManager:
             return {"rows": [], "columns_found": result.columns_found, "parse_errors": result.errors}
 
         existing_phones = self.db.get_existing_phones()
-        seen_in_file: dict = {}
+        existing_emails = self.db.get_existing_emails()
+        seen_phones_in_file: dict = {}
+        seen_emails_in_file: dict = {}
         rows: List[dict] = []
 
         for i, raw_row in enumerate(result.contacts):
@@ -63,41 +66,53 @@ class ContactManager:
                 self.phone_validator.normalize_phone(phone_raw) if phone_raw else (None, ""))
             email_valid = DataValidator.is_valid_email(email_raw) if email_raw else False
             email_clean = email_raw if email_valid else ""
+            has_phone = bool(normalized_phone)
+            has_email = bool(email_clean)
 
             row = {
                 "index": i, "name": name,
                 "phone": normalized_phone or "", "raw_phone": phone_raw,
                 "email": email_clean, "raw_email": email_raw,
                 "custom_fields": custom_fields,
-                "status": "valid", "reason": "", "warning": "",
+                "status": "valid", "channel": "", "reason": "", "warning": "",
             }
 
-            if email_raw and not email_valid and normalized_phone:
-                row["warning"] = "Email dropped — invalid format"
-
-            if not normalized_phone:
+            if not has_phone and not has_email:
                 reasons = []
                 if phone_raw:
                     reasons.append(f"Phone: {phone_error}")
-                elif email_valid:
-                    reasons.append("No phone number — a phone number is required to save a contact")
-                else:
-                    reasons.append("No phone number")
                 if email_raw and not email_valid:
                     reasons.append("Invalid email format")
+                if not reasons:
+                    reasons.append("No phone number or email address")
                 row["status"] = "invalid"
                 row["reason"] = "; ".join(reasons)
                 rows.append(row)
                 continue
 
-            if normalized_phone in existing_phones:
-                row["status"] = "dup_in_db"
-                row["reason"] = "Phone already exists in your contacts"
-            elif normalized_phone in seen_in_file:
-                row["status"] = "dup_in_file"
-                row["reason"] = f"Duplicate of row {seen_in_file[normalized_phone] + 1} in this file"
+            row["channel"] = "both" if (has_phone and has_email) else ("whatsapp" if has_phone else "email")
+            if email_raw and not email_valid and has_phone:
+                row["warning"] = "Email dropped — invalid format (row still valid for WhatsApp)"
+
+            if has_phone:
+                if normalized_phone in existing_phones:
+                    row["status"] = "dup_in_db"
+                    row["reason"] = "Phone already exists in your contacts"
+                elif normalized_phone in seen_phones_in_file:
+                    row["status"] = "dup_in_file"
+                    row["reason"] = f"Duplicate of row {seen_phones_in_file[normalized_phone] + 1} in this file"
+                else:
+                    seen_phones_in_file[normalized_phone] = i
             else:
-                seen_in_file[normalized_phone] = i
+                email_key = email_clean.lower()
+                if email_key in existing_emails:
+                    row["status"] = "dup_in_db"
+                    row["reason"] = "Email already exists in your contacts"
+                elif email_key in seen_emails_in_file:
+                    row["status"] = "dup_in_file"
+                    row["reason"] = f"Duplicate of row {seen_emails_in_file[email_key] + 1} in this file"
+                else:
+                    seen_emails_in_file[email_key] = i
 
             rows.append(row)
 
@@ -120,14 +135,21 @@ class ContactManager:
             if status == "invalid":
                 skipped_invalid += 1
                 continue
-            # analyze_import only reaches "valid"/"dup_*" when normalized_phone
-            # is truthy (see its docstring for why email-only rows are
-            # "invalid" instead), so row["phone"] is always real here.
+            # analyze_import only reaches "valid"/"dup_*" when the row has a
+            # usable phone and/or email — never neither (see its docstring).
+            # Duplicate matching keys off phone when the row has one, else
+            # email, mirroring analyze_import's own duplicate-detection key.
             if status in ("dup_in_db", "dup_in_file"):
                 if dup_resolution == "merge":
-                    if self.db.update_contact_by_phone(
+                    if row["phone"]:
+                        merged_ok = self.db.update_contact_by_phone(
                             row["phone"], name=row["name"], email=row["email"],
-                            custom_fields=row["custom_fields"]):
+                            custom_fields=row["custom_fields"])
+                    else:
+                        merged_ok = self.db.update_contact_by_email(
+                            row["email"], name=row["name"], phone=row["phone"],
+                            custom_fields=row["custom_fields"])
+                    if merged_ok:
                         merged += 1
                     else:
                         skipped_duplicates += 1
@@ -135,7 +157,7 @@ class ContactManager:
                     skipped_duplicates += 1
                 continue
             to_insert.append(Contact(
-                phone=row["phone"], email=row["email"] or "", name=row["name"] or "",
+                phone=row["phone"] or None, email=row["email"] or "", name=row["name"] or "",
                 custom_fields=row["custom_fields"] or {},
             ))
 

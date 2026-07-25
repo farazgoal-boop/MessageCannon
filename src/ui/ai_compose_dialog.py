@@ -13,6 +13,7 @@ import customtkinter as ctk
 from ..core import ai_service
 from ..core.ai_service import AIServiceError
 from . import theme as T
+from .window_utils import center_on_parent
 
 
 class AIComposeDialog(ctk.CTkToplevel):
@@ -25,7 +26,7 @@ class AIComposeDialog(ctk.CTkToplevel):
         self.on_pick = on_pick
 
         self.title("Generate with AI")
-        self.geometry("620x600")
+        center_on_parent(self, 620, 600, main_window)
         self.transient(main_window)
         self.grab_set()
         self.configure(fg_color=T.BG_MAIN)
@@ -90,9 +91,16 @@ class AIComposeDialog(ctk.CTkToplevel):
         def worker():
             try:
                 variations = ai_service.generate_message_variations(
-                    brief, self.channel, api_key, count=3, sample_variables=sample_vars)
+                    brief, self.channel, api_key, count=3, sample_variables=sample_vars,
+                    provider=self.main_window._ai_provider.get())
             except AIServiceError as ex:
-                self.after(0, lambda: self._generation_failed(str(ex)))
+                # Computed here, not inside the deferred lambda -- `ex` is
+                # auto-deleted by Python at except-block exit, before
+                # self.after()'s callback ever runs; referencing it there
+                # raises a NameError that Tk's default handler silently
+                # swallows (stderr only), dropping the error report entirely.
+                error_message = str(ex)
+                self.after(0, lambda: self._generation_failed(error_message))
                 return
             self.after(0, lambda: self._render_variations(variations))
 
