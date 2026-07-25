@@ -8,7 +8,7 @@ them on timing (see "Why two commands" below).
 
 ```bash
 # Functional/correctness tests — parallel, one process per file
-python -m pytest tests/ui/ -n 22 --dist loadfile \
+python -m pytest tests/ui/ -n 23 --dist loadfile \
   --ignore=tests/ui/test_navigation_timing.py --ignore=tests/ui/test_close_button.py
 
 # Timing-sensitive tests — must run alone, no parallel contention

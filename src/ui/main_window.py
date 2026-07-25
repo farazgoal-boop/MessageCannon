@@ -146,6 +146,25 @@ EMAIL_TEMPLATES = {
     ),
 }
 
+# Item 9 of the Live Testing Findings pass: readable labels for the
+# "Insert variable ▾" dropdown and the pill/chip each token renders as in
+# the message editors, instead of raw {token} text. Any {token} not listed
+# here still gets pillified (see _label_for_variable_token below) — this map
+# only supplies friendlier labels for the common ones; it is not exhaustive
+# because EMAIL_TEMPLATES above already uses tokens like {sender}/{time}/
+# {invoice_no} that must still render as a pill, just with a derived label.
+_VARIABLE_TOKEN_LABELS = {
+    "name": "Name", "email": "Email", "phone": "Phone",
+    "amount": "Amount", "date": "Date",
+}
+
+
+def _label_for_variable_token(token: str) -> str:
+    """'{name}' -> 'Name', '{invoice_no}' -> 'Invoice No' (derived fallback
+    for tokens outside the common set above, e.g. from EMAIL_TEMPLATES)."""
+    key = token.strip("{}")
+    return _VARIABLE_TOKEN_LABELS.get(key, key.replace("_", " ").title())
+
 
 class MainWindow(ctk.CTk):
     """Main application window with dashboard, contacts, compose, reports, and settings."""
@@ -1487,12 +1506,10 @@ class MainWindow(ctk.CTk):
 
         variables_row = ctk.CTkFrame(editor_frame, fg_color="transparent")
         variables_row.grid(row=1, column=0, padx=14, pady=(0, 12), sticky="ew")
-        for index, variable in enumerate(["{name}", "{amount}", "{date}", "{phone}"]):
-            ctk.CTkButton(
-                variables_row, text=variable, width=90,
-                fg_color=T.BG_SURFACE, hover_color=T.BG_SURFACE, text_color=T.TEXT_MUTED,
-                command=lambda token=variable: self._insert_variable(token),
-            ).grid(row=0, column=index, padx=4, pady=4)
+        self.wa_insert_variable_menu = self._build_insert_variable_menu(
+            variables_row, ["Name", "Phone", "Amount", "Date", "Email"],
+            lambda label: self._insert_variable_label(self.message_textbox, label))
+        self.wa_insert_variable_menu.grid(row=0, column=0, sticky="w")
 
         self.message_textbox = ctk.CTkTextbox(editor_frame, fg_color=T.BG_INNER,
                                               text_color=T.TEXT_HEAD,
@@ -1593,12 +1610,10 @@ class MainWindow(ctk.CTk):
 
         em_chips = ctk.CTkFrame(em_left, fg_color="transparent")
         em_chips.grid(row=2, column=0, padx=16, pady=(6, 8), sticky="w")
-        ctk.CTkLabel(em_chips, text="Variables:", text_color=T.TEXT_MUTED,
-                     font=ctk.CTkFont(size=11)).grid(row=0, column=0, padx=(0, 8))
-        for i, v in enumerate(["{name}", "{email}", "{amount}", "{date}"]):
-            ctk.CTkLabel(em_chips, text=v, fg_color=T.BG_SURFACE, corner_radius=999,
-                         padx=10, pady=4, text_color=T.TEXT_MUTED,
-                         font=ctk.CTkFont(size=11)).grid(row=0, column=i + 1, padx=4)
+        self.em_insert_variable_menu = self._build_insert_variable_menu(
+            em_chips, ["Name", "Email", "Amount", "Date"],
+            lambda label: self._insert_variable_label(self._compose_em_body, label))
+        self.em_insert_variable_menu.grid(row=0, column=0, sticky="w")
 
         em_ai_row = ctk.CTkFrame(em_left, fg_color="transparent")
         em_ai_row.grid(row=3, column=0, padx=16, pady=(0, 8), sticky="ew")
@@ -1810,7 +1825,7 @@ class MainWindow(ctk.CTk):
 
         if hasattr(self, "_em_validation_label"):
             self._em_validation_label.configure(text="")
-        html_template = self._compose_em_body.get("1.0", "end") if hasattr(
+        html_template = self._get_text_with_tokens(self._compose_em_body) if hasattr(
             self, "_compose_em_body") else ""
         if not html_template.strip():
             self.progress_status_var.set("⚠ Email body is empty.")
@@ -3967,9 +3982,48 @@ class MainWindow(ctk.CTk):
         self._update_compose_summary()
         self._refresh_preview()
 
-    def _insert_variable(self, token: str) -> None:
-        self.message_textbox.insert("insert", token)
-        self._on_wa_message_changed()
+    def _build_insert_variable_menu(self, parent, labels: list, on_pick) -> ctk.CTkOptionMenu:
+        """A CTkOptionMenu repurposed as a command menu (Item 9 of the Live
+        Testing Findings pass): it always shows the placeholder text rather
+        than the last-picked value, since selecting an item here inserts a
+        variable at the cursor -- it isn't a persistent setting to remember,
+        unlike the real Template dropdown right next to it."""
+        placeholder = "Insert variable ▾"
+        menu = ctk.CTkOptionMenu(
+            parent, values=labels, width=168,
+            fg_color=T.BADGE_BG, button_color=T.BADGE_BG, button_hover_color=T.BG_BORDER,
+            text_color=T.ACCENT, font=ctk.CTkFont(size=11),
+            dropdown_fg_color=T.BG_SURFACE, dropdown_hover_color=T.BG_BORDER,
+            dropdown_text_color=T.TEXT_HEAD,
+        )
+        menu.configure(command=lambda label: self._on_insert_variable_picked(menu, placeholder, label, on_pick))
+        menu.set(placeholder)
+        return menu
+
+    @staticmethod
+    def _on_insert_variable_picked(menu: ctk.CTkOptionMenu, placeholder: str, label: str, on_pick) -> None:
+        on_pick(label)
+        menu.set(placeholder)
+
+    _VARIABLE_LABEL_TOKENS = {
+        "Name": "{name}", "Email": "{email}", "Phone": "{phone}",
+        "Amount": "{amount}", "Date": "{date}",
+    }
+
+    def _insert_variable_label(self, text_widget, label: str) -> None:
+        """Inserts the raw {token} for a readable dropdown label (e.g.
+        "Name" -> "{name}") at the cursor -- the subsequent on-change
+        handler (_on_wa_message_changed / _update_email_warnings) pillifies
+        it into a chip immediately after, the same as it would for a
+        template/AI-loaded token or one typed by hand."""
+        token = self._VARIABLE_LABEL_TOKENS.get(label)
+        if not token:
+            return
+        text_widget.insert("insert", token)
+        if text_widget is self.message_textbox:
+            self._on_wa_message_changed()
+        else:
+            self._update_email_warnings()
 
     def _on_template_selected(self, template_name: str) -> None:
         if template_name == "Custom Message":
@@ -3983,21 +4037,104 @@ class MainWindow(ctk.CTk):
 
     def _on_wa_message_changed(self) -> None:
         self._refresh_preview()
-        self._highlight_variables(self.message_textbox)
+        self._pillify_text_widget(self.message_textbox)
         self._update_wa_warning()
 
-    @staticmethod
-    def _highlight_variables(textbox: ctk.CTkTextbox) -> None:
-        """Visually distinguish {variable} tokens from plain message text."""
-        inner = textbox._textbox
-        inner.tag_remove("variable", "1.0", "end")
-        inner.tag_config("variable", foreground=T.resolve(T.ACCENT))
-        content = textbox.get("1.0", "end")
-        for match in re.finditer(r"\{[^}]+\}", content):
-            inner.tag_add("variable", f"1.0+{match.start()}c", f"1.0+{match.end()}c")
+    def _make_variable_pill(self, master, token: str) -> ctk.CTkLabel:
+        """A small badge-style label standing in for a raw {token} in the
+        message editor -- same fg_color/text_color/corner_radius as the
+        existing metadata pills (compose_delay_chip etc.), just with
+        tighter padding so it sits inline in a text flow instead of a
+        standalone row."""
+        pill = ctk.CTkLabel(
+            master, text=_label_for_variable_token(token), fg_color=T.BADGE_BG,
+            text_color=T.ACCENT, corner_radius=999, padx=8, pady=0,
+            font=ctk.CTkFont(size=11, weight="bold"))
+        pill.var_token = token
+        return pill
+
+    def _pillify_text_widget(self, text_widget) -> None:
+        """Converts any raw {token} substring still present as plain text
+        (typed by hand, or just loaded from a template/AI pick/the insert-
+        variable dropdown) into an embedded pill widget showing a readable
+        label ("Name") instead of raw braces -- Item 9 of the Live Testing
+        Findings pass. The underlying stored/sent text is unchanged by this:
+        _get_text_with_tokens reconstructs the exact {token} string from
+        these pills wherever anything needs to read the real message (see
+        that method's own docstring for the full list of call sites that
+        must use it instead of a raw .get()).
+
+        CTkTextbox deliberately blocks window_create/dump at its own
+        wrapper level (confirmed by reading ctk_textbox.py directly before
+        writing this: both raise "embedding widgets is forbidden, would
+        probably cause all kinds of problems"), so this operates on the
+        real underlying tk.Text (`._textbox` for a CTkTextbox, itself for
+        the raw tk.Text email body) the same way the pre-existing
+        _highlight_variables/_highlight_variables_tk this replaces already
+        did for tag operations.
+
+        Real bug found via direct testing before trusting this (not just
+        reading Tk's docs): a first version matched against
+        `inner.get("1.0", "end")` and converted the regex's *string*
+        offsets straight into "1.0+Nc" Tk indices. That works the first
+        time (nothing embedded yet), but `.get()` turns out to silently
+        *omit* embedded windows from its returned string entirely -- no
+        placeholder character at all, unlike what the Tcl docs' character-
+        counting language implies -- so after even one pill already exists,
+        every match *after* it in the string is off by one real Tk index
+        per pill already in the buffer, corrupting whatever text follows
+        (confirmed by reproducing it: typing `{amount}` right after an
+        already-pillified `{name}` deleted the wrong characters and left a
+        stray brace behind). Fixed by working from `.dump(text=True)`
+        instead, which hands back each contiguous *text* segment together
+        with its own real starting Tk index -- matching within one
+        segment's own local string and offsetting from that segment's own
+        real start index is correct regardless of how many pills exist
+        anywhere else in the buffer, since dump (unlike get) never merges
+        across an embedded window.
+
+        Segments are processed rightmost-first, and matches within each
+        segment are also processed rightmost-first, so deleting/replacing
+        one match never shifts the real Tk index of a match still to come.
+        An already-pillified token is an embedded window, not a text
+        segment -- it's simply absent from this dump's text entries, so
+        there's no risk of double-conversion or infinite reprocessing on
+        every keystroke.
+        """
+        inner = getattr(text_widget, "_textbox", text_widget)
+        segments = [(value, index) for key, value, index in
+                    inner.dump("1.0", "end", text=True) if key == "text"]
+        for text_value, start_index in reversed(segments):
+            for match in reversed(list(re.finditer(r"\{[^{}]+\}", text_value))):
+                token = match.group(0)
+                start = f"{start_index}+{match.start()}c"
+                end = f"{start_index}+{match.end()}c"
+                inner.delete(start, end)
+                inner.window_create(start, window=self._make_variable_pill(inner, token))
+
+    def _get_text_with_tokens(self, text_widget) -> str:
+        """Reads text_widget's content back out as a plain string with real
+        {token} substrings restored in place of any embedded variable pills
+        -- the canonical way to read a message editor's content now that
+        Item 9 can render variables as pills instead of raw text. Every real
+        call site that needs the actual message (WhatsApp preview/char-count/
+        template-validity checks, email subject/spam checks, save-as-
+        template, and both live send paths) must use this instead of a raw
+        .get(), or a pillified message would preview/send as literal
+        placeholder characters instead of the real {name}-etc tokens
+        MessageProcessor.substitute_variables expects."""
+        inner = getattr(text_widget, "_textbox", text_widget)
+        parts = []
+        for key, value, _index in inner.dump("1.0", "end", text=True, window=True):
+            if key == "text":
+                parts.append(value)
+            elif key == "window" and value:
+                widget = inner.nametowidget(value)
+                parts.append(getattr(widget, "var_token", ""))
+        return "".join(parts)
 
     def _update_wa_warning(self) -> None:
-        template = self.message_textbox.get("1.0", "end").strip()
+        template = self._get_text_with_tokens(self.message_textbox).strip()
         if not template:
             self._wa_warning_var.set("")
             return
@@ -4012,8 +4149,8 @@ class MainWindow(ctk.CTk):
     def _update_email_warnings(self) -> None:
         if not hasattr(self, "_compose_em_body"):
             return
-        self._highlight_variables_tk(self._compose_em_body)
-        body = self._compose_em_body.get("1.0", "end").strip()
+        self._pillify_text_widget(self._compose_em_body)
+        body = self._get_text_with_tokens(self._compose_em_body).strip()
         subject = self._em_subj_var.get()
         warnings = []
         _ok, subj_msg = DataValidator.check_subject_length(subject)
@@ -4023,15 +4160,6 @@ class MainWindow(ctk.CTk):
         if spam_hits:
             warnings.append(f"Possible spam words: {', '.join(spam_hits[:3])}")
         self._em_warning_var.set(" · ".join(warnings))
-
-    @staticmethod
-    def _highlight_variables_tk(text_widget: tk.Text) -> None:
-        """Same as _highlight_variables but for a raw tk.Text (email body)."""
-        text_widget.tag_remove("variable", "1.0", "end")
-        text_widget.tag_config("variable", foreground=T.resolve(T.ACCENT))
-        content = text_widget.get("1.0", "end")
-        for match in re.finditer(r"\{[^}]+\}", content):
-            text_widget.tag_add("variable", f"1.0+{match.start()}c", f"1.0+{match.end()}c")
 
     def _open_ai_compose(self, channel: str) -> None:
         from .ai_compose_dialog import show_ai_compose_dialog
@@ -4051,8 +4179,8 @@ class MainWindow(ctk.CTk):
         show_ai_compose_dialog(self, channel, on_pick)
 
     def _open_save_template(self, channel: str) -> None:
-        text = (self.message_textbox.get("1.0", "end").strip() if channel == "whatsapp"
-                else self._compose_em_body.get("1.0", "end").strip())
+        text = (self._get_text_with_tokens(self.message_textbox).strip() if channel == "whatsapp"
+                else self._get_text_with_tokens(self._compose_em_body).strip())
         if not text:
             messagebox.showwarning("Nothing to save", "Write a message first.")
             return
@@ -4104,7 +4232,7 @@ class MainWindow(ctk.CTk):
         name_entry.bind("<Return>", lambda _e: do_save())
 
     def _refresh_preview(self) -> None:
-        template = self.message_textbox.get("1.0", "end").strip() if hasattr(self, "message_textbox") else ""
+        template = self._get_text_with_tokens(self.message_textbox).strip() if hasattr(self, "message_textbox") else ""
         contacts = self._get_selected_contacts()[:3]
         self._update_compose_summary()
         if not template:
@@ -4355,7 +4483,7 @@ class MainWindow(ctk.CTk):
             messagebox.showwarning("No Contacts", "Select at least one contact before sending.")
             return
 
-        template = self.message_textbox.get("1.0", "end").strip()
+        template = self._get_text_with_tokens(self.message_textbox).strip()
         if not template:
             messagebox.showwarning("Missing Message", "Enter a message before sending.")
             return

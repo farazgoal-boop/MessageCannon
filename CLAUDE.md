@@ -2250,3 +2250,129 @@ alone, **102/102 plain `tests/`** — no regressions.
 **Not done / explicit scope note**: items 9-13 of the original 13 live-testing findings are not
 recorded anywhere in this file and were not addressed this pass — restate them to continue past
 Item 8.
+
+**Items 9-13, restated verbatim by the user on 2026-07-25** (recorded before starting any of them,
+per this file's own standing rule):
+
+> ITEM 9 — Compose: replace {name} {amount} style raw variables with a clean insert-dropdown. Add
+> an 'Insert variable ▾' dropdown (near Subject and the message editor) listing readable labels:
+> Name, Email, Amount, Date. Selecting one inserts it at the cursor position, displayed in the
+> editor as a subtle highlighted pill/chip (consistent with existing pill style like '45 sec
+> cadence,' 'Daily cap 120'), not raw {name} text. Keep the underlying stored format as-is — this
+> is a display/insertion UX change only.
+>
+> ITEM 10 — Compose: general premium polish. (1) Replace the raw-HTML-visible message editor with
+> a simple rich-text editor (Bold/Italic/List buttons) — don't expose <p>/<strong> tags directly.
+> (2) Add 3-4 ready-made templates (Welcome, Promotion, Reminder, Follow-up) in the Template
+> dropdown. (3) Add a live Preview panel for the Email tab showing the message rendered with a
+> real selected contact's data. (4) Make the 'Recipients' count expandable/clickable to show
+> exactly which contacts are included. (5) Add a pre-send confirmation summary when 'Start' is
+> clicked: recipient count, channel, subject line.
+>
+> ITEM 11 — Card Creator: make it genuinely visual, AI-driven, and conversion-ready. (1) Real
+> drag-and-drop image/logo upload with live preview/crop, replacing the current icon text-field.
+> (2) AI should suggest a matching theme/color and draft feature bullets from a short brief, not
+> just body copy. (3) Larger visual swatches and a thumbnail gallery for templates, replacing the
+> small color dots and plain-text dropdown. (4) Simple 'Original Price'/'Sale Price' fields with
+> discount % auto-calculated. (5) Most important: a real, clickable purchase button on the card
+> itself — 'Button Text' (default 'Buy Now') and 'Purchase Link URL' fields, rendering as an
+> actual clickable CTA in email/WhatsApp, not a static image. (6) One-click 'Insert into Compose'
+> action. Proof required: one full sample card generated end-to-end with a working buy button,
+> confirmed clickable, and Insert-into-Compose verified.
+>
+> ITEM 12 — History screen: minor polish. 'Duplicate' currently reads as plain text, not a clearly
+> clickable button. Style it consistently with other action buttons in the app.
+>
+> ITEM 13 — Signature transition animation: verify it genuinely feels premium. Re-review easing
+> curve, timing, and scale/fade layering — compare side-by-side with Copilot's actual transition
+> feel. Test across all main navigation points (Campaigns, Contacts, Compose, History, Cards,
+> Settings) specifically for smoothness. Provide a screen recording of navigating through all
+> sections in sequence.
+
+User's explicit instruction: continue with Item 9 now, one item at a time as this whole pass has
+done throughout.
+
+**CHECKPOINT: Item 9 (Compose: raw {name}/{amount} variables replaced with an "Insert variable ▾"
+dropdown + pill/chip display) complete.**
+
+Studied the existing implementation before writing anything, per this file's own standing rule:
+WhatsApp's editor had 4 raw-text buttons literally labeled `{name}`/`{amount}`/`{date}`/`{phone}`
+that inserted that literal text; Email's editor had a row of static (non-clickable) `CTkLabel`
+chips just *displaying* `{name}`/`{email}`/`{amount}`/`{date}` with no insert capability at all.
+Both were replaced with one consistent `CTkOptionMenu`-based "Insert variable ▾" control
+(`_build_insert_variable_menu`) — WhatsApp's offers Name/Phone/Amount/Date/Email, Email's offers
+Name/Email/Amount/Date (kept asymmetric on purpose, matching each channel's pre-existing
+capability, so nothing regressed). Since `CTkOptionMenu` is normally a persistent selector, it's
+repurposed as a one-shot command menu: `_on_insert_variable_picked` invokes the insert then calls
+`.set()` back to the "Insert variable ▾" placeholder immediately, so it never gets stuck showing
+the last-picked label.
+
+**The harder half of this item**: making the inserted token render as "a subtle highlighted
+pill/chip... not raw {name} text" while keeping "the underlying stored format as-is." Read
+CustomTkinter's own `ctk_textbox.py` before attempting anything (same discipline as every other
+item): `CTkTextbox.window_create()`/`.dump()` are **deliberately blocked** at the wrapper level
+("embedding widgets is forbidden, would probably cause all kinds of problems ;)" — CTk's own
+comment) — worked around it the same way the pre-existing `_highlight_variables` already did for
+tag operations, by reaching through to the real underlying `tk.Text` via `._textbox`.
+
+Implementation: `_pillify_text_widget` scans the editor for any raw `{token}` substring (typed by
+hand, pasted, or just loaded from a template/AI pick/the new dropdown) and replaces it in place
+with an embedded `CTkLabel` pill (`_make_variable_pill` — same `fg_color=T.BADGE_BG`/
+`text_color=T.ACCENT`/`corner_radius=999` style as the app's existing metadata chips, e.g. "30 sec
+cadence"), storing the real token as a `.var_token` attribute on the pill so it can be read back
+later. `_get_text_with_tokens` is the new canonical reader — walks the widget's `.dump(text=True,
+window=True)` and reconstructs the exact `{token}` string from each pill, restoring the literal
+text everywhere a pill was substituted. Every real call site that previously read these two editors
+via a raw `.get("1.0","end")` was updated to use it instead — `_update_wa_warning` (char-count/
+validation), `_update_email_warnings` (subject/spam checks), `_refresh_preview` (WhatsApp preview
+substitution), `_open_save_template`, and — the two that matter most — the actual live send paths
+(`_start_email_from_compose`'s `html_template` and the WhatsApp send flow's `template` variable).
+Missing any of these would have meant a pillified message sends or previews as literal placeholder
+junk instead of the real personalized text.
+
+**A real, serious bug found via direct reproduction, not by reading Tk's docs and assuming they
+were right**: the first working version matched raw `{token}` substrings against
+`inner.get("1.0", "end")` and converted the regex's *string* offsets directly into `"1.0+Nc"` Tk
+indices — this works the very first time (nothing embedded yet) but **`Text.get()` silently omits
+embedded windows from its returned string entirely, with no placeholder character at all** —
+confirmed by a minimal, isolated repro before touching the real fix. Once even one pill already
+exists in the buffer, every match *after* it in the `.get()`-returned string is off by one real Tk
+index per already-embedded pill, so deleting/re-inserting at that index deletes the wrong
+characters — reproduced exactly: typing `{amount}` right after an already-pillified `{name}`
+corrupted the surrounding text into `"{name} costs{amount}} due{date}}"` (a missing space before
+each new token, a stray `}` left behind after each). Fixed by switching to `.dump("1.0", "end",
+text=True)`, which hands back each contiguous *text* segment together with its own real starting
+Tk index — matching within one segment's own local string and offsetting from that segment's own
+real start is correct regardless of how many pills exist anywhere else in the buffer, since `dump`
+(unlike `get`) never silently merges text across an embedded window. Segments (and matches within
+each segment) are processed rightmost-first so an earlier replacement never shifts the real index
+of a match still to come.
+
+**Verified**: new `tests/ui/test_compose_variable_pills.py` (8 tests, against the shared `app`
+fixture) — the WhatsApp dropdown inserts a real pill (not raw braces) with the correct canonical
+round-trip; the dropdown resets to its placeholder after every pick (both channels); typing a raw
+token by hand right after an existing pill — the literal repro of the bug above — still round-trips
+correctly; the Email dropdown works the same way; `_refresh_preview` substitutes the real contact
+name from a pillified message (not a placeholder character); `_update_wa_warning`'s character count
+reflects the real token length, not a 1-character placeholder; `_open_save_template` would read the
+real canonical text; and loading a real multi-token `EMAIL_TEMPLATES` entry ("Invoice", which uses
+`{invoice_no}`/`{sender}` — tokens outside the common label map, exercising
+`_label_for_variable_token`'s derived-label fallback) round-trips byte-for-byte. **Confirmed the
+regression test is meaningful, not just trivially green**: temporarily restored the pre-fix
+`.get()`-based version and reran the suite — the two tests covering multi-pill sequences failed
+with exactly the corruption shown above, then reapplied the fix and confirmed all 8 pass. Full
+regression check per this file's standing discipline: **125/125 functional** (`-n 23 --dist
+loadfile`, worker count bumped 22→23 in `tests/ui/README.md` for the new test file), **7/7
+navigation-timing** alone, **1/1 close-button** alone, **102/102 plain `tests/`** — no regressions.
+
+**Not done / explicit scope note**: no screenshot-level visual confirmation of the pill's exact
+on-screen appearance (font metrics/line-height interaction with an embedded widget inline in a text
+flow can look subtly different from a screenshot vs. a test assertion) — the same category of
+"needs your own eyes" item logged elsewhere in this file, since this machine's screen/DPI limits
+already block reliable screenshot capture. Also not touched: the Subject field itself (a plain
+`CTkEntry`, not a rich text widget) still takes raw `{name}` text typed by hand with no pill
+treatment — the item's own framing ("near Subject and the message editor") was read as describing
+where the dropdown sits, not that Subject's own field needs pill rendering, and `CTkEntry` has no
+embedded-widget mechanism to build one against regardless.
+
+Items 10-13 remain open/unstarted.
