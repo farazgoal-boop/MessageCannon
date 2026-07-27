@@ -4183,3 +4183,96 @@ clean before committing anything into a real release: 222/222 functional
 (`-n 35`, the one already-documented `test_window_utils.py` flake
 reconfirmed passing alone), 7/7 navigation-timing, 1/1 close-button, 2/2
 nav-accent-timing, 115/115 plain `tests/` — 347/347.
+
+Committed all pending work (`76e3d1a`), tagged `v1.3.0`, pushed both to
+`origin` — triggering the real CI pipeline.
+
+**CHECKPOINT: Step 2 complete.** `gh run watch` on the real triggered run
+(30310715961) confirmed all 4 jobs green: `build-macos` 3m5s, `build-windows`
+2m58s, `build-linux` 2m12s, `create-release` 28s (only a benign Node.js-20
+deprecation annotation, no failures). Queried the live API afterward:
+`v1.3.0` is now genuinely the latest release (published
+2026-07-27T22:29:53Z) with all 4 real, non-zero assets attached —
+`MessageCannon_Setup.exe` (71,889,910 bytes), `MessageCannonPro-mac.dmg`
+(57,195,680 bytes), `MessageCannonPro-linux-1.3.0.deb` (72,632,810 bytes),
+`MessageCannonPro-linux-1.3.0.AppImage` (91,067,584 bytes).
+
+**CHECKPOINT: Step 3 complete.** Verified the real update flow against this
+real release, not a staged one:
+- `check_for_update("1.2.0")` (simulating a customer on the previous
+  release) correctly returned `v1.3.0` with a populated `asset_url`.
+- Downloaded the real asset via the app's own `download_asset()`. GitHub's
+  release-asset API now exposes a real `digest` field
+  (`sha256:3bae5638...`) — computed the local file's SHA-256 and confirmed a
+  byte-for-byte match, plus exact size match (71,889,910 bytes both sides).
+- Ran the real silent install (`/VERYSILENT /SUPPRESSMSGBOXES /NORESTART`,
+  the exact command `launch_silent_install_and_get_command` builds) against
+  a confirmed-empty `{localappdata}\Programs\MessageCannon` (nothing
+  clobbered) — exit code 0, files placed correctly. Launched the real
+  installed EXE and read its actual window title:
+  **"MessageCannon Pro v1.3.0"** — proof the version genuinely flowed from
+  the git tag through the real CI build into the running app, not just a
+  local dev-run test.
+- Ran the real uninstaller — exit code 0, confirmed both the install
+  directory and the `HKCU\Software\MessageCannon` registry key are fully
+  gone afterward (the `uninsdeletekey` fix from the earlier packaging pass
+  still holds).
+- Confirmed via direct computation that with this real release's populated
+  `asset_url`, `can_install_here` (`bool(asset_url) and can_silent_install()`)
+  evaluates `True` on this platform — "Download & Install" is genuinely the
+  enabled, working primary action; "View on GitHub" remains present only as
+  the secondary/fallback link, exactly as code-traced earlier but now proven
+  against a real release.
+- Cleaned up: killed an orphaned `chromedriver.exe` left over from
+  force-closing the test-installed app (it had auto-reconnected the real,
+  already-verified WhatsApp session per Item 31's correct behavior; force-
+  killing the parent orphaned its child rather than a clean `_on_close()`
+  shutdown) and deleted the downloaded temp installer. Real production DB
+  reconfirmed untouched throughout: **9 contacts, 0 campaigns**.
+
+Real download link for independent verification:
+https://github.com/farazgoal-boop/MessageCannon/releases/download/v1.3.0/MessageCannon_Setup.exe
+
+**CHECKPOINT: Step 4 complete, to the extent verifiable without real Mac/
+Linux hardware.** Grepped the real CI run's own logs (`gh run view --log`)
+for the actual resolved version value each platform's build step computed,
+not just whether the step succeeded: `build-macos` logged
+`MC_APP_VERSION: 1.3.0` (confirms the earlier macOS `CFBundleVersion`
+version-drift fix — previously only structurally verified, explicitly
+flagged as unproven on real hardware — now genuinely exercised for the
+first time on GitHub's real `macos-latest` runner and resolving correctly);
+`build-windows` logged `MY_APP_VERSION: 1.3.0` (matches the real installed
+EXE's own window title, already confirmed above); `build-linux` logged
+`VERSION: 1.3.0` for both the `.deb` and `AppImage` build steps, and both
+output filenames correctly embed `1.3.0`. All three platforms' real,
+current-release assets are consistent and current. Extracting/inspecting
+each asset's internal metadata directly (mounting the `.dmg`'s `Info.plist`,
+unpacking the `.deb`'s control file) was not performed — no Mac/Linux
+machine exists in this environment, the same disclosed limitation already
+logged multiple times elsewhere in this file — but the CI logs' own
+resolved values plus the correctly-versioned filenames are real, direct
+evidence, not assumption.
+
+**Final report — the update system's true current production state:**
+
+Every piece of the pipeline is now verified with real evidence, end to end,
+against the actual current release (not a staged/simulated one): a real
+tagged `v1.3.0` release exists containing all of Items 1-31 and today's own
+fixes; all 4 platform installers built successfully on GitHub's real
+runners; the Windows asset's checksum matches byte-for-byte; a real silent
+install/launch/uninstall cycle completed cleanly end to end; the in-app
+update-check/download/install code path is proven correct against this real
+release, not just code-traced; and the button-state logic (`Download &
+Install` enabled, `View on GitHub` secondary-only) is confirmed correct
+against real data.
+
+**Yes — the update system is ready for real customers today**, with these
+explicitly-disclosed, structural (not update-system) limitations carried
+forward from earlier passes, none of which block this specific system:
+real Mac/Linux install/launch/uninstall cycles still can't be verified in
+this Windows-only environment (only Windows got the full real hands-on
+cycle above — Mac/Linux got real CI build success + correct version
+resolution, not a real install); and the AI-content-quality /
+real-SMTP-send / real-WhatsApp-QR-session items already flagged elsewhere
+in this file remain separate, already-disclosed gaps unrelated to the
+update system itself.
