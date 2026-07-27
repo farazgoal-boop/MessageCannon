@@ -170,7 +170,13 @@ def test_clicking_sidebar_badge_opens_real_dialog_with_correct_content(window):
         walk(dialog)
         blob = "\n".join(texts)
         assert "v9.9.9" in blob
-        assert "installed" in blob
+        # Item 29 follow-up visual pass replaced the old "You have vX
+        # installed." sentence with a two-cell Installed/Available stats
+        # card (matching SendConfirmationDialog's own established pattern)
+        # -- same information, different real wording now.
+        from src.utils.constants import APP_VERSION
+        assert "Installed" in blob
+        assert f"v{APP_VERSION}" in blob
     finally:
         _reset_update_state(window)
 

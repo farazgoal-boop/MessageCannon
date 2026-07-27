@@ -3910,8 +3910,276 @@ way it repeatedly was in this sandbox during this pass's own timing work.
 
 Round 2 of the Live Testing Findings (Items 11-16), the two Live Testing
 Findings follow-ups (Items 17-24), and this Final Premium Polish Pass
-(Items 25-30) are now all complete. **Git state**: none of this pass's
-changes (Items 25-30, plus everything from Items 9-24 still sitting in the
-working tree per earlier checkpoints) have been committed yet — same
-"commit/push is the user's own call" discipline already established
-throughout this file.
+(Items 25-30) are now all complete. **Git state (corrected)**: all of it
+(Items 9-30) was committed in a single commit, `17b9e2a` — confirmed via
+`git log`/`git status` (working tree clean). Local `main` is 3 commits
+ahead of `origin/main` and has not been pushed — pushing remains the
+user's own explicit call, same discipline as every other push in this
+file.
+
+## Real bug: test suite launched real, forced-maximize Chrome windows on the user's actual desktop (2026-07-28)
+
+User reported their Windows taskbar disappeared and the Windows key stopped
+responding while/after this session's automated test suite ran, and asked
+for a real investigation into whether the app or its tests touch OS-level
+window/taskbar state — treated as high priority since it affected their
+real OS, not just the app.
+
+**Grepped the entire `src/`/`tests/` tree for any taskbar/shell manipulation
+API** (`SetWindowPos`, `ShowWindow`, `FindWindow`, `SHAppBarMessage`,
+`Shell_TrayWnd`, `overrideredirect`, `-topmost`, DPI APIs) — confirmed
+**nothing in this codebase ever touches the Windows taskbar, shell, or any
+other process's window**. The only OS-level calls are
+`SetProcessDpiAwareness` (Item 1 of the Live Testing Findings pass — a
+harmless, per-process DPI declaration) and a handful of `overrideredirect`/
+`-topmost` calls scoped to this app's own small popups (splash/toast/
+tooltip) — none capable of hiding a taskbar.
+
+**Real root cause, found and confirmed live on the user's actual machine,
+not guessed**: `MainWindow.__init__` schedules `self.after(800,
+self._start_session_bootstrap)` unconditionally on every construction — real
+app launch or test. That calls `WhatsAppSender.initialize()` ->
+`SessionManager.build_driver()` (`session_manager.py:110-126`), which
+launches a **real, non-headless** Selenium Chrome (`--no-sandbox`/
+`--disable-dev-shm-usage` automation flags), immediately calls
+**`driver.maximize_window()`**, and navigates to web.whatsapp.com.
+`tests/ui/conftest.py` already mocks the one other known-real-network-call
+risk (`check_for_update`), with its own comment literally citing "the same
+class of interference already documented above for the WhatsApp
+session-bootstrap thread" — but the WhatsApp bootstrap itself was never
+actually neutralized. **Confirmed this is live on this exact machine, not
+theoretical**: found a real, currently-running `python.exe -m src.main`
+process with a real, still-alive `chromedriver.exe` child — proof Selenium/
+Chrome genuinely function here, directly contradicting this file's own
+earlier repeated claim ("Chrome bootstrap fails every time here"), which
+was evidently only true in some other invocation context. Given that,
+running the parallel suite (`-n 34 --dist loadfile`) means up to 34+
+concurrent real MainWindow constructions, each independently attempting a
+real, forced-maximize Chrome launch 800ms later — a plausible, evidence-
+backed mechanism for real explorer.exe/taskbar/shell instability under that
+burst of concurrent native window creation and focus-stealing.
+
+**Fix**: `tests/ui/conftest.py` now also patches `WhatsAppSender.initialize`
+to a no-op returning a fake, inactive `SessionState`, at import time —
+identical pattern to the existing `check_for_update` mock, applied
+regardless of which test file builds its own `MainWindow()`.
+
+**Verified, not just patched and assumed**: before the fix, a live
+`chromedriver.exe` (PID 14060) was already running from a real app launch.
+After the fix: ran `test_close_button.py` (a single real `MainWindow`) and
+confirmed via `Get-CimInstance Win32_Process` that the chromedriver process
+count/PID/creation-time were completely unchanged — no new one spawned.
+Then re-ran the full `-n 34 --dist loadfile` parallel suite (215 tests) and
+confirmed the same: zero new `chromedriver.exe`/`chrome.exe` processes
+appeared at any point during the ~5m38s run. Full regression re-confirmed
+clean after the fix: **215/215** functional, **7/7** navigation-timing
+alone, **1/1** close-button alone, **2/2** nav-accent-timing alone,
+**115/115** plain `tests/` — 340/340, no regressions. (A side benefit: the
+`RuntimeError: main thread is not in main loop` warning spam from the
+session-bootstrap thread's background status-update racing against test
+teardown is reduced, though not fully eliminated — `_start_session_bootstrap`'s
+worker still calls `_set_session_status("Launching WhatsApp session...")`
+once before reaching the now-mocked `initialize()` call, which is a
+separate, pre-existing, harmless cosmetic race already noted elsewhere in
+this file, not a new issue.)
+
+**Open, not yet decided**: whether the *production* app's own behavior —
+eagerly attempting a real, forced-maximize browser reconnect on every
+single cold launch, unconditionally, with no gating — should itself be
+revisited (e.g., only attempt reconnect if a previously-verified session
+actually exists) is a product/UX judgment call, not a clear-cut bug like
+the test-suite gap was, and has not been changed without the user's
+explicit direction.
+
+**CHECKPOINT: Item 31 (auto-launch Chrome only for a previously-verified
+session, never eagerly on a new/never-connected install) complete.**
+
+User's explicit decision on the open question above: change it. The app
+should only auto-launch a real browser on startup to reconnect an
+*already-verified* WhatsApp session; a user who never connected (or whose
+session expired/logged out) should see no automatic Chrome launch at
+all — connecting should only ever happen from an explicit action.
+
+**Fix, `main_window.py`**: `_start_session_bootstrap()` (the startup-time,
+passive path — `self.after(800, self._start_session_bootstrap)`) now checks
+`self.whatsapp_sender.get_session_state().is_active` first —
+`get_session_state()` is a pure local file/DB read, never opens a browser,
+so this check is free. If `False`, it just sets
+`session_status_var` to a "Not connected - click \"Connect WhatsApp\" to
+get started" message and returns — no `initialize()` call, no browser. If
+`True` (a real, previously-verified, unexpired session exists), it proceeds
+exactly as before — auto-reconnect on startup is preserved for the
+legitimate case, only narrowed for the never-connected one. The shared
+worker logic was extracted into `_run_session_bootstrap_worker(on_done=None)`
+so both paths share one implementation.
+
+New explicit trigger: a real **"🔗 Connect WhatsApp"** button
+(`self.connect_whatsapp_btn`) added to Settings' existing "Session Status"
+strip (System Experience card, right under the status text) — calls
+`_connect_whatsapp_now()`, which always runs the real bootstrap worker
+regardless of any saved session state (that's the whole point — an
+explicit click is exactly the trigger this item asks for). Disables itself
+and shows "Connecting…" for the duration, matching the existing "Test
+key"/"Testing…" pattern already used elsewhere in Settings, then restores
+via `_restore_connect_button()`. The two other genuinely-explicit
+connect paths already in the codebase — the Setup Wizard's own WhatsApp
+step, and `WhatsAppSender.send_messages()`'s own internal `self.initialize()`
+call when a real campaign actually starts sending — call `initialize()`
+directly already and are completely unaffected by this gate, confirmed by
+reading both call sites (neither routes through
+`MainWindow._start_session_bootstrap`).
+
+**Verified with the same rigor as the taskbar bug fix — both unit-level and
+real, unmocked process monitoring, not just one or the other:**
+
+- `tests/ui/test_whatsapp_connect_gating.py` (5 tests, using the same
+  `_SynchronousThread` stand-in already established by
+  `test_ai_error_reporting.py`/`test_update_dialog_e2e.py` for this
+  harness's `.update()`-polling-instead-of-real-`mainloop()` limitation):
+  the literal repro (no verified session → `initialize()` never called);
+  the legitimate case still works (a verified session → `initialize()` is
+  called, auto-reconnect preserved); the explicit button always connects
+  regardless of saved state; the button visibly disables/relabels during
+  the call and restores after; and a source-level check confirming
+  `WhatsAppSender.send_messages` really does call `self.initialize()`
+  directly, so it's structurally unaffected by this gate. All 5 pass.
+- **Real, live, fully unmocked process-monitoring proof** (matching exactly
+  what the user asked for, using the same technique that diagnosed the
+  original taskbar bug): built a throwaway `WhatsAppAccount` (its own Chrome
+  profile subdirectory *and* its own namespaced session-state DB key, via
+  the existing Item-7 multi-account groundwork — never touches the real
+  single WhatsApp session/profile) and, with zero mocks anywhere, confirmed
+  via `Get-CimInstance Win32_Process`: (1) a fresh, never-connected
+  account's `get_session_state().is_active` is really `False` on this real
+  machine; (2) merely checking that state spawns no chromedriver process at
+  all (`before == after_gate`, empty in both cases); (3) explicitly calling
+  the real, unmocked `initialize()` — standing in for a real "Connect
+  WhatsApp" click — genuinely spawned a real `chromedriver.exe` (PID 9632
+  observed); (4) `shutdown()` cleanly terminated it (confirmed zero
+  chromedriver processes remaining). Cleaned up the throwaway session
+  directory and deleted its DB settings row afterward (narrowly-scoped,
+  single-key delete, not a blanket clear) — real production DB reconfirmed
+  untouched throughout: **9 contacts, 0 campaigns**, and only the real
+  app's own single `whatsapp_session_state` key remains.
+- Full regression suite re-run with the new test file added: **220/220**
+  functional (`-n 35 --dist loadfile`, worker count bumped 34→35 in
+  `tests/ui/README.md`), **7/7** navigation-timing alone, **1/1**
+  close-button alone, **2/2** nav-accent-timing alone, **115/115** plain
+  `tests/` — 345/345, no regressions. Re-confirmed zero new
+  `chromedriver.exe`/`chrome.exe` processes appeared anywhere during the
+  entire parallel run.
+
+Both the earlier taskbar-affecting test-suite bug and this production
+auto-launch behavior change are now fixed and verified with real process
+evidence, not just passing assertions.
+
+## Live feedback after seeing the update dialog and Item 31 in the real app (2026-07-28)
+
+User raised three items after actually clicking through the real, running app.
+
+**1. Update dialog real visual pass — complete.** Rewrote `update_dialog.py`'s
+layout: the title is now a standalone header row directly on the dialog
+background (matching `SendConfirmationDialog`'s real precedent — its title
+sits outside its stats card too; Item 29's earlier pass had wrongly nested
+the title inside the card). The version-info card is now a real two-cell
+"Installed" / "Available" stats block, same visual language as
+`SendConfirmationDialog`'s recipients/delay/ETA cells, instead of two
+differently-weighted bare labels. The release-notes box — the actual source
+of "too much empty grey space" — was stretching to fill all leftover height
+via `grid_rowconfigure(weight=1)`, which looks like a near-empty rectangle
+for typically-short real release notes; now a fixed, content-sized 120px
+box with its own real border. Footer buttons gained a real 3-tier hierarchy
+per Item 27's own conventions: "Later" is a ghost/ext-link style
+(transparent until hovered, muted text — least important action); "View on
+GitHub" is the outline-secondary style already established by History's
+"Duplicate" button and Compose's Pause/Resume (`fg_color=BG_INNER` + a real
+border + `ACCENT_TEXT`, confirmed WCAG-passing, unlike plain `T.ACCENT` as
+text_color) since it's explicitly a secondary/fallback action, never the
+primary path (see item 3 below); "Download & Install" stays the one filled
+`T.ACCENT` primary action, unchanged since it was already correct. Dialog
+resized 480x450 -> 500x420 to match the new, less-empty content height.
+
+Verified: rewrote `tests/ui/test_update_dialog_premium_styling.py`'s two
+structural tests to match the new layout (the old ones asserted the
+superseded "title inside the card" structure) and added two new ones — the
+notes box really has `grid_rowconfigure(weight=0)` (not stretch-filled), and
+the three footer buttons are confirmed visually distinct from each other
+(three different `fg_color`s, not the same color under different labels).
+Updated one assertion in `test_update_dialog_e2e.py` that checked for the
+literal old sentence "You have vX installed" (case-sensitive "installed")
+— now checks for the new, equally-real "Installed" stats-cell content
+instead. All 5 + 5 pass (run separately — combining `test_update_dialog_e2e.py`'s
+own dedicated-`MainWindow` fixture with `test_update_dialog_premium_styling.py`'s
+shared `app` fixture in one process hits this suite's own already-documented
+>2-3-Tk-roots-per-process limit, confirmed by each file passing clean when
+run alone). Full regression: **222/222** functional (`-n 35`, one already-
+documented `test_window_utils.py` flake reconfirmed passing 3/3 alone),
+**7/7** navigation-timing alone, **1/1** close-button alone, **2/2**
+nav-accent-timing alone, **115/115** plain `tests/` — 347/347.
+
+**2. Item 31 status — confirmed genuinely in place, and the "Launching
+WhatsApp session..." the user saw is the CORRECT, intended behavior, not a
+regression.** Re-read `_start_session_bootstrap` directly: the
+`get_session_state().is_active` gate is exactly as committed. Checked the
+real production DB's actual session state
+(`SessionManager().get_session_state()`): `is_active=True`,
+`expires_at=2026-07-30`, `created_at=2026-07-27` — this dev machine's real
+WhatsApp session was already genuinely connected and verified *before* this
+conversation (a real, working, previously-authenticated browser profile
+persists on disk). Item 31 was never meant to block reconnecting an
+*already-verified* session — only to stop the eager launch for a
+*never-connected* one. Since a real verified session exists here, the app
+correctly still auto-reconnects on startup — this is the explicitly-
+preserved case, not a bug. The "never connected" case was already proven
+fixed with real, unmocked process monitoring in the previous checkpoint
+(fresh isolated account -> zero chromedriver spawned; explicit connect ->
+real chromedriver spawned). No code change needed for this item — confirmed
+via direct evidence rather than re-guessed.
+
+**3. Update flow stays fully in-app once a real Windows asset exists —
+confirmed by tracing the exact code path, not assumed.** Walked the full
+chain: `UpdateDialog._start_download()` -> `download_asset()` (streams the
+real GitHub release asset to a local temp file) -> on success,
+`_on_download_succeeded()` closes the dialog and schedules
+`main_window._apply_downloaded_update(installer_path)` -> that method calls
+`spawn_detached(launch_silent_install_and_get_command(installer_path))`
+(`["<path>", "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART"]`, a fully
+detached child process that survives the app closing) and then
+`self._on_close()` (the same real, already-verified close/teardown path).
+**No browser or GitHub webpage is ever opened in this path** — confirmed
+`webbrowser.open` only appears once in the whole file, exclusively on the
+separate "View on GitHub" button's own `command=`. That button is wired as
+a permanently-available secondary/fallback link (now visually demoted to
+the outline-secondary tier per item 1 above) — used today only because no
+Windows asset is attached to a real release yet
+(`can_install_here = bool(info.asset_url) and can_silent_install()` is
+`False`, so the primary button is disabled with a reason and the fallback
+is the only working action) — but once a real asset exists, "Download &
+Install" becomes enabled and is the complete, self-contained, in-app path;
+"View on GitHub" remains present purely for release notes / manual
+troubleshooting, never becoming the expected route. This was already the
+real, correct wiring — nothing needed to change for item 3, only to verify
+and document it clearly, which this checkpoint does.
+
+## Making the update system fully production-ready (2026-07-28)
+
+**CHECKPOINT: Step 1 complete.** Checked GitHub live (not memory): the
+latest published release is `v1.2.0` (2026-07-22), and it does have a real
+Windows asset (`MessageCannon_Setup.exe`, 71,778,743 bytes) alongside real
+Linux/.deb/.AppImage and Mac .dmg assets — so "Windows asset missing" wasn't
+the actual gap. The real gap: `v1.2.0`'s tag points at commit `ada2490`,
+the version-bump commit itself — three real feature commits already existed
+on local `main` after that tag and were never released (`4d4b5ff` Live
+Testing Findings 1-8, `3abcd52` Compose Item 9, `17b9e2a` Compose/Card
+Creator polish 10-13 + Live Testing 14-24 + Final Premium Polish Pass
+25-30), plus this session's own still-uncommitted work (the real taskbar/
+Chrome-launch bug fix, Item 31, the update-dialog visual redesign). A
+customer downloading "latest" today would get software missing four
+commits' worth of real fixes, including the taskbar-destabilizing bug fix.
+
+**Step 2**: bumped `APP_VERSION` `"1.2.0"` -> `"1.3.0"` (grepped confirmed
+no test/source hardcodes the old string anywhere). Full regression re-run
+clean before committing anything into a real release: 222/222 functional
+(`-n 35`, the one already-documented `test_window_utils.py` flake
+reconfirmed passing alone), 7/7 navigation-timing, 1/1 close-button, 2/2
+nav-accent-timing, 115/115 plain `tests/` — 347/347.

@@ -27,7 +27,7 @@ from ..ui.card_creator_tab import build_card_creator_view
 from ..ui.reports_chart import ReportsChart
 from ..ui.update_dialog import show_update_dialog
 from ..ui.accessibility import enable_keyboard_accessibility
-from ..core.update_checker import check_for_update, spawn_detached, launch_silent_install_and_get_command
+from ..core.update_checker import check_for_update, spawn_detached, launch_silent_install_and_get_command, UpdateInfo
 
 try:
     from tkinterdnd2 import TkinterDnD
@@ -2758,7 +2758,12 @@ class MainWindow(ctk.CTk):
                      text_color=T.TEXT_HEAD).pack(anchor="w", padx=14, pady=(12, 4))
         ctk.CTkLabel(session_strip, textvariable=self.session_status_var,
                      text_color=T.TEXT_MUTED, wraplength=360, justify="left").pack(
-            anchor="w", padx=14, pady=(0, 12))
+            anchor="w", padx=14, pady=(0, 8))
+        self.connect_whatsapp_btn = ctk.CTkButton(
+            session_strip, text="🔗 Connect WhatsApp", corner_radius=8,
+            fg_color=T.ACCENT, hover_color=T.ACCENT_HOVER, text_color=T.TEXT_HEAD,
+            command=self._connect_whatsapp_now)
+        self.connect_whatsapp_btn.pack(anchor="w", padx=14, pady=(0, 14))
 
         wa_risk_banner = ctk.CTkFrame(system_card, fg_color=T.BADGE_BG, corner_radius=10,
                                       border_width=1, border_color=T.DANGER)
@@ -5053,7 +5058,21 @@ class MainWindow(ctk.CTk):
         core/update_checker.check_for_update's docstring; the badge simply
         stays hidden if the check fails or no newer release exists."""
         def worker() -> None:
-            info = check_for_update(APP_VERSION)
+            # TEMP-DEBUG (visual confirmation of the sidebar update badge,
+            # requested by the user — revert this block after confirming):
+            # set MC_FORCE_UPDATE_BADGE=1 to bypass the real GitHub call and
+            # feed a fake "newer version available" result instead.
+            if os.environ.get("MC_FORCE_UPDATE_BADGE") == "1":
+                info = UpdateInfo(
+                    version="9.9.9",
+                    tag="v9.9.9",
+                    release_notes="TEST ONLY — simulated release for visual confirmation of the sidebar update badge. Not a real release.",
+                    release_url="https://github.com/farazgoal-boop/MessageCannon/releases",
+                    asset_url=None,
+                    asset_name=None,
+                )
+            else:
+                info = check_for_update(APP_VERSION)
             if info is not None:
                 self.after(0, lambda: self._on_update_check_result(info))
 
@@ -5084,9 +5103,40 @@ class MainWindow(ctk.CTk):
         self._on_close()
 
     def _start_session_bootstrap(self) -> None:
+        """Passive, startup-time reconnect attempt -- Item 31: only launches a
+        real browser if a previously-verified, unexpired session actually
+        exists. get_session_state() is a pure local file/DB read (no browser
+        involved), so this check is free and safe to do unconditionally on
+        every launch. A user who has never connected WhatsApp, or whose
+        session expired/logged out, gets no Chrome popup at all here --
+        connecting is then only ever triggered by an explicit action:
+        _connect_whatsapp_now() (the new "Connect WhatsApp" button), the
+        Setup Wizard's own WhatsApp step, or WhatsAppSender.send_messages()
+        itself when the user actually starts a real send."""
         if self.license_locked:
             return
+        if not self.whatsapp_sender.get_session_state().is_active:
+            self._set_session_status("Not connected - click \"Connect WhatsApp\" to get started")
+            return
+        self._run_session_bootstrap_worker()
 
+    def _connect_whatsapp_now(self) -> None:
+        """Explicit, user-clicked connect (Item 31) -- always launches the
+        real browser regardless of any previously-saved session state, since
+        an explicit click is exactly the trigger this item asks for, as
+        opposed to _start_session_bootstrap's passive, gated startup
+        attempt above."""
+        btn = getattr(self, "connect_whatsapp_btn", None)
+        if btn is not None:
+            btn.configure(state="disabled", text="Connecting…")
+        self._run_session_bootstrap_worker(on_done=self._restore_connect_button)
+
+    def _restore_connect_button(self) -> None:
+        btn = getattr(self, "connect_whatsapp_btn", None)
+        if btn is not None and btn.winfo_exists():
+            btn.configure(state="normal", text="🔗 Connect WhatsApp")
+
+    def _run_session_bootstrap_worker(self, on_done=None) -> None:
         def worker() -> None:
             self._set_session_status("Launching WhatsApp session...")
             try:
@@ -5098,6 +5148,9 @@ class MainWindow(ctk.CTk):
                 Logger.warning(f"Session bootstrap failed: {exc}")
                 self._set_session_status("Session expired - please scan QR")
                 self._log_activity(f"Session bootstrap failed: {exc}")
+            finally:
+                if on_done is not None:
+                    self.after(0, on_done)
 
         threading.Thread(target=worker, daemon=True).start()
 

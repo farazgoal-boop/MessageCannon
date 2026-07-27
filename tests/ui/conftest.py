@@ -66,6 +66,30 @@ def _no_op_update_check(*_args, **_kwargs):
 
 _main_window_module.check_for_update = _no_op_update_check
 
+# MainWindow.__init__ also schedules self.after(800, self._start_session_bootstrap),
+# which calls the REAL WhatsAppSender.initialize() -> SessionManager.build_driver()
+# -> a real, non-headless Selenium Chrome launch (driver.maximize_window(), navigate
+# to web.whatsapp.com). Confirmed on this machine that Selenium/chromedriver/Chrome
+# genuinely work here (a live chromedriver.exe child process was found running from
+# a real app launch) -- meaning every MainWindow() built anywhere in this suite (the
+# shared `app` fixture, plus every file that builds its own dedicated window) was
+# silently launching a real, forced-maximize automated browser 800ms after
+# construction, for the entire time this suite has existed. Under `-n <N>
+# --dist loadfile`, that's up to N real, concurrent, non-headless Chrome launches
+# fighting over window focus/maximize state at once -- a real, confirmed source of
+# host-OS window-manager instability, not just test flakiness. Neutralized the same
+# way check_for_update is above: patched to a no-op before any MainWindow is built.
+from src.core.whatsapp_sender import WhatsAppSender  # noqa: E402
+from src.session_manager import SessionState  # noqa: E402
+
+
+def _no_op_session_bootstrap(self):
+    return SessionState(is_active=False, expires_at=None, requires_qr=True,
+                         status_text="Session bootstrap disabled in tests")
+
+
+WhatsAppSender.initialize = _no_op_session_bootstrap
+
 
 def _close_any_toplevel(app) -> None:
     """Close the setup wizard (or any other startup Toplevel) if one opened,
