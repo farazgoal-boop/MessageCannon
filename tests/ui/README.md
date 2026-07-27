@@ -8,12 +8,14 @@ them on timing (see "Why two commands" below).
 
 ```bash
 # Functional/correctness tests — parallel, one process per file
-python -m pytest tests/ui/ -n 23 --dist loadfile \
-  --ignore=tests/ui/test_navigation_timing.py --ignore=tests/ui/test_close_button.py
+python -m pytest tests/ui/ -n 34 --dist loadfile \
+  --ignore=tests/ui/test_navigation_timing.py --ignore=tests/ui/test_close_button.py \
+  --ignore=tests/ui/test_nav_accent_timing.py
 
 # Timing-sensitive tests — must run alone, no parallel contention
 python -m pytest tests/ui/test_navigation_timing.py
 python -m pytest tests/ui/test_close_button.py
+python -m pytest tests/ui/test_nav_accent_timing.py
 ```
 
 ## Why two commands

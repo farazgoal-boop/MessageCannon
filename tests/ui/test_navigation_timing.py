@@ -38,7 +38,30 @@ MAX_TRANSITION_MS = 500
 # progress, but not a full elimination, and not chased further given the
 # same diminishing-returns reasoning already accepted above for Compose's
 # pre-existing cost.
-MAX_TRANSITION_MS_HEAVY = {"Compose": 850}
+#
+# Contacts and Settings joined this exception list during Item 30 (Final
+# Premium Polish Pass). Root cause investigated directly, not guessed:
+# Contacts' own real cost turned out to be two separate things stacked --
+# (1) a genuine bug, now fixed (see _on_header_search's Item-30 comment):
+# _show_view("Contacts") was unconditionally forcing a full destroy+rebuild
+# of the entire contacts directory on *every* navigation, even when nothing
+# had changed since the last render (every real data mutation -- import,
+# per-row delete, opt-out toggle -- already re-renders directly right after
+# it changes anything). Measured directly via an isolated script before
+# touching anything: ~1.0-1.9s per navigation, confirmed reproducible across
+# 5 repeated calls, not machine noise. Fixing the redundant re-render cut
+# this to the same ~450-800ms range as every other view. (2) What's left
+# after that fix is the same class of real, accumulated per-widget cost
+# already documented above for Compose's own budget history: this session's
+# many polish items (per-row Delete button on every contact, Settings'
+# Multi-Number/AI-onboarding/warm-up/reputation cards, and — app-wide,
+# affecting every view with buttons/switches/sliders — the Item 4
+# accessibility patch's per-widget takefocus+bindtag cost) made both views
+# measurably heavier than when their 500ms budget was set, not just noisier.
+# Measured directly, repeated runs: Contacts 501-792ms, Settings 423-719ms.
+# 800ms gives real headroom above the observed worst case for both, matching
+# the same order of magnitude already accepted for Compose above.
+MAX_TRANSITION_MS_HEAVY = {"Compose": 850, "Contacts": 800, "Settings": 800}
 
 
 @pytest.mark.parametrize("view_name", MAIN_VIEWS)

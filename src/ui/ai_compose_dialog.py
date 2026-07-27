@@ -159,7 +159,7 @@ class AIComposeDialog(ctk.CTkToplevel):
         card.grid_columnconfigure(0, weight=1)
 
         ctk.CTkLabel(card, text=variation.get("label") or f"Variation {index + 1}",
-                     fg_color=T.BADGE_BG, corner_radius=999, text_color=T.ACCENT,
+                     fg_color=T.BADGE_BG, corner_radius=999, text_color=T.ACCENT_TEXT,
                      font=ctk.CTkFont(size=11, weight="bold"), padx=10, pady=4).grid(
             row=0, column=0, padx=14, pady=(14, 8), sticky="w")
 

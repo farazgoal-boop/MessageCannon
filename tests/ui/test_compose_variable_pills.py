@@ -175,7 +175,7 @@ def test_loading_a_real_email_template_with_multiple_unlisted_tokens_roundtrips(
 
     original_body = app._compose_em_body.get("1.0", "end")
     try:
-        _, html = mw_mod.EMAIL_TEMPLATES["Invoice"]
+        _, html, _is_html = mw_mod.EMAIL_TEMPLATES["Invoice"]
         app._compose_em_body.delete("1.0", "end")
         app._compose_em_body.insert("1.0", html)
         app._update_email_warnings()

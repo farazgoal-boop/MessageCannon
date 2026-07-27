@@ -193,7 +193,9 @@ class SetupWizard(ctk.CTkToplevel):
         opts.pack(anchor="w", pady=8)
         for label, value in [("📧 Email only", "email"), ("📱 WhatsApp only", "whatsapp"), ("Both", "both")]:
             ctk.CTkRadioButton(opts, text=label, variable=choice_var, value=value,
-                                text_color=T.TEXT_MUTED, font=ctk.CTkFont(size=13)).pack(anchor="w", pady=6)
+                                text_color=T.TEXT_MUTED, font=ctk.CTkFont(size=13),
+                                fg_color=T.ACCENT, border_color=T.ACCENT,
+                                hover_color=T.ACCENT_HOVER).pack(anchor="w", pady=6)
 
         def next_step() -> None:
             choice = choice_var.get()

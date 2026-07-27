@@ -29,7 +29,30 @@ ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages"
 ANTHROPIC_VERSION = "2023-06-01"
 ANTHROPIC_MODEL = "claude-sonnet-5"
 
-GEMINI_MODEL = "gemini-2.0-flash"
+# Item 16 follow-up (Live Testing Findings, Round 2) -- two real model picks
+# in a row, each "confirmed" against Google's own docs at the time, broke
+# within the same session, which is itself the real lesson here (see the
+# Settings "Gemini model" field added below for the actual fix to the root
+# problem, not just this one symptom):
+# 1. "gemini-2.0-flash" was hardcoded originally and is now a genuinely
+#    SHUT DOWN model (Google's model docs, "Previous models" / "Shut down").
+#    This was the real root cause of a fresh key always failing "Test key"
+#    as "rate limited" even after waiting -- a real quota clears after a
+#    wait; a request against a decommissioned model never does.
+# 2. Switched to "gemini-2.5-flash-lite" (confirmed Stable, generous free
+#    tier) -- but a REAL live test against a real key came back
+#    `404 "This model models/gemini-2.5-flash-lite is no longer available
+#    to new users"` within the hour. Confirmed via Google's deprecations
+#    page: the whole 2.5 generation is closed to *new* API keys ahead of
+#    its Oct 16, 2026 shutdown, even though existing users/keys can still
+#    use it until then -- a distinction no amount of "is this model
+#    deprecated" doc-reading surfaces, only a real request from a real new
+#    key does.
+# Now "gemini-3.1-flash-lite" -- GA since May 7, 2026 (not brand-new/
+# preview), confirmed genuine free tier, no card required, no shutdown
+# date announced as of this fix. Given the demonstrated real volatility
+# above, treat this as the best current answer, not a permanent one.
+GEMINI_MODEL = "gemini-3.1-flash-lite"
 GEMINI_API_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
 
 REQUEST_TIMEOUT = 30
@@ -40,6 +63,32 @@ PROVIDER_LABELS = {
     "anthropic": "Anthropic Claude",
     "gemini": "Google Gemini (free tier available)",
 }
+
+# Item 15 of the Live Testing Findings pass (Round 2): "premium onboarding"
+# for the API key field -- a direct link to each provider's real key-
+# creation page, plus a plain-language billing note, so the user never has
+# to already know where to go get one.
+PROVIDER_KEY_URLS = {
+    "anthropic": "https://console.anthropic.com/settings/keys",
+    "gemini": "https://aistudio.google.com/apikey",
+}
+
+PROVIDER_BILLING_NOTES = {
+    "anthropic": "Anthropic API usage is typically pay-as-you-go -- you may need to add "
+                 "billing/credits in the Anthropic console before a saved key will work.",
+    "gemini": "Google Gemini has a genuine free tier for typical use (no card required); "
+              "heavier use may require enabling billing in Google AI Studio.",
+}
+
+
+def key_creation_url(provider: str) -> str:
+    """The real key-creation page for `provider`, defaulting to Anthropic's
+    if an unknown/legacy provider string is passed."""
+    return PROVIDER_KEY_URLS.get(provider, PROVIDER_KEY_URLS["anthropic"])
+
+
+def billing_note(provider: str) -> str:
+    return PROVIDER_BILLING_NOTES.get(provider, PROVIDER_BILLING_NOTES["anthropic"])
 
 
 class AIServiceError(Exception):
@@ -111,6 +160,23 @@ def _call_gemini(api_key: str, system: str, user: str, max_tokens: int) -> str:
             raise AIServiceError("Invalid API key. Check the key saved in Settings.")
         raise AIServiceError(f"Google Gemini API error ({response.status_code}): {response.text[:200]}")
     if response.status_code == 429:
+        # Previously a generic "wait a moment" message regardless of what
+        # Google actually said -- real bug found while investigating a user
+        # report of persistent 429s that didn't clear after waiting: this
+        # discarded Gemini's own JSON error body, which for a real quota
+        # error includes a specific `error.status` (e.g. "RESOURCE_EXHAUSTED")
+        # and a real `error.message` naming which quota was hit. Surfacing
+        # that now instead of guessing, so a genuine per-minute/per-day
+        # limit reads differently from (and is now distinguishable from) any
+        # other 429-shaped failure.
+        detail = ""
+        try:
+            error_body = response.json().get("error", {})
+            detail = error_body.get("message", "")
+        except (ValueError, AttributeError):
+            pass
+        if detail:
+            raise AIServiceError(f"Rate limited by Google Gemini: {detail}")
         raise AIServiceError("Rate limited by Google Gemini. Wait a moment and try again.")
     if response.status_code != 200:
         raise AIServiceError(f"Google Gemini API error ({response.status_code}): {response.text[:200]}")

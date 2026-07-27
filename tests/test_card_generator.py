@@ -13,7 +13,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from src.ui.card_creator_tab import (
     generate_html, CARD_STYLE_TEMPLATES, image_file_to_data_uri,
     ImageUploadError, MAX_UPLOAD_IMAGE_BYTES, _contrast_text_color,
+    decode_data_uri_to_image, crop_and_encode_image,
 )
+from PIL import Image
 
 # Smallest possible valid PNG (1x1 transparent pixel).
 _TINY_PNG_BYTES = base64.b64decode(
@@ -96,6 +98,25 @@ class TestCardGenerator(unittest.TestCase):
         self.assertIn("Hello world", html)
         self.assertIn("<!DOCTYPE html>", html)
 
+    def test_page_wrapper_uses_classic_centering_not_only_flexbox(self) -> None:
+        """Item 19 of the Live Testing Findings pass (Round 2): the in-app
+        preview (tkinterweb.HtmlFrame, a lightweight HTML/CSS engine) was
+        confirmed not to honor the body's flex-based centering, leaving the
+        card hugging the left edge with blank space to the right instead of
+        centered. The outer wrapper must also center via classic box-model
+        rules (max-width + margin:0 auto), which works regardless of
+        flexbox support, not rely on the flex rule alone."""
+        sections = [{"type": "text", "data": {"content": "Hi", "size": "medium", "align": "left"}}]
+        meta = {"app_name": "Test", "style": CARD_STYLE_TEMPLATES["Dark Premium"]}
+        html = generate_html(sections, meta)
+        self.assertIn(".page{", html.replace(" ", ""))
+        self.assertIn("margin:0auto", html.replace(" ", ""))
+        self.assertIn('<div class="page">', html)
+        # The flex-based centering must still be present too, for real
+        # browsers (Open in Browser / the saved .html export) that do
+        # support it -- this is an additive fallback, not a replacement.
+        self.assertIn("justify-content:center", html)
+
     def test_buy_now_link(self) -> None:
         sections = [{"type": "price", "data": {"price": "$89", "old_price": "", "note": ""}}]
         meta = {
@@ -107,6 +128,68 @@ class TestCardGenerator(unittest.TestCase):
         html = generate_html(sections, meta, for_preview=False)
         self.assertIn('href="https://gumroad.com/l/test-product"', html)
         self.assertIn("BUY NOW →", html)
+
+    def test_price_section_own_button_text_and_url_take_priority(self) -> None:
+        """Item 11.5: the Price section's own Button Text/Purchase Link URL
+        must be the real, clickable CTA -- and take priority over the
+        legacy meta-level buy_link (Links section) fallback."""
+        sections = [{"type": "price", "data": {
+            "price": "$89", "old_price": "", "note": "",
+            "button_text": "Get Instant Access", "buy_url": "https://mystore.com/checkout",
+        }}]
+        meta = {
+            "app_name": "Test", "accent": "#6c63ff",
+            "buy_link": "https://gumroad.com/l/should-not-be-used",
+            "style": CARD_STYLE_TEMPLATES["Dark Premium"],
+        }
+        html = generate_html(sections, meta, for_preview=False)
+        self.assertIn('href="https://mystore.com/checkout"', html)
+        self.assertIn("Get Instant Access →", html)
+        self.assertNotIn("should-not-be-used", html)
+
+    def test_price_section_falls_back_to_meta_buy_link_when_own_url_blank(self) -> None:
+        sections = [{"type": "price", "data": {
+            "price": "$89", "old_price": "", "note": "", "button_text": "", "buy_url": "",
+        }}]
+        meta = {
+            "app_name": "Test", "accent": "#6c63ff",
+            "buy_link": "https://gumroad.com/l/test-product",
+            "style": CARD_STYLE_TEMPLATES["Dark Premium"],
+        }
+        html = generate_html(sections, meta, for_preview=False)
+        self.assertIn('href="https://gumroad.com/l/test-product"', html)
+        self.assertIn("BUY NOW →", html)
+
+    def test_discount_percent_renders_as_badge(self) -> None:
+        sections = [{"type": "price", "data": {
+            "price": "$69", "old_price": "$100", "note": "",
+            "discount_percent": 31,
+        }}]
+        meta = {"app_name": "Test", "accent": "#6c63ff",
+                "style": CARD_STYLE_TEMPLATES["Dark Premium"]}
+        html = generate_html(sections, meta, for_preview=False)
+        self.assertIn("31% OFF", html)
+
+    def test_no_discount_badge_when_not_a_real_discount(self) -> None:
+        sections = [{"type": "price", "data": {
+            "price": "$100", "old_price": "$69", "note": "", "discount_percent": None,
+        }}]
+        meta = {"app_name": "Test", "accent": "#6c63ff",
+                "style": CARD_STYLE_TEMPLATES["Dark Premium"]}
+        html = generate_html(sections, meta, for_preview=False)
+        self.assertNotIn("% OFF", html)
+
+    def test_compute_discount_percent(self) -> None:
+        from src.ui.card_creator_tab import compute_discount_percent
+        self.assertEqual(compute_discount_percent("$69", "$100"), 31)
+        self.assertEqual(compute_discount_percent("Rs. 1,200", "Rs. 1,600"), 25)
+        # Not a real discount (sale >= original) -> no badge.
+        self.assertIsNone(compute_discount_percent("$100", "$69"))
+        self.assertIsNone(compute_discount_percent("$100", "$100"))
+        # Unparseable/missing values -> no badge, never raises.
+        self.assertIsNone(compute_discount_percent("Free", "$100"))
+        self.assertIsNone(compute_discount_percent("$69", ""))
+        self.assertIsNone(compute_discount_percent("", ""))
 
     def test_youtube_preview_uses_thumbnail(self) -> None:
         sections = [{"type": "youtube", "data": {"url": "https://youtube.com/watch?v=dQw4w9WgXcQ"}}]
@@ -272,6 +355,81 @@ class TestCustomBackground(unittest.TestCase):
             self.assertIn(f"background:{bg_value}", html)
         finally:
             Path(path).unlink()
+
+
+class TestIconCropAndDecode(unittest.TestCase):
+    """Item 11.1 of the Live Testing Findings pass (Round 2): drag-and-drop
+    logo upload + a simple square-crop dialog. The actual crop math is
+    deliberately pure/Tk-free (crop_and_encode_image) so it's directly
+    testable without simulating a mouse drag -- mouse-click automation is
+    already documented elsewhere in this project as unreliable in this
+    sandbox."""
+
+    def test_decode_data_uri_round_trips_a_real_image(self) -> None:
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
+            f.write(_TINY_PNG_BYTES)
+            path = f.name
+        try:
+            uri = image_file_to_data_uri(path)
+            img = decode_data_uri_to_image(uri)
+            self.assertEqual(img.size, (1, 1))
+        finally:
+            Path(path).unlink()
+
+    def test_crop_and_encode_produces_correctly_sized_real_crop(self) -> None:
+        # A real 100x100 image, split into 4 solid-color quadrants, so
+        # cropping a specific quadrant is independently verifiable.
+        source = Image.new("RGBA", (100, 100), (255, 255, 255, 255))
+        for x in range(50, 100):
+            for y in range(50, 100):
+                source.putpixel((x, y), (10, 20, 30, 255))
+
+        uri = crop_and_encode_image(source, (50, 50, 100, 100), max_size=256)
+        self.assertTrue(uri.startswith("data:image/png;base64,"))
+        cropped_back = decode_data_uri_to_image(uri)
+        self.assertEqual(cropped_back.size, (50, 50))
+        # The cropped image should be entirely the darker quadrant's color,
+        # not a mix -- confirms the crop box maps to the correct region.
+        self.assertEqual(cropped_back.getpixel((0, 0))[:3], (10, 20, 30))
+        self.assertEqual(cropped_back.getpixel((49, 49))[:3], (10, 20, 30))
+
+    def test_crop_and_encode_downsizes_to_max_size(self) -> None:
+        source = Image.new("RGBA", (1000, 1000), (1, 2, 3, 255))
+        uri = crop_and_encode_image(source, (0, 0, 1000, 1000), max_size=256)
+        result = decode_data_uri_to_image(uri)
+        self.assertLessEqual(max(result.size), 256)
+
+
+class TestIconImageInHeader(unittest.TestCase):
+    """Item 11.1: an uploaded logo takes priority over the emoji fallback
+    in the exported card's header."""
+
+    def test_icon_image_renders_as_img_tag_not_emoji_text(self) -> None:
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
+            f.write(_TINY_PNG_BYTES)
+            path = f.name
+        try:
+            uri = image_file_to_data_uri(path)
+            sections = [{"type": "header", "data": {}}]
+            meta = {
+                "app_name": "Test", "icon": "🚀", "icon_image": uri,
+                "tagline": "", "org": "", "style": CARD_STYLE_TEMPLATES["Dark Premium"],
+            }
+            html = generate_html(sections, meta, for_preview=False)
+            self.assertIn(f'<img src="{uri}"', html)
+            self.assertNotIn(">🚀<", html)
+        finally:
+            Path(path).unlink()
+
+    def test_no_icon_image_falls_back_to_emoji(self) -> None:
+        sections = [{"type": "header", "data": {}}]
+        meta = {
+            "app_name": "Test", "icon": "🚀", "icon_image": "",
+            "tagline": "", "org": "", "style": CARD_STYLE_TEMPLATES["Dark Premium"],
+        }
+        html = generate_html(sections, meta, for_preview=False)
+        self.assertIn(">🚀<", html)
+        self.assertNotIn("<img", html)
 
 
 if __name__ == "__main__":

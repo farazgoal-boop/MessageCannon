@@ -17,6 +17,8 @@ from typing import Dict, List, Optional
 import smtplib
 import ssl
 import tkinter as tk
+import webbrowser
+from html.parser import HTMLParser
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 import customtkinter as ctk
@@ -80,7 +82,46 @@ from ..utils.logger import Logger
 
 
 EMAIL_TEMPLATES = {
-    "(none)": ("", ""),
+    # Item 10 of the Live Testing Findings pass: 3-tuples of
+    # (subject, body, is_html). The 4 legacy entries below carry real,
+    # richly-styled marketing HTML (gradients/colored boxes/CTA buttons) --
+    # Tk has no HTML-rendering widget, so once the compose editor became a
+    # real rich-text (Bold/Italic/List) editor instead of a raw-tag view,
+    # these get run through _load_html_into_email_editor (a best-effort
+    # HTML -> bold/italic/bullet/paragraph importer) when picked, which
+    # necessarily flattens their visual chrome to plain formatted text --
+    # a disclosed, user-confirmed trade-off, not a silent regression. The 4
+    # new ones are defined directly as plain rich text (is_html=False) since
+    # they were never HTML in the first place.
+    "(none)": ("", "", False),
+    "Welcome": (
+        "Welcome aboard, {name}!",
+        "Hi {name},\n\nWelcome aboard! We're excited to have you with us.\n\n"
+        "If you have any questions, just reply to this email — we're happy to help.\n\n"
+        "Best,\n{sender}",
+        False,
+    ),
+    "Promotion": (
+        "A special offer for you, {name}",
+        "Hi {name},\n\nWe've got something special for you this week — {amount} off "
+        "your next order.\n\nDon't miss out, this offer won't last long.\n\n"
+        "Thanks,\n{sender}",
+        False,
+    ),
+    "Reminder": (
+        "Reminder: {date} is coming up",
+        "Hi {name},\n\nJust a quick reminder about {date}. We wanted to make sure "
+        "it's on your radar.\n\nLet us know if you need anything before then.\n\n"
+        "Best,\n{sender}",
+        False,
+    ),
+    "Follow-up": (
+        "Following up, {name}",
+        "Hi {name},\n\nJust checking in to see how things are going. Let us know if "
+        "there's anything we can help with.\n\nLooking forward to hearing from you.\n\n"
+        "Best,\n{sender}",
+        False,
+    ),
     "Professional": (
         "Important Update from {name}",
         """<div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;border:1px solid #e0e0e0;border-radius:8px;overflow:hidden">
@@ -96,6 +137,7 @@ EMAIL_TEMPLATES = {
     To unsubscribe reply STOP.
   </div>
 </div>""",
+        True,
     ),
     "Promo Offer": (
         "🎉 Special Offer Just for You, {name}!",
@@ -115,6 +157,7 @@ EMAIL_TEMPLATES = {
     <p style="color:#999;font-size:12px;text-align:center">Reply STOP to unsubscribe.</p>
   </div>
 </div>""",
+        True,
     ),
     "Appointment Reminder": (
         "Reminder: Your Appointment on {date}",
@@ -129,6 +172,7 @@ EMAIL_TEMPLATES = {
     <p>Warm regards,<br><strong>{sender}</strong></p>
   </div>
 </div>""",
+        True,
     ),
     "Invoice": (
         "Invoice #{invoice_no} — Amount Due: {amount}",
@@ -143,6 +187,7 @@ EMAIL_TEMPLATES = {
     <p>Thank you for your business.<br><strong>{sender}</strong></p>
   </div>
 </div>""",
+        True,
     ),
 }
 
@@ -164,6 +209,99 @@ def _label_for_variable_token(token: str) -> str:
     for tokens outside the common set above, e.g. from EMAIL_TEMPLATES)."""
     key = token.strip("{}")
     return _VARIABLE_TOKEN_LABELS.get(key, key.replace("_", " ").title())
+
+
+class _HTMLToRichText(HTMLParser):
+    """Item 10 of the Live Testing Findings pass: best-effort importer that
+    loads a legacy EMAIL_TEMPLATES HTML string into the new rich-text (tag-
+    based bold/italic/bullet) editor. Deliberately not a full HTML renderer
+    -- Tk has none available -- so inline styles/colors/backgrounds/CTA-
+    button chrome are dropped by design (a disclosed, user-confirmed trade-
+    off, see the EMAIL_TEMPLATES comment above); only structure that a plain
+    rich-text editor can actually represent survives: bold (<strong>/<b>/
+    headings), italic (<em>/<i>), paragraph breaks, <br>, and <li> bullets.
+    A link's href is kept as visible "(url)" text after its label, since a
+    real clickable hyperlink has no representation in this editor either
+    way -- dropping the URL entirely would lose real information, not just
+    styling.
+    """
+
+    _HEADING = {"h1", "h2", "h3", "h4", "h5", "h6"}
+    _BLOCK = _HEADING | {"p", "div", "tr"}
+    _SKIP = {"script", "style"}
+
+    def __init__(self, widget: tk.Text):
+        super().__init__(convert_charrefs=True)
+        self.widget = widget
+        self._bold = 0
+        self._italic = 0
+        self._skip = 0
+        self._href: Optional[str] = None
+        self._need_break = False
+        self._has_content = False
+
+    def _tags(self) -> tuple:
+        tags = []
+        if self._bold:
+            tags.append("b")
+        if self._italic:
+            tags.append("i")
+        return tuple(tags)
+
+    def handle_starttag(self, tag, attrs):
+        if tag in self._SKIP:
+            self._skip += 1
+            return
+        if self._skip:
+            return
+        if tag in ("strong", "b") or tag in self._HEADING:
+            self._bold += 1
+        if tag in ("em", "i"):
+            self._italic += 1
+        if tag in self._BLOCK and self._has_content:
+            self._need_break = True
+        if tag == "br":
+            self.widget.insert("end", "\n", self._tags())
+            self._has_content = True
+        if tag == "li":
+            if self._has_content:
+                self.widget.insert("end", "\n")
+            self.widget.insert("end", "• ", self._tags())
+            self._has_content = True
+        if tag == "a":
+            for key, value in attrs:
+                if key == "href":
+                    self._href = value
+
+    def handle_endtag(self, tag):
+        if tag in self._SKIP:
+            self._skip = max(0, self._skip - 1)
+            return
+        if self._skip:
+            return
+        if tag in ("strong", "b") or tag in self._HEADING:
+            self._bold = max(0, self._bold - 1)
+        if tag in ("em", "i"):
+            self._italic = max(0, self._italic - 1)
+        if tag in self._BLOCK:
+            self._need_break = True
+        if tag == "a":
+            if self._href and self._href not in ("", "#"):
+                self.widget.insert("end", f" ({self._href})", self._tags())
+                self._has_content = True
+            self._href = None
+
+    def handle_data(self, data):
+        if self._skip:
+            return
+        text = re.sub(r"\s+", " ", data).strip()
+        if not text:
+            return
+        if self._need_break:
+            self.widget.insert("end", "\n\n")
+            self._need_break = False
+        self.widget.insert("end", text, self._tags())
+        self._has_content = True
 
 
 class MainWindow(ctk.CTk):
@@ -272,6 +410,30 @@ class MainWindow(ctk.CTk):
     def __init__(self):
         super().__init__()
 
+        # Item 14 of the Live Testing Findings pass (Round 2): the real,
+        # dominant root cause of the reported theme-switch flicker. Found by
+        # reading CustomTkinter's own ctk_tk.py, not guessed: on Windows,
+        # CTk's root window class calls _windows_set_titlebar_color() on
+        # every single ctk.set_appearance_mode() call (so the native OS
+        # title bar tracks the app's Dark/Light mode) -- and that method
+        # calls the real tkinter withdraw()/deiconify() on the WHOLE WINDOW
+        # to force the OS to redraw the title bar, confirmed directly: a
+        # diagnostic script showed our own overlay frame (a direct child of
+        # this window) go from mapped=1 right after being shown to
+        # mapped=0 immediately after ctk.set_appearance_mode() ran -- a
+        # child can only be unmapped like that if its ANCESTOR (this
+        # window) was itself withdrawn. This is a whole-window blink, not
+        # just individual widgets recoloring -- a much bigger visible
+        # event than the widget-level update_idletasks() storm this file
+        # ALSO mitigates below (_show_theme_switch_overlay et al). CTk
+        # exposes exactly one documented escape hatch for this:
+        # _deactivate_windows_window_header_manipulation. Disabling it
+        # means the native title bar no longer actively tracks the in-app
+        # theme (it follows Windows' own default instead) -- a real,
+        # disclosed trade-off in exchange for eliminating the dominant
+        # cause of the reported flicker.
+        self._deactivate_windows_window_header_manipulation = True
+
         self.db = DatabaseManager()
         self.contact_manager = ContactManager()
         self.message_processor = MessageProcessor()
@@ -293,6 +455,7 @@ class MainWindow(ctk.CTk):
         self.send_thread: Optional[threading.Thread] = None
         self._em_send_thread: Optional[threading.Thread] = None
         self.license_dialog: Optional[ctk.CTkToplevel] = None
+        self._theme_switch_overlay: Optional[tk.Frame] = None
         self.license_locked = False
         self._active_view = "Campaigns"
         self._refresh_job: Optional[str] = None
@@ -597,7 +760,7 @@ class MainWindow(ctk.CTk):
         self._brand_title_label.grid(row=0, column=1, sticky="w")
         self._brand_subtitle_label = ctk.CTkLabel(
             brand_panel, text="Pro  |  Campaign Suite",
-            text_color=T.ACCENT, font=ctk.CTkFont(size=10, weight="bold"))
+            text_color=T.ACCENT_TEXT, font=ctk.CTkFont(size=10, weight="bold"))
         self._brand_subtitle_label.grid(row=1, column=1, sticky="w")
 
         # Collapse/expand toggle — a real, always-visible manual control.
@@ -676,10 +839,14 @@ class MainWindow(ctk.CTk):
         self._update_dot_pulse_after_id = None
 
         self.update_badge_var = ctk.StringVar(value="")
+        # Item 29 (Final Premium Polish Pass): hover_color was T.BG_SURFACE --
+        # the sole T.BADGE_BG-filled interactive element app-wide not using
+        # T.BG_BORDER as its hover companion (already standardized on every
+        # other BADGE_BG button/dropdown in Items 26-27). Normalized to match.
         self.sidebar_update_badge = ctk.CTkButton(
             self._update_badge_row, textvariable=self.update_badge_var,
-            fg_color=T.BADGE_BG, hover_color=T.BG_SURFACE,
-            text_color=T.ACCENT, corner_radius=999, height=26,
+            fg_color=T.BADGE_BG, hover_color=T.BG_BORDER,
+            text_color=T.ACCENT_TEXT, corner_radius=999, height=26,
             font=ctk.CTkFont(size=10, weight="bold"),
             command=self._show_update_dialog,
         )
@@ -853,7 +1020,7 @@ class MainWindow(ctk.CTk):
             corner_radius=16,
             fg_color=T.BADGE_BG,
             hover_color=T.BG_BORDER,
-            text_color=T.ACCENT,
+            text_color=T.ACCENT_TEXT,
             font=ctk.CTkFont(size=14),
             command=lambda: self._show_view("Settings"),
         ).pack(side="left", padx=3)
@@ -865,7 +1032,7 @@ class MainWindow(ctk.CTk):
             corner_radius=999,
             padx=12,
             pady=5,
-            text_color=T.ACCENT,
+            text_color=T.ACCENT_TEXT,
             font=ctk.CTkFont(size=11, weight="bold"),
         )
         self.header_pill.pack(side="left", padx=(12, 0))
@@ -995,7 +1162,7 @@ class MainWindow(ctk.CTk):
             ctk.CTkLabel(
                 feature_badges, text=label, fg_color=T.BADGE_BG,
                 corner_radius=999, padx=10, pady=4,
-                text_color=T.ACCENT, font=ctk.CTkFont(size=11),
+                text_color=T.ACCENT_TEXT, font=ctk.CTkFont(size=11),
             ).grid(row=0, column=index, padx=4, pady=4, sticky="w")
 
         body = ctk.CTkFrame(dialog, fg_color=T.BG_SURFACE, corner_radius=14,
@@ -1044,7 +1211,7 @@ class MainWindow(ctk.CTk):
             ctk.CTkLabel(card, text=title, text_color=T.TEXT_MUTED,
                          font=ctk.CTkFont(size=11)).pack(anchor="w", padx=12, pady=(10, 2))
             ctk.CTkLabel(card, text=value, font=ctk.CTkFont(size=15, weight="bold"),
-                         text_color=T.ACCENT).pack(anchor="w", padx=12, pady=(0, 12))
+                         text_color=T.ACCENT_TEXT).pack(anchor="w", padx=12, pady=(0, 12))
 
         right_panel = ctk.CTkFrame(body, fg_color=T.BG_INNER, corner_radius=12)
         right_panel.grid(row=0, column=1, padx=(8, 16), pady=16, sticky="nsew")
@@ -1070,7 +1237,7 @@ class MainWindow(ctk.CTk):
             text="If you close the app without activating, the workspace remains locked until a valid passkey is entered.",
             wraplength=240,
             justify="left",
-            text_color=T.ACCENT,
+            text_color=T.ACCENT_TEXT,
             font=ctk.CTkFont(size=11),
         ).grid(row=2, column=0, padx=16, pady=(0, 16), sticky="w")
 
@@ -1106,7 +1273,7 @@ class MainWindow(ctk.CTk):
             secure_note,
             text="Secure local activation",
             font=ctk.CTkFont(size=13, weight="bold"),
-            text_color=T.ACCENT,
+            text_color=T.ACCENT_TEXT,
         ).pack(anchor="w", padx=14, pady=(12, 4))
         ctk.CTkLabel(
             secure_note,
@@ -1124,6 +1291,7 @@ class MainWindow(ctk.CTk):
             actions,
             text="Exit App",
             fg_color=T.DANGER, hover_color=T.DANGER_HOVER,
+            text_color=T.TEXT_HEAD,
             corner_radius=8,
             command=self._close_license_dialog_and_exit,
         ).grid(row=0, column=0, padx=(0, 10), sticky="w")
@@ -1131,6 +1299,7 @@ class MainWindow(ctk.CTk):
             actions,
             text="Activate Now",
             fg_color=T.ACCENT, hover_color=T.ACCENT_HOVER,
+            text_color=T.TEXT_HEAD,
             corner_radius=8,
             command=self._submit_license_activation,
         ).grid(row=0, column=1, sticky="e")
@@ -1259,7 +1428,7 @@ class MainWindow(ctk.CTk):
                      text_color=T.TEXT_HEAD).grid(row=0, column=0, sticky="w")
         ctk.CTkButton(list_hdr, text="View all", width=80, height=28,
                       corner_radius=6, fg_color=T.BADGE_BG, hover_color=T.BG_BORDER,
-                      text_color=T.ACCENT, font=ctk.CTkFont(size=11),
+                      text_color=T.ACCENT_TEXT, font=ctk.CTkFont(size=11),
                       command=lambda: self._show_view("History"),
                       ).grid(row=0, column=1, sticky="e")
 
@@ -1369,7 +1538,7 @@ class MainWindow(ctk.CTk):
         for index, variable in enumerate([self.contacts_total_var, self.contacts_visible_var]):
             ctk.CTkLabel(hero_stats, textvariable=variable, fg_color=T.BADGE_BG,
                          corner_radius=999, padx=12, pady=6,
-                         text_color=T.ACCENT, font=ctk.CTkFont(size=11, weight="bold"),
+                         text_color=T.ACCENT_TEXT, font=ctk.CTkFont(size=11, weight="bold"),
                          ).grid(row=0, column=index, padx=6)
 
         toolbar = ctk.CTkFrame(frame, fg_color=T.BG_SURFACE, corner_radius=14,
@@ -1387,8 +1556,8 @@ class MainWindow(ctk.CTk):
                       command=self._export_contacts_csv).grid(
             row=0, column=1, padx=(0, 12), pady=12)
         ctk.CTkButton(toolbar, text="Refresh", corner_radius=8,
-                      fg_color=T.BG_SURFACE, hover_color=T.BG_SURFACE,
-                      text_color=T.TEXT_MUTED,
+                      fg_color=T.BADGE_BG, hover_color=T.BG_BORDER,
+                      text_color=T.TEXT_HEAD,
                       command=self._reload_contacts).grid(
             row=0, column=2, padx=(0, 12), pady=12)
         search_entry = ctk.CTkEntry(
@@ -1435,15 +1604,15 @@ class MainWindow(ctk.CTk):
         ch_meta.grid(row=0, column=1, padx=(0, 16), pady=12, sticky="e")
         self.compose_contacts_chip = ctk.CTkLabel(
             ch_meta, textvariable=self.compose_contacts_var, fg_color=T.BADGE_BG,
-            corner_radius=999, padx=12, pady=5, text_color=T.ACCENT, font=ctk.CTkFont(size=11))
+            corner_radius=999, padx=12, pady=5, text_color=T.ACCENT_TEXT, font=ctk.CTkFont(size=11))
         self.compose_contacts_chip.pack(side="left", padx=4)
         self.compose_delay_chip = ctk.CTkLabel(
             ch_meta, textvariable=self.compose_delay_var, fg_color=T.BADGE_BG,
-            corner_radius=999, padx=12, pady=5, text_color=T.ACCENT, font=ctk.CTkFont(size=11))
+            corner_radius=999, padx=12, pady=5, text_color=T.ACCENT_TEXT, font=ctk.CTkFont(size=11))
         self.compose_delay_chip.pack(side="left", padx=4)
         self.compose_limit_chip = ctk.CTkLabel(
             ch_meta, textvariable=self.compose_limit_var, fg_color=T.BADGE_BG,
-            corner_radius=999, padx=12, pady=5, text_color=T.ACCENT, font=ctk.CTkFont(size=11))
+            corner_radius=999, padx=12, pady=5, text_color=T.ACCENT_TEXT, font=ctk.CTkFont(size=11))
         self.compose_limit_chip.pack(side="left", padx=4)
 
         # ── Row 1a: WhatsApp panel (shown by default) ──────────────────────────
@@ -1463,7 +1632,7 @@ class MainWindow(ctk.CTk):
         self.template_menu = ctk.CTkOptionMenu(
             wa_top, values=["Custom Message"],
             variable=self.template_var, command=self._on_template_selected,
-            fg_color=T.BG_SURFACE, button_color=T.BG_SURFACE,
+            fg_color=T.BG_INNER, button_color=T.BG_INNER,
             button_hover_color=T.BG_BORDER, text_color=T.TEXT_HEAD,
             dropdown_fg_color=T.BG_SURFACE, dropdown_hover_color=T.BG_BORDER,
             dropdown_text_color=T.TEXT_HEAD,
@@ -1547,10 +1716,10 @@ class MainWindow(ctk.CTk):
         preview_chips.grid(row=0, column=0, padx=16, pady=(14, 8), sticky="e")
         ctk.CTkLabel(preview_chips, text="Live render", fg_color=T.BADGE_BG,
                      corner_radius=999, padx=10, pady=4,
-                     text_color=T.ACCENT, font=ctk.CTkFont(size=11)).grid(row=0, column=0, padx=4)
+                     text_color=T.ACCENT_TEXT, font=ctk.CTkFont(size=11)).grid(row=0, column=0, padx=4)
         ctk.CTkLabel(preview_chips, text="First 3 contacts", fg_color=T.BADGE_BG,
                      corner_radius=999, padx=10, pady=4,
-                     text_color=T.ACCENT, font=ctk.CTkFont(size=11)).grid(row=0, column=1, padx=4)
+                     text_color=T.ACCENT_TEXT, font=ctk.CTkFont(size=11)).grid(row=0, column=1, padx=4)
         ctk.CTkLabel(preview_frame, text="Preview for the first 3 selected contacts",
                      text_color=T.TEXT_MUTED, font=ctk.CTkFont(size=11)).grid(
             row=1, column=0, padx=16, pady=(0, 8), sticky="w")
@@ -1566,12 +1735,12 @@ class MainWindow(ctk.CTk):
         self._em_compose_frame.grid_remove()
         self._em_compose_frame.grid_columnconfigure(0, weight=3)
         self._em_compose_frame.grid_columnconfigure(1, weight=2)
-        self._em_compose_frame.grid_rowconfigure(1, weight=1)
+        self._em_compose_frame.grid_rowconfigure(2, weight=1)
 
         # Email left column — compose area
         em_left = ctk.CTkFrame(self._em_compose_frame, fg_color=T.BG_SURFACE, corner_radius=14,
                                border_width=1, border_color=T.BG_BORDER)
-        em_left.grid(row=0, column=0, rowspan=2, sticky="nsew", padx=(0, 8))
+        em_left.grid(row=0, column=0, rowspan=3, sticky="nsew", padx=(0, 8))
         em_left.grid_columnconfigure(0, weight=1)
         em_left.grid_rowconfigure(4, weight=1)
 
@@ -1587,20 +1756,26 @@ class MainWindow(ctk.CTk):
                      font=ctk.CTkFont(size=11)).grid(row=0, column=0, padx=(0, 8), pady=(0, 6), sticky="w")
 
         def _on_em_tpl(val):
-            subj, html = EMAIL_TEMPLATES.get(val, ("", ""))
+            subj, body, is_html = EMAIL_TEMPLATES.get(val, ("", "", False))
             if subj:
                 self._em_subj_var.set(subj)
-            if html and hasattr(self, "_compose_em_body"):
+            if hasattr(self, "_compose_em_body"):
                 self._compose_em_body.delete("1.0", "end")
-                self._compose_em_body.insert("1.0", html)
+                if is_html:
+                    self._load_html_into_email_editor(body)
+                elif body:
+                    self._compose_em_body.insert("1.0", body)
+                self._update_email_warnings()
+                self._refresh_email_preview()
 
-        ctk.CTkOptionMenu(em_fields, values=list(EMAIL_TEMPLATES.keys()),
-                          variable=self._em_tpl_var, command=_on_em_tpl,
-                          fg_color=T.BG_SURFACE, button_color=T.BG_SURFACE,
-                          button_hover_color=T.BG_BORDER, text_color=T.TEXT_HEAD,
-                          dropdown_fg_color=T.BG_SURFACE, dropdown_hover_color=T.BG_BORDER,
-                          dropdown_text_color=T.TEXT_HEAD).grid(
-            row=0, column=1, pady=(0, 6), sticky="ew")
+        self.em_template_menu = ctk.CTkOptionMenu(
+            em_fields, values=list(EMAIL_TEMPLATES.keys()),
+            variable=self._em_tpl_var, command=_on_em_tpl,
+            fg_color=T.BG_INNER, button_color=T.BG_INNER,
+            button_hover_color=T.BG_BORDER, text_color=T.TEXT_HEAD,
+            dropdown_fg_color=T.BG_SURFACE, dropdown_hover_color=T.BG_BORDER,
+            dropdown_text_color=T.TEXT_HEAD)
+        self.em_template_menu.grid(row=0, column=1, pady=(0, 6), sticky="ew")
 
         ctk.CTkLabel(em_fields, text="Subject", text_color=T.TEXT_MUTED,
                      font=ctk.CTkFont(size=11)).grid(row=1, column=0, padx=(0, 8), sticky="w")
@@ -1614,6 +1789,26 @@ class MainWindow(ctk.CTk):
             em_chips, ["Name", "Email", "Amount", "Date"],
             lambda label: self._insert_variable_label(self._compose_em_body, label))
         self.em_insert_variable_menu.grid(row=0, column=0, sticky="w")
+
+        # Item 10 of the Live Testing Findings pass: a real formatting
+        # toolbar for the rich-text (tag-based) editor below, standing in
+        # for the raw <strong>/<em>/<li> tags the editor used to show
+        # literally. Only operates on an actual text selection -- a simple,
+        # scoped toolbar, not a full word processor.
+        fmt_row = ctk.CTkFrame(em_chips, fg_color="transparent")
+        fmt_row.grid(row=0, column=1, padx=(10, 0), sticky="w")
+        ctk.CTkButton(fmt_row, text="B", width=28, height=28, corner_radius=6,
+                      fg_color=T.BADGE_BG, hover_color=T.BG_BORDER, text_color=T.TEXT_HEAD,
+                      font=ctk.CTkFont(size=13, weight="bold"),
+                      command=lambda: self._toggle_email_char_tag("b")).pack(side="left", padx=(0, 4))
+        ctk.CTkButton(fmt_row, text="I", width=28, height=28, corner_radius=6,
+                      fg_color=T.BADGE_BG, hover_color=T.BG_BORDER, text_color=T.TEXT_HEAD,
+                      font=ctk.CTkFont(size=13, weight="bold", slant="italic"),
+                      command=lambda: self._toggle_email_char_tag("i")).pack(side="left", padx=(0, 4))
+        ctk.CTkButton(fmt_row, text="≡ List", width=48, height=28, corner_radius=6,
+                      fg_color=T.BADGE_BG, hover_color=T.BG_BORDER, text_color=T.TEXT_HEAD,
+                      font=ctk.CTkFont(size=11),
+                      command=self._toggle_email_bullet_list).pack(side="left")
 
         em_ai_row = ctk.CTkFrame(em_left, fg_color="transparent")
         em_ai_row.grid(row=3, column=0, padx=16, pady=(0, 8), sticky="ew")
@@ -1632,10 +1827,23 @@ class MainWindow(ctk.CTk):
 
         self._compose_em_body = tk.Text(
             em_left, wrap="word", bg=T.resolve(T.BG_INNER), fg=T.resolve(T.TEXT_HEAD),
-            insertbackground=T.resolve(T.TEXT_HEAD), font=("Courier New", 10),
+            insertbackground=T.resolve(T.TEXT_HEAD), font=("Segoe UI", 11),
             borderwidth=0, highlightthickness=0, relief="flat")
-        self._compose_em_body.insert("1.0",
-            "<p>Dear <strong>{name}</strong>,</p>\n<p>Your message here.</p>")
+        # Item 10 of the Live Testing Findings pass: bold/italic are real Tk
+        # tags (toggled by the toolbar above), not literal text -- this is
+        # what lets the editor show genuine bold/italic instead of visible
+        # <strong>/<em> tags. Known, disclosed simplification: Tk resolves a
+        # font-option conflict between two tags by priority rather than
+        # composing them, so a range with BOTH tags visually renders as
+        # whichever has higher priority (italic wins here, "i" configured
+        # after "b") -- but export to HTML (_email_rich_export_html) reads
+        # the real active-tag set from the widget, not the rendered font, so
+        # a combined bold+italic run still exports correctly as nested
+        # <strong><em> even though the live preview only shows one style.
+        self._compose_em_body.tag_configure("b", font=("Segoe UI", 11, "bold"))
+        self._compose_em_body.tag_configure("i", font=("Segoe UI", 11, "italic"))
+        self._compose_em_body.insert("1.0", "Dear {name},\n\nYour message here.")
+        self._pillify_text_widget(self._compose_em_body)
         self._compose_em_body.grid(row=4, column=0, padx=16, pady=(0, 16), sticky="nsew")
         self._compose_em_body.bind("<KeyRelease>", lambda _e: self._update_email_warnings())
         # _em_subj_var is created once in __init__ and outlives UI rebuilds
@@ -1651,9 +1859,14 @@ class MainWindow(ctk.CTk):
         em_smtp_card.grid(row=0, column=1, sticky="ew", pady=(0, 8))
         em_smtp_card.grid_columnconfigure(0, weight=1)
 
+        # Item 28 (Final Premium Polish Pass): title was size=13/pady=(14,4)
+        # -- every other major T.BG_SURFACE card app-wide, including this
+        # exact card's own WhatsApp-side counterpart ("Preview" in
+        # preview_frame above), uses size=15/pady=(16,...). Normalized so
+        # this card doesn't read as a lesser tier than its siblings.
         ctk.CTkLabel(em_smtp_card, text="SMTP connection",
-                     font=ctk.CTkFont(size=13, weight="bold"),
-                     text_color=T.TEXT_HEAD).grid(row=0, column=0, padx=16, pady=(14, 4), sticky="w")
+                     font=ctk.CTkFont(size=15, weight="bold"),
+                     text_color=T.TEXT_HEAD).grid(row=0, column=0, padx=16, pady=(16, 4), sticky="w")
         self._em_smtp_status_var = StringVar(value="Not configured")
         self._em_smtp_chip = ctk.CTkLabel(
             em_smtp_card, textvariable=self._em_smtp_status_var,
@@ -1661,31 +1874,57 @@ class MainWindow(ctk.CTk):
             # This is literally red text on BADGE_BG -- the Design System's
             # own documented DANGER_ON_BADGE case, not DANGER (3.10:1 fail).
             text_color=T.DANGER_ON_BADGE, font=ctk.CTkFont(size=11))
-        self._em_smtp_chip.grid(row=0, column=1, padx=16, pady=(14, 4), sticky="e")
+        self._em_smtp_chip.grid(row=0, column=1, padx=16, pady=(16, 4), sticky="e")
         self._em_validation_label = ctk.CTkLabel(
             em_smtp_card, text="", text_color=T.DANGER_ON_BADGE,
             font=ctk.CTkFont(size=11), wraplength=240, justify="left")
         self._em_validation_label.grid(row=1, column=0, columnspan=2, padx=16, pady=(0, 4), sticky="w")
         ctk.CTkButton(em_smtp_card, text="Configure in Settings →", height=30, corner_radius=6,
-                      fg_color=T.BADGE_BG, hover_color=T.BG_BORDER, text_color=T.ACCENT,
+                      fg_color=T.BADGE_BG, hover_color=T.BG_BORDER, text_color=T.ACCENT_TEXT,
                       font=ctk.CTkFont(size=11),
                       command=lambda: self._show_view("Settings")).grid(
             row=2, column=0, columnspan=2, padx=16, pady=(0, 14), sticky="w")
 
         em_recip_card = ctk.CTkFrame(self._em_compose_frame, fg_color=T.BG_SURFACE, corner_radius=14,
                                      border_width=1, border_color=T.BG_BORDER)
-        em_recip_card.grid(row=1, column=1, sticky="nsew")
+        em_recip_card.grid(row=1, column=1, sticky="ew", pady=(0, 8))
         em_recip_card.grid_columnconfigure(0, weight=1)
         ctk.CTkLabel(em_recip_card, text="Recipients",
-                     font=ctk.CTkFont(size=13, weight="bold"),
-                     text_color=T.TEXT_HEAD).grid(row=0, column=0, padx=16, pady=(14, 4), sticky="w")
+                     font=ctk.CTkFont(size=15, weight="bold"),
+                     text_color=T.TEXT_HEAD).grid(row=0, column=0, padx=16, pady=(16, 4), sticky="w")
         ctk.CTkLabel(em_recip_card, textvariable=self._em_compose_count_var,
-                     text_color=T.ACCENT, font=ctk.CTkFont(size=13, weight="bold")).grid(
+                     text_color=T.ACCENT_TEXT, font=ctk.CTkFont(size=13, weight="bold")).grid(
             row=1, column=0, padx=16, pady=(0, 4), sticky="w")
         ctk.CTkLabel(em_recip_card,
-                     text="Sends to all contacts with an email address.\nManage contacts in the Contacts tab.",
+                     text="Sends to all contacts with an email address.",
                      text_color=T.TEXT_MUTED, font=ctk.CTkFont(size=11), justify="left").grid(
-            row=2, column=0, padx=16, pady=(0, 14), sticky="w")
+            row=2, column=0, padx=16, pady=(0, 4), sticky="w")
+        # Item 10 of the Live Testing Findings pass: the count used to be a
+        # dead-end number -- clicking through to the actual contact list
+        # (rather than just "manage contacts in the Contacts tab") answers
+        # "which contacts, exactly" without leaving Compose.
+        ctk.CTkButton(em_recip_card, text="View recipient list →", height=26, corner_radius=6,
+                      fg_color="transparent", hover_color=T.BADGE_BG, text_color=T.ACCENT_TEXT,
+                      font=ctk.CTkFont(size=11), anchor="w",
+                      command=self._show_email_recipients_list).grid(
+            row=3, column=0, padx=12, pady=(0, 12), sticky="w")
+
+        em_preview_card = ctk.CTkFrame(self._em_compose_frame, fg_color=T.BG_SURFACE, corner_radius=14,
+                                       border_width=1, border_color=T.BG_BORDER)
+        em_preview_card.grid(row=2, column=1, sticky="nsew")
+        em_preview_card.grid_columnconfigure(0, weight=1)
+        em_preview_card.grid_rowconfigure(1, weight=1)
+        ctk.CTkLabel(em_preview_card, text="Live preview",
+                     font=ctk.CTkFont(size=15, weight="bold"),
+                     text_color=T.TEXT_HEAD).grid(row=0, column=0, padx=16, pady=(16, 6), sticky="w")
+        self._em_preview_text = tk.Text(
+            em_preview_card, wrap="word", bg=T.resolve(T.BG_INNER), fg=T.resolve(T.TEXT_HEAD),
+            font=("Segoe UI", 11), borderwidth=0, highlightthickness=0, relief="flat",
+            state="disabled")
+        self._em_preview_text.tag_configure("b", font=("Segoe UI", 11, "bold"))
+        self._em_preview_text.tag_configure("i", font=("Segoe UI", 11, "italic"))
+        self._em_preview_text.tag_configure("muted", foreground=T.resolve(T.TEXT_MUTED))
+        self._em_preview_text.grid(row=1, column=0, padx=16, pady=(0, 16), sticky="nsew")
 
         def _smtp_changed(*_):
             if not hasattr(self, "_em_smtp_chip"):
@@ -1720,11 +1959,17 @@ class MainWindow(ctk.CTk):
                       corner_radius=8, font=ctk.CTkFont(size=13, weight="bold"),
                       command=self._dispatch_send).grid(
             row=0, column=0, padx=(16, 8), pady=(14, 8))
+        # Item 27 (Final Premium Polish Pass): was fg_color="transparent" on
+        # this T.BG_SURFACE card -- ACCENT text measured 2.16:1 in Dark mode,
+        # a real WCAG fail (well under even the 3:1 UI-component floor), and
+        # hover_color=T.BG_SURFACE was a no-op (identical to the card behind
+        # it). Matches History's own "Duplicate" button fix (Item 12): a real
+        # T.BG_INNER fill gives 3.2:1 (accepted) and makes hover meaningful.
         self._compose_pause_btn = ctk.CTkButton(
             controls, text="Pause / Resume", width=120,
-            fg_color="transparent", hover_color=T.BG_SURFACE,
+            fg_color=T.BG_INNER, hover_color=T.BG_BORDER,
             border_width=1, border_color=T.ACCENT,
-            text_color=T.ACCENT, corner_radius=8,
+            text_color=T.ACCENT_TEXT, corner_radius=8,
             command=self._toggle_pause)
         self._compose_pause_btn.grid(row=0, column=1, padx=8, pady=(14, 8))
         ctk.CTkButton(controls, text="Stop", width=80,
@@ -1773,6 +2018,7 @@ class MainWindow(ctk.CTk):
             self._em_compose_frame.grid()
             self._compose_pause_btn.configure(state="normal")
             self._refresh_compose_email_recipients()
+            self._refresh_email_preview()
 
     def _dispatch_send(self) -> None:
         if self._compose_channel_var.get() == "Email":
@@ -1825,9 +2071,16 @@ class MainWindow(ctk.CTk):
 
         if hasattr(self, "_em_validation_label"):
             self._em_validation_label.configure(text="")
-        html_template = self._get_text_with_tokens(self._compose_em_body) if hasattr(
+        # Item 10 of the Live Testing Findings pass: the editor is now a
+        # rich-text (bold/italic/bullet) surface, not raw HTML text -- its
+        # real content has to be exported into HTML (not read as plain
+        # text) or bold/italic/bullet formatting would silently never reach
+        # the sent email.
+        html_template = self._email_rich_export_html(self._compose_em_body) if hasattr(
             self, "_compose_em_body") else ""
-        if not html_template.strip():
+        plain_template = self._get_text_with_tokens(self._compose_em_body) if hasattr(
+            self, "_compose_em_body") else ""
+        if not plain_template.strip():
             self.progress_status_var.set("⚠ Email body is empty.")
             return
         subject_template = self._em_subj_var.get()
@@ -1838,22 +2091,25 @@ class MainWindow(ctk.CTk):
             return text
 
         recipients = []
+        preview_lines = []
         for contact in contacts:
             vars_map = {
                 "name": contact.name, "email": contact.email,
                 "phone": contact.phone, "sender": self._em_from_name.get(),
             }
             vars_map.update(contact.custom_fields)
-            recipients.append(
-                (contact, sub(subject_template, vars_map), sub(html_template, vars_map)))
-
-        preview_lines = [f"To: {c.name or c.email}\nSubject: {subj}\n{body}"
-                          for c, subj, body in recipients[:3]]
+            subject = sub(subject_template, vars_map)
+            recipients.append((contact, subject, sub(html_template, vars_map)))
+            if len(preview_lines) < 3:
+                preview_lines.append(
+                    f"To: {contact.name or contact.email}\nSubject: {subject}\n"
+                    f"{sub(plain_template, vars_map)}")
 
         from .send_dialogs import show_send_confirmation
         show_send_confirmation(
             self, "email", len(recipients), float(self._em_delay.get() or 5), preview_lines,
-            on_confirm=lambda: self._execute_email_send(recipients))
+            on_confirm=lambda: self._execute_email_send(recipients),
+            subject=recipients[0][1] if recipients else subject_template)
 
     def _execute_email_send(self, recipients: list) -> None:
         """Real send for a specific list of (contact, subject, html_body)
@@ -2083,7 +2339,7 @@ class MainWindow(ctk.CTk):
             row=1, column=0, padx=16, pady=(0, 14), sticky="w")
         ctk.CTkLabel(hero, text="Live Monitoring", fg_color=T.BADGE_BG,
                      corner_radius=999, padx=12, pady=6,
-                     text_color=T.ACCENT, font=ctk.CTkFont(size=11, weight="bold"),
+                     text_color=T.ACCENT_TEXT, font=ctk.CTkFont(size=11, weight="bold"),
                      ).grid(row=0, column=1, rowspan=2, padx=16, pady=14, sticky="e")
 
         stats_strip = ctk.CTkFrame(frame, fg_color=T.BG_SURFACE, corner_radius=14,
@@ -2114,13 +2370,20 @@ class MainWindow(ctk.CTk):
                                   border_width=1, border_color=T.BG_BORDER)
         rate_frame.grid(row=2, column=0, sticky="ew", pady=(0, 12))
         rate_frame.grid_columnconfigure(1, weight=1)
+        # Item 28 (Final Premium Polish Pass): every other major T.BG_SURFACE
+        # card's title app-wide uses size=15 -- this one was the sole size=14
+        # outlier. pady=14 (matching this row's other 3 elements) is
+        # deliberately left as-is: this card is a genuinely different,
+        # single-row layout (title/progress-bar/rate all on one row), not
+        # the title-block layout the size=15/pady=(16,...) convention
+        # otherwise implies, so only the font size needed normalizing.
         ctk.CTkLabel(rate_frame, text="Delivery Rate",
-                     font=ctk.CTkFont(size=14, weight="bold"),
+                     font=ctk.CTkFont(size=15, weight="bold"),
                      text_color=T.TEXT_HEAD).grid(
             row=0, column=0, padx=16, pady=14, sticky="w")
         ctk.CTkLabel(rate_frame, text="Analytics Stream", fg_color=T.BADGE_BG,
                      corner_radius=999, padx=10, pady=5,
-                     text_color=T.ACCENT, font=ctk.CTkFont(size=11),
+                     text_color=T.ACCENT_TEXT, font=ctk.CTkFont(size=11),
                      ).grid(row=0, column=2, padx=(0, 10), pady=14, sticky="e")
         self.delivery_progress = ctk.CTkProgressBar(rate_frame, corner_radius=4)
         self.delivery_progress.grid(row=0, column=1, padx=10, pady=14, sticky="ew")
@@ -2140,36 +2403,38 @@ class MainWindow(ctk.CTk):
         actions.grid_columnconfigure(5, weight=1)
         ctk.CTkLabel(actions, text="Period", text_color=T.TEXT_HEAD).grid(
             row=0, column=0, padx=(0, 8), pady=8)
-        ctk.CTkOptionMenu(
+        self.report_period_menu = ctk.CTkOptionMenu(
             actions,
             values=["today", "week", "month", "all"],
             variable=self.report_period_var,
             command=lambda _value: self._refresh_stats(
                 update_chart=True, update_text_feeds=True, update_dashboard_periods=True),
-            fg_color=T.BG_SURFACE, button_color=T.BG_SURFACE,
+            fg_color=T.BG_INNER, button_color=T.BG_INNER,
             button_hover_color=T.BG_BORDER, text_color=T.TEXT_HEAD,
             dropdown_fg_color=T.BG_SURFACE, dropdown_hover_color=T.BG_BORDER,
             dropdown_text_color=T.TEXT_HEAD,
-        ).grid(row=0, column=1, padx=(0, 12), pady=8)
+        )
+        self.report_period_menu.grid(row=0, column=1, padx=(0, 12), pady=8)
         ctk.CTkLabel(actions, text="Export Format", text_color=T.TEXT_HEAD).grid(
             row=0, column=2, padx=(0, 8), pady=8)
-        ctk.CTkOptionMenu(
+        self.report_format_menu = ctk.CTkOptionMenu(
             actions,
             values=["csv", "pdf"],
             variable=self.report_format_var,
             command=lambda _value: self._update_report_summary(),
-            fg_color=T.BG_SURFACE, button_color=T.BG_SURFACE,
+            fg_color=T.BG_INNER, button_color=T.BG_INNER,
             button_hover_color=T.BG_BORDER, text_color=T.TEXT_HEAD,
             dropdown_fg_color=T.BG_SURFACE, dropdown_hover_color=T.BG_BORDER,
             dropdown_text_color=T.TEXT_HEAD,
-        ).grid(row=0, column=3, padx=(0, 12), pady=8)
+        )
+        self.report_format_menu.grid(row=0, column=3, padx=(0, 12), pady=8)
         ctk.CTkButton(actions, text="Export Report", corner_radius=8,
                       fg_color=T.ACCENT, hover_color=T.ACCENT_HOVER,
                       text_color=T.TEXT_HEAD,
                       command=self._export_report).grid(row=0, column=4, pady=8)
         ctk.CTkLabel(actions, textvariable=self.report_export_status_var,
                      fg_color=T.BADGE_BG, corner_radius=999, padx=12, pady=5,
-                     text_color=T.ACCENT, font=ctk.CTkFont(size=11),
+                     text_color=T.ACCENT_TEXT, font=ctk.CTkFont(size=11),
                      ).grid(row=0, column=5, padx=(12, 0), pady=8, sticky="e")
 
         chart_frame = ctk.CTkFrame(body, fg_color=T.BG_INNER, corner_radius=12,
@@ -2198,15 +2463,18 @@ class MainWindow(ctk.CTk):
 
         hero = ctk.CTkFrame(frame, fg_color=T.BG_SURFACE, corner_radius=14,
                             border_width=1, border_color=T.BG_BORDER)
-        hero.grid(row=0, column=0, sticky="ew", pady=(0, 10))
+        # Item 28 (Final Premium Polish Pass): was pady=(0, 10), the sole
+        # outlier -- every other top-level hero/toolbar card app-wide
+        # (Campaigns home, Contacts, Reports & Analytics) uses (0, 12).
+        hero.grid(row=0, column=0, sticky="ew", pady=(0, 12))
         hero.grid_columnconfigure(0, weight=1)
         ctk.CTkLabel(hero, text="Campaign history",
                      font=ctk.CTkFont(size=15, weight="bold"),
                      text_color=T.TEXT_HEAD).grid(
-            row=0, column=0, padx=18, pady=(14, 4), sticky="w")
+            row=0, column=0, padx=16, pady=(14, 4), sticky="w")
         ctk.CTkLabel(hero, text="Full log of all email campaigns. Use Duplicate to re-use a campaign.",
                      text_color=T.TEXT_MUTED, font=ctk.CTkFont(size=12),
-                     ).grid(row=1, column=0, padx=18, pady=(0, 14), sticky="w")
+                     ).grid(row=1, column=0, padx=16, pady=(0, 14), sticky="w")
         ctk.CTkButton(hero, text="Export CSV", width=100, height=30, corner_radius=6,
                       fg_color=T.ACCENT, hover_color=T.ACCENT_HOVER, text_color=T.TEXT_HEAD,
                       font=ctk.CTkFont(size=11), command=self._export_campaigns_csv,
@@ -2288,9 +2556,23 @@ class MainWindow(ctk.CTk):
                 self._on_channel_switch("Email")
                 self._show_view("Compose")
 
-            ctk.CTkButton(actions, text="Duplicate", width=80, corner_radius=6,
-                          fg_color=T.BADGE_BG, hover_color=T.BG_BORDER,
-                          text_color=T.TEXT_HEAD, command=duplicate).pack(side="left", padx=4)
+            # Item 12 of the Live Testing Findings pass (Round 2): the old
+            # fg_color=T.BADGE_BG fill was measured at only ~1.2:1 contrast
+            # against this row's own T.BG_INNER background (the two tokens
+            # are near-identical shades in both Dark and Light) -- the
+            # button's own rectangular shape was nearly invisible, which is
+            # exactly why it read as plain text rather than a clickable
+            # button. Fixed by matching the outline-button style already
+            # established elsewhere in the app (e.g. Compose's Pause/Resume
+            # button): a real border + accent-colored text, which measures
+            # a real 3.2:1-4.0:1 contrast against T.BG_INNER regardless of
+            # theme, instead of relying on fill-color contrast that doesn't
+            # exist here.
+            ctk.CTkButton(actions, text="↻ Duplicate", width=100, corner_radius=6,
+                          fg_color="transparent", hover_color=T.BG_BORDER,
+                          border_width=1, border_color=T.ACCENT,
+                          text_color=T.ACCENT_TEXT, font=ctk.CTkFont(size=11, weight="bold"),
+                          command=duplicate).pack(side="left", padx=4)
 
     def _export_campaigns_csv(self) -> None:
         import csv
@@ -2341,7 +2623,7 @@ class MainWindow(ctk.CTk):
                  self.settings_guard_chip_var]):
             ctk.CTkLabel(hero_chips, textvariable=variable, fg_color=T.BADGE_BG,
                          corner_radius=999, padx=12, pady=5,
-                         text_color=T.ACCENT, font=ctk.CTkFont(size=11),
+                         text_color=T.ACCENT_TEXT, font=ctk.CTkFont(size=11),
                          ).grid(row=0, column=index, padx=5)
 
         card = ctk.CTkFrame(frame, fg_color=T.BG_SURFACE, corner_radius=14,
@@ -2385,14 +2667,26 @@ class MainWindow(ctk.CTk):
                                                 font=ctk.CTkFont(size=11), wraplength=360, justify="left")
         self.limit_warning_label.grid(row=4, column=0, columnspan=3, padx=16, pady=(0, 12), sticky="w")
 
+        # Item 30 (Final Premium Polish Pass): every CTkSwitch/CTkCheckBox/
+        # CTkRadioButton app-wide previously left CTk's own stock default
+        # theme colors untouched (fg_color/progress_color ['#3B8ED0',
+        # '#1F6AA5'] -- a generic blue), confirmed directly against
+        # ctk.ThemeManager.theme, clashing with this app's own indigo
+        # T.ACCENT (#6366F1) used everywhere else (buttons, active nav,
+        # badges) -- a real "unbranded stock widget" tell. The WhatsApp
+        # panel's own "Select all contacts"/"Consent confirmed" checkboxes
+        # (main_window.py ~1641) already had the right recipe; applied here
+        # and to every other switch/checkbox/radio app-wide to match.
+        _switch_style = dict(fg_color=T.BG_BORDER, progress_color=T.ACCENT,
+                              button_color=T.TEXT_HEAD, button_hover_color=T.TEXT_MUTED)
         jitter_switch = ctk.CTkSwitch(card, text="Random jitter", variable=self.jitter_var,
-                      text_color=T.TEXT_HEAD, command=self._save_settings)
+                      text_color=T.TEXT_HEAD, command=self._save_settings, **_switch_style)
         jitter_switch.grid(row=5, column=0, padx=16, pady=10, sticky="w")
         add_tooltip(jitter_switch, "Adds a small random variation to the delay between "
                                     "messages instead of a perfectly even gap — makes sending "
                                     "look more natural and less like an automated bot.")
         consent_switch = ctk.CTkSwitch(card, text="Consent required", variable=self.consent_required_var,
-                      text_color=T.TEXT_HEAD, command=self._save_settings)
+                      text_color=T.TEXT_HEAD, command=self._save_settings, **_switch_style)
         consent_switch.grid(row=5, column=1, padx=16, pady=10, sticky="w")
         add_tooltip(consent_switch, "When on, you must confirm you have recipients' consent "
                                      "before every send — required in most places for bulk "
@@ -2404,7 +2698,7 @@ class MainWindow(ctk.CTk):
 
         warmup_switch = ctk.CTkSwitch(card, text="Email warm-up mode",
                       variable=self.email_warmup_enabled_var,
-                      text_color=T.TEXT_HEAD, command=_on_warmup_toggle)
+                      text_color=T.TEXT_HEAD, command=_on_warmup_toggle, **_switch_style)
         warmup_switch.grid(row=6, column=0, columnspan=2, padx=16, pady=(10, 0), sticky="w")
         add_tooltip(warmup_switch, "Ramps a new/unproven email account's daily send cap up "
                                     "gradually over the first 14 days instead of allowing your "
@@ -2444,16 +2738,17 @@ class MainWindow(ctk.CTk):
         add_tooltip(theme_lbl, "Dark and Light follow your choice everywhere in the app. "
                                 "System matches your Windows setting automatically. Warm Ivory "
                                 "is a warmer, paper-like light theme as a third option.")
-        ctk.CTkOptionMenu(
+        self.theme_menu = ctk.CTkOptionMenu(
             system_card,
             values=["Dark", "Light", "Warm Ivory", "System"],
             variable=self.theme_var,
             command=self._on_theme_selected,
-            fg_color=T.BG_SURFACE, button_color=T.BG_SURFACE,
+            fg_color=T.BG_INNER, button_color=T.BG_INNER,
             button_hover_color=T.BG_BORDER, text_color=T.TEXT_HEAD,
             dropdown_fg_color=T.BG_SURFACE, dropdown_hover_color=T.BG_BORDER,
             dropdown_text_color=T.TEXT_HEAD,
-        ).grid(row=3, column=0, padx=16, pady=(0, 12), sticky="w")
+        )
+        self.theme_menu.grid(row=3, column=0, padx=16, pady=(0, 12), sticky="w")
 
         session_strip = ctk.CTkFrame(system_card, fg_color=T.BG_INNER, corner_radius=12,
                                      border_width=1, border_color=T.BG_BORDER)
@@ -2514,7 +2809,7 @@ class MainWindow(ctk.CTk):
                          font=ctk.CTkFont(size=11)).pack(anchor="w", padx=12, pady=(10, 2))
             ctk.CTkLabel(tile, text=value,
                          font=ctk.CTkFont(size=14, weight="bold"),
-                         text_color=T.ACCENT).pack(anchor="w", padx=12, pady=(0, 12))
+                         text_color=T.ACCENT_TEXT).pack(anchor="w", padx=12, pady=(0, 12))
 
         license_actions = ctk.CTkFrame(license_card, fg_color="transparent")
         license_actions.grid(row=3, column=0, padx=16, pady=(0, 16), sticky="ew")
@@ -2546,7 +2841,7 @@ class MainWindow(ctk.CTk):
             corner_radius=999,
             padx=12,
             pady=6,
-            text_color=T.ACCENT,
+            text_color=T.ACCENT_TEXT,
             font=ctk.CTkFont(size=11, weight="bold"),
         )
         self.settings_license_chip.grid(row=0, column=2, sticky="e")
@@ -2584,13 +2879,14 @@ class MainWindow(ctk.CTk):
         add_tooltip(provider_lbl, "Pick your email provider to auto-fill the Host and Port "
                                    "below. Choose Custom if you use a different provider or "
                                    "your own mail server.")
-        ctk.CTkOptionMenu(smtp_card, values=list(SMTP_PRESETS.keys()),
-                          variable=self._em_provider, command=_on_preset,
-                          fg_color=T.BG_SURFACE, button_color=T.BG_SURFACE,
-                          button_hover_color=T.BG_BORDER, text_color=T.TEXT_HEAD,
-                          dropdown_fg_color=T.BG_SURFACE, dropdown_hover_color=T.BG_BORDER,
-                          dropdown_text_color=T.TEXT_HEAD).grid(
-            row=2, column=1, padx=(4, 16), pady=6, sticky="ew")
+        self.smtp_provider_menu = ctk.CTkOptionMenu(
+            smtp_card, values=list(SMTP_PRESETS.keys()),
+            variable=self._em_provider, command=_on_preset,
+            fg_color=T.BG_INNER, button_color=T.BG_INNER,
+            button_hover_color=T.BG_BORDER, text_color=T.TEXT_HEAD,
+            dropdown_fg_color=T.BG_SURFACE, dropdown_hover_color=T.BG_BORDER,
+            dropdown_text_color=T.TEXT_HEAD)
+        self.smtp_provider_menu.grid(row=2, column=1, padx=(4, 16), pady=6, sticky="ew")
 
         for i, (lbl, var, secret, tip) in enumerate([
             ("Host",         self._em_host,      False,
@@ -2671,14 +2967,16 @@ class MainWindow(ctk.CTk):
         def _on_provider_change(label: str) -> None:
             self._ai_provider.set(provider_keys_by_label.get(label, "anthropic"))
             _update_ai_key_tooltip()
+            self._ai_billing_note_var.set(ai_service.billing_note(self._ai_provider.get()))
             self._save_settings()
 
-        provider_menu = ctk.CTkOptionMenu(
+        self.ai_provider_menu = ctk.CTkOptionMenu(
             ai_card, values=provider_labels,
             command=_on_provider_change, fg_color=T.BG_INNER, button_color=T.BG_INNER,
             button_hover_color=T.BG_BORDER, text_color=T.TEXT_HEAD,
             dropdown_fg_color=T.BG_SURFACE, dropdown_hover_color=T.BG_BORDER,
             dropdown_text_color=T.TEXT_HEAD)
+        provider_menu = self.ai_provider_menu
         provider_menu.set(ai_service.PROVIDER_LABELS.get(self._ai_provider.get(), provider_labels[0]))
         provider_menu.grid(row=2, column=1, columnspan=2, padx=(4, 16), pady=6, sticky="ew")
 
@@ -2701,6 +2999,33 @@ class MainWindow(ctk.CTk):
             command=_toggle_ai_key_visible)
         self._ai_key_toggle_btn.grid(row=3, column=2, padx=(0, 16), pady=6, sticky="e")
 
+        # Item 15 of the Live Testing Findings pass (Round 2): "premium
+        # onboarding" for the API key field -- a real clickable link to the
+        # correct provider's key-creation page (dynamic on the provider
+        # dropdown above, read at click time so it always matches whatever
+        # is currently selected), a plain-language helper line, and a pay-
+        # as-you-go/billing note, so a correctly-saved key that still fails
+        # isn't confusing.
+        def _open_key_creation_page():
+            webbrowser.open(ai_service.key_creation_url(self._ai_provider.get()))
+
+        get_key_row = ctk.CTkFrame(ai_card, fg_color="transparent")
+        get_key_row.grid(row=4, column=0, columnspan=3, padx=16, pady=(0, 2), sticky="ew")
+        ctk.CTkButton(
+            get_key_row, text="Get an API key →", width=140, height=26, corner_radius=8,
+            fg_color="transparent", hover_color=T.BADGE_BG, text_color=T.ACCENT_TEXT,
+            font=ctk.CTkFont(size=12, weight="bold"), anchor="w",
+            command=_open_key_creation_page).pack(side="left")
+        ctk.CTkLabel(
+            get_key_row,
+            text="Click above to create an account and generate a key, then paste it here.",
+            text_color=T.TEXT_MUTED, font=ctk.CTkFont(size=11)).pack(side="left", padx=(10, 0))
+
+        self._ai_billing_note_var = StringVar(value=ai_service.billing_note(self._ai_provider.get()))
+        ctk.CTkLabel(ai_card, textvariable=self._ai_billing_note_var, text_color=T.TEXT_DIM,
+                     font=ctk.CTkFont(size=11), wraplength=700, justify="left").grid(
+            row=5, column=0, columnspan=3, padx=16, pady=(0, 12), sticky="w")
+
         def _save_ai_key():
             self._save_settings()
             self._ai_key_status_var.set(
@@ -2714,7 +3039,7 @@ class MainWindow(ctk.CTk):
         self._ai_key_entry.bind("<Return>",   lambda _e: _save_ai_key())
 
         ai_actions = ctk.CTkFrame(ai_card, fg_color="transparent")
-        ai_actions.grid(row=4, column=0, columnspan=3, padx=16, pady=(0, 16), sticky="ew")
+        ai_actions.grid(row=6, column=0, columnspan=3, padx=16, pady=(0, 16), sticky="ew")
         ctk.CTkButton(ai_actions, text="Save key", corner_radius=8,
                       fg_color=T.ACCENT, hover_color=T.ACCENT_HOVER, text_color=T.TEXT_HEAD,
                       command=_save_ai_key).pack(side="left", padx=(0, 10))
@@ -3181,6 +3506,25 @@ class MainWindow(ctk.CTk):
     _NAV_ACCENT_HEIGHT = 40
     _NAV_ACCENT_WIDTH = 4
 
+    # Item 13 of the Live Testing Findings pass (Round 2): the nav accent
+    # bar's own reveal (_animate_nav_accent_in) and the content slide
+    # (_animate_view_in) both fire from the same _show_view call, at the
+    # same instant, and are meant to read as one cohesive arrival -- but
+    # they used to run on two different clocks (5 steps/120ms, linear, for
+    # the accent bar vs 4 steps/90ms, ease_out_cubic, for the content),
+    # found via direct code review, not a screenshot: the accent bar was
+    # still visibly growing in for ~30ms after the content had already
+    # finished easing into place, on a different acceleration curve the
+    # whole time they overlapped. Both animations now share the exact same
+    # step/duration constants and easing function so they can't drift apart
+    # again.
+    _VIEW_TRANSITION_STEPS = 4
+    _VIEW_TRANSITION_DURATION_MS = 90
+
+    @staticmethod
+    def _ease_out_cubic(t: float) -> float:
+        return 1 - (1 - t) ** 3
+
     def _draw_nav_accent(self, canvas: tk.Canvas, active: bool, reveal_frac: float = 1.0) -> None:
         """Paint the sidebar nav accent bar. Inactive: flat background (item
         not selected). Active: a top-to-bottom ACCENT->SUCCESS gradient,
@@ -3225,7 +3569,9 @@ class MainWindow(ctk.CTk):
         Same discipline as _animate_view_in: cheap because only this ~4px-wide
         canvas redraws (no sibling relayout), tight step count, and a hard
         wall-clock deadline so a slow machine just finishes slightly early
-        rather than ever blocking."""
+        rather than ever blocking. Shares _VIEW_TRANSITION_STEPS/_DURATION_MS
+        and _ease_out_cubic with _animate_view_in -- see that pair's own
+        comment for the real timing/easing mismatch this closes."""
         if self._nav_accent_anim_after_id is not None:
             try:
                 self.after_cancel(self._nav_accent_anim_after_id)
@@ -3233,8 +3579,8 @@ class MainWindow(ctk.CTk):
                 pass
             self._nav_accent_anim_after_id = None
 
-        steps = 5
-        duration_ms = 120
+        steps = self._VIEW_TRANSITION_STEPS
+        duration_ms = self._VIEW_TRANSITION_DURATION_MS
         start = time.time()
         deadline = start + 0.22
 
@@ -3243,7 +3589,7 @@ class MainWindow(ctk.CTk):
                 self._draw_nav_accent(canvas, active=True, reveal_frac=1.0)
                 self._nav_accent_anim_after_id = None
                 return
-            frac = (i + 1) / steps
+            frac = self._ease_out_cubic((i + 1) / steps)
             self._draw_nav_accent(canvas, active=True, reveal_frac=frac)
             if i + 1 >= steps:
                 self._nav_accent_anim_after_id = None
@@ -3254,15 +3600,23 @@ class MainWindow(ctk.CTk):
 
     def _animate_view_in(self, container: ctk.CTkFrame) -> None:
         """Signature navigation transition: the incoming view slides up into
-        place from a slight vertical offset, eased out, over ~150ms. This is
-        a deliberately scoped-down "own interpretation" of a shatter/3D-flip
-        transition — CustomTkinter/Tk has no per-widget alpha compositing
-        (only whole-Toplevel -alpha), so a true shatter or a cross-fade
-        between two live widget trees isn't achievable without rendering both
-        to images first (fragile, platform-specific, and risks exactly the
-        flicker/glitches this feature is supposed to avoid). The outgoing
-        view is hidden instantly rather than animated out, for the same
-        reason. See CLAUDE.md for the full writeup of this decision.
+        place from a slight vertical offset, eased out, over ~90ms (the
+        docstring here previously said "~150ms" -- stale relative to the
+        actual duration_ms constant below; found and fixed during Item 13's
+        code-level review). This is a deliberately scoped-down "own
+        interpretation" of a shatter/3D-flip transition — CustomTkinter/Tk
+        has no per-widget alpha compositing (only whole-Toplevel -alpha), so
+        a true shatter or a cross-fade between two live widget trees isn't
+        achievable without rendering both to images first (fragile,
+        platform-specific, and risks exactly the flicker/glitches this
+        feature is supposed to avoid). The outgoing view is hidden instantly
+        rather than animated out, for the same reason. See CLAUDE.md for the
+        full writeup of this decision.
+
+        Shares its step count, duration, and easing curve with the sidebar's
+        own _animate_nav_accent_in (both _VIEW_TRANSITION_STEPS/_DURATION_MS
+        and _ease_out_cubic) -- they fire from the same _show_view call, at
+        the same instant, and are meant to read as one arrival, not two.
 
         Position-only (relx/rely), size held fixed at relwidth=relheight=1.0:
         an earlier version also animated relwidth/relheight for a scale
@@ -3289,14 +3643,11 @@ class MainWindow(ctk.CTk):
         self._view_anim_run_id = anim_id
         self._view_anim_container = container
 
-        steps = 4
-        duration_ms = 90
+        steps = self._VIEW_TRANSITION_STEPS
+        duration_ms = self._VIEW_TRANSITION_DURATION_MS
         interval = max(8, duration_ms // steps)
         start_dy = 0.04
         hard_deadline = time.time() + 0.22  # never block longer than this, any hardware
-
-        def ease_out_cubic(t: float) -> float:
-            return 1 - (1 - t) ** 3
 
         container.grid()
         container.update_idletasks()
@@ -3316,7 +3667,7 @@ class MainWindow(ctk.CTk):
                 finalize()
                 return
             t = i / steps
-            eased = ease_out_cubic(t)
+            eased = self._ease_out_cubic(t)
             dy = start_dy * (1 - eased)
             try:
                 container.place(relx=0, rely=dy, relwidth=1.0, relheight=1.0)
@@ -3454,6 +3805,27 @@ class MainWindow(ctk.CTk):
 
     def _apply_theme(self, selected_theme: str) -> None:
         prev_palette = T.get_palette()
+        has_ui = hasattr(self, "view_host")
+        # Item 14 of the Live Testing Findings pass (Round 2): measured
+        # directly (not guessed) before fixing -- CustomTkinter's own
+        # ctk_base_class.py._set_appearance_mode() calls update_idletasks()
+        # once per live CTk widget on every ctk.set_appearance_mode() call.
+        # With ~540+ CTk widgets alive at once (every view is built upfront
+        # for fast navigation, not just the active one), that's ~540+
+        # sequential partial-screen-repaint flushes, measured at
+        # 350-1000ms wall-clock for set_appearance_mode() alone depending
+        # on system load -- real code inside the installed library, not
+        # something in this app that can be patched. That's what actually
+        # produces the reported "flickers through multiple inconsistent
+        # visual states": the visible view repaints color-by-color across
+        # that whole window instead of atomically. Mitigated the same way
+        # the close-button fix hid its own slow teardown (self.withdraw()
+        # first): cover the screen with a solid, already-correct destination
+        # color BEFORE the slow propagation starts, so the many incremental
+        # partial redraws happen unseen behind it, then reveal once done.
+        if has_ui:
+            self._show_theme_switch_overlay(selected_theme)
+
         if selected_theme == "Warm Ivory":
             T.set_palette("warm_ivory")
             ctk.set_appearance_mode("Light")
@@ -3462,7 +3834,7 @@ class MainWindow(ctk.CTk):
             T.set_palette("light" if ctk.get_appearance_mode() == "Light" else "dark")
         new_palette = T.get_palette()
 
-        if not hasattr(self, "view_host"):
+        if not has_ui:
             return  # still inside __init__, before _create_ui() — nothing to refresh yet
 
         # Warm Ivory is a genuine 3rd palette CTk's binary appearance mode can't
@@ -3470,9 +3842,49 @@ class MainWindow(ctk.CTk):
         # rebuild is required entering or leaving it (see theme.py docstring).
         entering_or_leaving_warm = (prev_palette == "warm_ivory") != (new_palette == "warm_ivory")
         if entering_or_leaving_warm:
-            self.after_idle(self._rebuild_ui_for_theme)
+            self.after_idle(self._rebuild_ui_for_theme_and_hide_overlay)
         else:
-            self.after_idle(self._sync_theme_overrides)
+            self.after_idle(self._sync_theme_overrides_and_hide_overlay)
+
+    def _theme_switch_overlay_color(self, selected_theme: str) -> str:
+        """The DESTINATION background color, computed before the actual
+        mode switch happens (T.resolve() only knows the CURRENT mode)."""
+        if selected_theme == "System":
+            try:
+                import darkdetect
+                resolved_mode = "Dark" if darkdetect.theme() == "Dark" else "Light"
+            except Exception:
+                resolved_mode = "Dark"
+            return T.bg_main_for_mode(resolved_mode)
+        return T.bg_main_for_mode(selected_theme)
+
+    def _show_theme_switch_overlay(self, selected_theme: str) -> None:
+        color = self._theme_switch_overlay_color(selected_theme)
+        if self._theme_switch_overlay is None or not self._theme_switch_overlay.winfo_exists():
+            self._theme_switch_overlay = tk.Frame(self, bg=color, highlightthickness=0, bd=0)
+        else:
+            self._theme_switch_overlay.configure(bg=color)
+        self._theme_switch_overlay.place(relx=0, rely=0, relwidth=1, relheight=1)
+        self._theme_switch_overlay.lift()
+        # One deliberate, single flush -- paints the overlay itself and gets
+        # it covering the screen NOW, before the slow ~540-widget
+        # propagation storm begins below it. The opposite of the bug this
+        # fixes: one cheap forced redraw, not hundreds.
+        self._theme_switch_overlay.update_idletasks()
+
+    def _hide_theme_switch_overlay(self) -> None:
+        if self._theme_switch_overlay is not None and self._theme_switch_overlay.winfo_exists():
+            self._theme_switch_overlay.place_forget()
+
+    def _sync_theme_overrides_and_hide_overlay(self) -> None:
+        self._sync_theme_overrides()
+        self._hide_theme_switch_overlay()
+
+    def _rebuild_ui_for_theme_and_hide_overlay(self) -> None:
+        if self._theme_switch_overlay is not None and self._theme_switch_overlay.winfo_exists():
+            self._theme_switch_overlay.lift()
+        self._rebuild_ui_for_theme()
+        self._hide_theme_switch_overlay()
 
     def _rebuild_ui_for_theme(self) -> None:
         """Full sidebar+content rebuild — the only way to apply Warm Ivory
@@ -3770,6 +4182,7 @@ class MainWindow(ctk.CTk):
         self._refresh_preview()
         self._refresh_stats(update_text_feeds=True, update_dashboard_periods=True)
         self._refresh_compose_email_recipients()
+        self._refresh_email_preview()
 
     def _sync_contact_selection(self) -> None:
         valid_keys = set()
@@ -3785,6 +4198,20 @@ class MainWindow(ctk.CTk):
     def _on_header_search(self, *_) -> None:
         query = self._header_search_var.get()
         if self._active_view == "Contacts":
+            # Item 30 (Final Premium Polish Pass): _show_view() calls this on
+            # every single navigation to Contacts, unconditionally -- but
+            # every real data mutation (import, per-row delete, opt-out
+            # toggle) already calls _render_contacts_directory() directly
+            # right after it changes anything (see _reload_contacts,
+            # _delete_contact_row, _toggle_contact_opt_out). So re-rendering
+            # here too, when the query hasn't actually changed since the
+            # directory was last drawn, is pure redundant work -- measured
+            # directly at ~1.0-1.3s for this app's real widget-tree size
+            # (9 real contacts, confirmed via an isolated timing script, not
+            # guessed) for zero visible difference on screen. Skip it.
+            if (query == self.search_var.get()
+                    and getattr(self, "_contacts_directory_rendered", False)):
+                return
             self.search_var.set(query)
             self._schedule_contact_search()
         elif self._active_view == "History":
@@ -3797,6 +4224,7 @@ class MainWindow(ctk.CTk):
 
     def _render_contacts_directory(self) -> None:
         self._search_job = None
+        self._contacts_directory_rendered = True
         for child in self.contacts_directory.winfo_children():
             child.destroy()
 
@@ -3830,7 +4258,7 @@ class MainWindow(ctk.CTk):
             ctk.CTkLabel(
                 notice,
                 text=f"Showing first {display_limit} of {len(results)} matches — refine your search.",
-                text_color=T.ACCENT, font=ctk.CTkFont(size=11),
+                text_color=T.ACCENT_TEXT, font=ctk.CTkFont(size=11),
             ).pack(padx=10, pady=6, anchor="w")
 
         for idx, contact in enumerate(visible):
@@ -3852,7 +4280,7 @@ class MainWindow(ctk.CTk):
                 ctk.CTkLabel(top, text="Active",
                              fg_color=T.BADGE_BG, corner_radius=999,
                              padx=8, pady=3,
-                             text_color=T.ACCENT, font=ctk.CTkFont(size=10, weight="bold"),
+                             text_color=T.ACCENT_TEXT, font=ctk.CTkFont(size=10, weight="bold"),
                              ).pack(anchor="e", side="right")
             ctk.CTkLabel(card, text=contact.phone, text_color=T.TEXT_MUTED,
                          font=ctk.CTkFont(size=12)).pack(anchor="w", padx=16, pady=(0, 3))
@@ -3872,7 +4300,7 @@ class MainWindow(ctk.CTk):
                              text_color=T.DANGER_ON_BADGE, font=ctk.CTkFont(size=10, weight="bold"),
                              ).pack(side="left", padx=(10, 0))
                 ctk.CTkButton(footer, text="Resubscribe", width=90, height=22, corner_radius=6,
-                              fg_color=T.BADGE_BG, hover_color=T.BG_BORDER, text_color=T.ACCENT,
+                              fg_color=T.BADGE_BG, hover_color=T.BG_BORDER, text_color=T.ACCENT_TEXT,
                               font=ctk.CTkFont(size=10),
                               command=lambda c=contact: self._toggle_contact_opt_out(c, False),
                               ).pack(side="right")
@@ -3992,7 +4420,7 @@ class MainWindow(ctk.CTk):
         menu = ctk.CTkOptionMenu(
             parent, values=labels, width=168,
             fg_color=T.BADGE_BG, button_color=T.BADGE_BG, button_hover_color=T.BG_BORDER,
-            text_color=T.ACCENT, font=ctk.CTkFont(size=11),
+            text_color=T.ACCENT_TEXT, font=ctk.CTkFont(size=11),
             dropdown_fg_color=T.BG_SURFACE, dropdown_hover_color=T.BG_BORDER,
             dropdown_text_color=T.TEXT_HEAD,
         )
@@ -4048,7 +4476,7 @@ class MainWindow(ctk.CTk):
         standalone row."""
         pill = ctk.CTkLabel(
             master, text=_label_for_variable_token(token), fg_color=T.BADGE_BG,
-            text_color=T.ACCENT, corner_radius=999, padx=8, pady=0,
+            text_color=T.ACCENT_TEXT, corner_radius=999, padx=8, pady=0,
             font=ctk.CTkFont(size=11, weight="bold"))
         pill.var_token = token
         return pill
@@ -4160,6 +4588,276 @@ class MainWindow(ctk.CTk):
         if spam_hits:
             warnings.append(f"Possible spam words: {', '.join(spam_hits[:3])}")
         self._em_warning_var.set(" · ".join(warnings))
+        self._refresh_email_preview()
+
+    # ── Item 10 of the Live Testing Findings pass: rich-text email editor ──
+
+    def _toggle_email_char_tag(self, tag_name: str) -> None:
+        """Toggles bold ("b") or italic ("i") across the current selection.
+        Pure tag_add/tag_remove -- never touches the underlying text, so any
+        embedded variable pill inside the selection is completely
+        unaffected (unlike a get/delete/insert round trip, which would
+        silently drop it -- see _pillify_text_widget's own docstring for
+        why that failure mode is real in this exact widget). Whether to add
+        or remove is decided by the tag state of just the first character of
+        the selection -- a deliberate, simple approximation consistent with
+        this being a scoped "simple" rich-text editor, not a full word
+        processor."""
+        widget = self._compose_em_body
+        if not widget.tag_ranges("sel"):
+            return
+        already = tag_name in widget.tag_names("sel.first")
+        if already:
+            widget.tag_remove(tag_name, "sel.first", "sel.last")
+        else:
+            widget.tag_add(tag_name, "sel.first", "sel.last")
+        self._update_email_warnings()
+
+    def _line_bullet_prefix_present(self, widget: tk.Text, lineno: int) -> bool:
+        """Whether line `lineno` already starts with a literal "• " marker
+        -- dump-based (not .get()) so a variable pill sitting at the very
+        start of the line is correctly read as "no bullet here" rather than
+        silently mis-detected (.get() omits embedded windows from its
+        returned string entirely)."""
+        text = ""
+        for key, value, _index in widget.dump(f"{lineno}.0", f"{lineno}.0+2c", text=True, window=True):
+            if key == "window":
+                return False
+            if key == "text":
+                text += value
+        return text == "• "
+
+    def _toggle_email_bullet_list(self) -> None:
+        """Toggles a leading "• " on each selected line (or the current
+        line with no selection). Only ever inserts/deletes exactly the 2
+        literal bullet characters at each line's own start index -- never
+        rewrites a line's full content -- so this is safe regardless of
+        what pills/formatting exist elsewhere on the line."""
+        widget = self._compose_em_body
+        if widget.tag_ranges("sel"):
+            first_line = int(str(widget.index("sel.first")).split(".")[0])
+            last_line = int(str(widget.index("sel.last")).split(".")[0])
+        else:
+            first_line = last_line = int(str(widget.index("insert")).split(".")[0])
+        lines = list(range(first_line, last_line + 1))
+        non_empty = [ln for ln in lines
+                     if widget.compare(f"{ln}.end", ">", f"{ln}.0")] or lines
+        all_bulleted = all(self._line_bullet_prefix_present(widget, ln) for ln in non_empty)
+        for ln in non_empty:
+            has_bullet = self._line_bullet_prefix_present(widget, ln)
+            if all_bulleted and has_bullet:
+                widget.delete(f"{ln}.0", f"{ln}.0+2c")
+            elif not all_bulleted and not has_bullet:
+                widget.insert(f"{ln}.0", "• ")
+        self._update_email_warnings()
+
+    def _email_rich_runs(self, widget: tk.Text) -> list:
+        """Walks the email body's real Tk buffer (dump-based, the same
+        pill-safe technique _get_text_with_tokens/_pillify_text_widget
+        already use) into an ordered list of
+        ("text"|"pill", value, frozenset({"b","i"})) runs -- the shared
+        foundation for both HTML export and the live preview panel."""
+        active: set = set()
+        runs = []
+        buf = ""
+        buf_tags: frozenset = frozenset()
+
+        def flush():
+            nonlocal buf
+            if buf:
+                runs.append(("text", buf, buf_tags))
+                buf = ""
+
+        for key, value, _index in widget.dump("1.0", "end", text=True, tag=True, window=True):
+            if key == "tagon" and value in ("b", "i"):
+                flush()
+                active.add(value)
+                buf_tags = frozenset(active)
+            elif key == "tagoff" and value in ("b", "i"):
+                flush()
+                active.discard(value)
+                buf_tags = frozenset(active)
+            elif key == "text":
+                buf += value
+            elif key == "window" and value:
+                flush()
+                widget_obj = widget.nametowidget(value)
+                runs.append(("pill", getattr(widget_obj, "var_token", ""), frozenset(active)))
+        flush()
+        return runs
+
+    @staticmethod
+    def _email_rich_lines(runs: list) -> list:
+        """Splits a flat run list at "\\n" boundaries into per-line run
+        lists, keeping each run's own tag set intact across the split."""
+        lines: list = [[]]
+        for kind, value, tags in runs:
+            if kind == "pill":
+                lines[-1].append(("pill", value, tags))
+                continue
+            parts = value.split("\n")
+            for i, part in enumerate(parts):
+                if part:
+                    lines[-1].append(("text", part, tags))
+                if i != len(parts) - 1:
+                    lines.append([])
+        return lines
+
+    def _email_rich_export_html(self, widget: tk.Text) -> str:
+        """Converts the rich-text editor's real content (bold/italic tags,
+        bullet-prefixed lines, embedded variable pills) into an HTML string
+        -- the canonical way to read the email body for sending/saving now
+        that Item 10 replaced the raw-HTML-visible editor with genuine
+        WYSIWYG-lite editing. {token} placeholders are reconstructed from
+        pills exactly like _get_text_with_tokens already does for the plain-
+        text case."""
+        def esc(text: str) -> str:
+            return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+        def run_html(kind: str, value: str, tags) -> str:
+            # A pill's stored var_token is already the full "{name}"-style
+            # braced string (see _make_variable_pill/_pillify_text_widget),
+            # so it must be used as-is here -- wrapping it in another pair
+            # of braces would produce a literal "{{name}}".
+            text = value if kind == "pill" else esc(value)
+            if "b" in tags:
+                text = f"<strong>{text}</strong>"
+            if "i" in tags:
+                text = f"<em>{text}</em>"
+            return text
+
+        lines = self._email_rich_lines(self._email_rich_runs(widget))
+        groups: list = []
+        current_kind = None
+        current_lines: list = []
+
+        def flush_group():
+            nonlocal current_kind, current_lines
+            if current_lines:
+                groups.append((current_kind, current_lines))
+            current_kind, current_lines = None, []
+
+        for line_runs in lines:
+            # Same "var_token is already braced" note as run_html above.
+            plain = "".join(v for _k, v, _t in line_runs)
+            if plain.strip() == "":
+                flush_group()
+                continue
+            is_bullet = plain.startswith("• ")
+            if is_bullet:
+                runs_copy = list(line_runs)
+                for i, (k, v, t) in enumerate(runs_copy):
+                    if k == "text":
+                        v = v[2:] if v.startswith("• ") else v.lstrip("•").lstrip()
+                        runs_copy[i] = (k, v, t)
+                        break
+                line_html = "".join(run_html(k, v, t) for k, v, t in runs_copy)
+                kind = "ul"
+            else:
+                line_html = "".join(run_html(k, v, t) for k, v, t in line_runs)
+                kind = "p"
+            if current_kind is not None and current_kind != kind:
+                flush_group()
+            current_kind = kind
+            current_lines.append(line_html)
+        flush_group()
+
+        parts = []
+        for kind, line_list in groups:
+            if kind == "ul":
+                items = "".join(f"<li>{line}</li>" for line in line_list)
+                parts.append(f"<ul>{items}</ul>")
+            else:
+                parts.append(f"<p>{'<br>'.join(line_list)}</p>")
+        return "\n".join(parts) if parts else "<p></p>"
+
+    def _load_html_into_email_editor(self, html: str) -> None:
+        """Loads a legacy EMAIL_TEMPLATES HTML string into the rich-text
+        editor via _HTMLToRichText -- see that class's own docstring for the
+        disclosed visual-fidelity trade-off (gradients/colors/CTA buttons
+        can't survive; bold/italic/paragraph/bullet/link-URL structure
+        does)."""
+        parser = _HTMLToRichText(self._compose_em_body)
+        parser.feed(html)
+        parser.close()
+
+    def _refresh_email_preview(self) -> None:
+        """Email's equivalent of WhatsApp's own live preview panel (Item 10
+        of the Live Testing Findings pass) -- substitutes real data from the
+        first eligible contact into the actual rich-text content (bold/
+        italic/bullets mirrored via the same "b"/"i" tags, not flattened to
+        plain text) so what's shown is genuinely how the message will look,
+        not just its raw template text."""
+        if not hasattr(self, "_em_preview_text"):
+            return
+        preview = self._em_preview_text
+        preview.configure(state="normal")
+        preview.delete("1.0", "end")
+        contacts = [c for c in self.contacts if c.email and not c.opted_out]
+        if not contacts:
+            preview.insert("1.0", "Import a contact with an email address to preview "
+                           "personalized output.", ("muted",))
+            preview.configure(state="disabled")
+            return
+        contact = contacts[0]
+        vars_map = {
+            "name": contact.name, "email": contact.email,
+            "phone": contact.phone, "sender": self._em_from_name.get(),
+        }
+        vars_map.update(contact.custom_fields)
+
+        def sub(text: str) -> str:
+            for key, value in vars_map.items():
+                text = text.replace(f"{{{key}}}", str(value))
+            return text
+
+        subject = sub(self._em_subj_var.get())
+        preview.insert("end", f"To: {contact.name or contact.email}\n", ("muted",))
+        preview.insert("end", f"Subject: {subject}\n\n", ("muted",))
+        for _kind, value, tags in self._email_rich_runs(self._compose_em_body):
+            # value is already the braced "{name}"-style token for a pill
+            # run (var_token), so sub() alone (no re-wrapping) is correct
+            # for both pill and plain-text runs.
+            preview.insert("end", sub(value), tuple(tags))
+        preview.configure(state="disabled")
+
+    def _show_email_recipients_list(self) -> None:
+        """Item 10 of the Live Testing Findings pass: makes the "Recipients"
+        count clickable/expandable, listing exactly which contacts are
+        included instead of leaving the user to guess from a bare number."""
+        contacts = [c for c in self.contacts if c.email and not c.opted_out]
+        dlg = ctk.CTkToplevel(self)
+        dlg.title("Email Recipients")
+        center_on_parent(dlg, 420, 480, self)
+        dlg.transient(self)
+        dlg.grab_set()
+        dlg.configure(fg_color=T.BG_MAIN)
+        dlg.bind("<Escape>", lambda _e: dlg.destroy())
+        dlg.grid_columnconfigure(0, weight=1)
+        dlg.grid_rowconfigure(1, weight=1)
+
+        ctk.CTkLabel(dlg, text=f"{len(contacts)} recipient{'s' if len(contacts) != 1 else ''}",
+                     font=ctk.CTkFont(size=16, weight="bold"), text_color=T.TEXT_HEAD).grid(
+            row=0, column=0, padx=20, pady=(20, 10), sticky="w")
+
+        listing = ctk.CTkScrollableFrame(dlg, fg_color=T.BG_INNER, corner_radius=10)
+        listing.grid(row=1, column=0, padx=20, pady=(0, 12), sticky="nsew")
+        listing.grid_columnconfigure(0, weight=1)
+        if not contacts:
+            ctk.CTkLabel(listing, text="No contacts with an email address yet.",
+                         text_color=T.TEXT_MUTED, font=ctk.CTkFont(size=12)).grid(
+                row=0, column=0, padx=12, pady=12, sticky="w")
+        for i, contact in enumerate(contacts):
+            row = ctk.CTkFrame(listing, fg_color="transparent")
+            row.grid(row=i, column=0, sticky="ew", padx=8, pady=4)
+            ctk.CTkLabel(row, text=contact.name or "(no name)", text_color=T.TEXT_HEAD,
+                         font=ctk.CTkFont(size=12, weight="bold")).pack(anchor="w")
+            ctk.CTkLabel(row, text=contact.email, text_color=T.TEXT_MUTED,
+                         font=ctk.CTkFont(size=11)).pack(anchor="w")
+
+        ctk.CTkButton(dlg, text="Close", fg_color=T.ACCENT, hover_color=T.ACCENT_HOVER,
+                      text_color=T.TEXT_HEAD, command=dlg.destroy).grid(
+            row=2, column=0, padx=20, pady=(0, 20))
 
     def _open_ai_compose(self, channel: str) -> None:
         from .ai_compose_dialog import show_ai_compose_dialog
@@ -4179,8 +4877,15 @@ class MainWindow(ctk.CTk):
         show_ai_compose_dialog(self, channel, on_pick)
 
     def _open_save_template(self, channel: str) -> None:
-        text = (self._get_text_with_tokens(self.message_textbox).strip() if channel == "whatsapp"
-                else self._get_text_with_tokens(self._compose_em_body).strip())
+        if channel == "whatsapp":
+            text = self._get_text_with_tokens(self.message_textbox).strip()
+        else:
+            # Preserve any bold/italic/bullet formatting via the rich-text
+            # HTML exporter (Item 10 of the Live Testing Findings pass) --
+            # a plain-text read would silently drop it from the saved
+            # template.
+            plain = self._get_text_with_tokens(self._compose_em_body).strip()
+            text = self._email_rich_export_html(self._compose_em_body) if plain else ""
         if not text:
             messagebox.showwarning("Nothing to save", "Write a message first.")
             return
@@ -4441,7 +5146,7 @@ class MainWindow(ctk.CTk):
         banner.grid(row=0, column=0, padx=20, pady=(0, 16), sticky="ew")
         banner.grid_columnconfigure(0, weight=1)
         ctk.CTkLabel(banner, text="Finish setup to send email or WhatsApp campaigns →",
-                     text_color=T.ACCENT, font=ctk.CTkFont(size=12, weight="bold")).grid(
+                     text_color=T.ACCENT_TEXT, font=ctk.CTkFont(size=12, weight="bold")).grid(
             row=0, column=0, padx=14, pady=10, sticky="w")
         ctk.CTkButton(banner, text="Resume setup", width=110, height=28, corner_radius=6,
                       fg_color=T.ACCENT, hover_color=T.ACCENT_HOVER, text_color=T.TEXT_HEAD,

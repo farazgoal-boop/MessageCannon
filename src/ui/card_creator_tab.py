@@ -5,6 +5,7 @@ bulk send via WhatsApp + Email, and read/unread tracking.
 """
 
 import base64
+import io
 import logging
 import mimetypes
 import html as html_module
@@ -20,6 +21,8 @@ import time
 from pathlib import Path
 from datetime import datetime, date
 from typing import Dict, List, Optional
+
+from PIL import Image, ImageTk
 
 from ..core import ai_service
 from ..core.ai_service import AIServiceError
@@ -39,6 +42,12 @@ except ImportError:
     HAS_HTML_PREVIEW = False
     logger.warning("tkinterweb not installed — card preview falls back to browser only")
 
+try:
+    from tkinterdnd2 import DND_FILES
+    HAS_DND = True
+except ImportError:
+    HAS_DND = False
+
 
 # ── Section types available in card builder ───────────────────────────────────
 SECTION_TYPES = [
@@ -51,6 +60,13 @@ SECTION_TYPES = [
     ("🔗 Links Row",       "links"),
     ("📞 Contact Footer",  "contact"),
 ]
+
+# Item 22 of the Live Testing Findings pass (Round 2): the canonical,
+# sensible ordering new sections get auto-inserted into -- the same order
+# SECTION_TYPES/_load_preset's own defaults already use (header first,
+# footer last), so "Add Section" no longer requires manual reordering to
+# get something coherent.
+_SECTION_ORDER = [stype for _label, stype in SECTION_TYPES]
 
 APP_PRESETS = {
     "MessageCannon Pro": {
@@ -139,6 +155,17 @@ def safe_text(value: str) -> str:
     return html_module.escape(str(value), quote=False)
 
 
+def _hex_or_fallback(value: Optional[str], fallback: str) -> str:
+    """Returns `value` if it's a clean "#rrggbb" hex string, else `fallback`.
+    Used only by the Item 11.3 template thumbnail gallery's tk.Canvas
+    swatches, which can't render a CSS gradient/`url(...)` background
+    (Gradient Bold, or a custom uploaded image) -- the real exported card
+    is unaffected, this only governs a lightweight gallery-picker preview."""
+    if isinstance(value, str) and re.fullmatch(r"#[0-9a-fA-F]{6}", value.strip()):
+        return value.strip()
+    return fallback
+
+
 def _clean_url(url: str) -> str:
     """Strip whitespace and stray surrounding quotes from pasted URLs."""
     return str(url).strip().strip('"').strip("'").strip()
@@ -200,6 +227,58 @@ def image_file_to_data_uri(path: str) -> str:
     return f"data:{mime_type};base64,{encoded}"
 
 
+def decode_data_uri_to_image(data_uri: str) -> Image.Image:
+    """Decodes a base64 data: URI back into a PIL Image -- the inverse of
+    image_file_to_data_uri, needed for the Item 11.1 live icon preview
+    thumbnail and crop dialog."""
+    _header, b64data = data_uri.split(",", 1)
+    raw = base64.b64decode(b64data)
+    return Image.open(io.BytesIO(raw)).convert("RGBA")
+
+
+def crop_and_encode_image(source_img: Image.Image, crop_box: tuple, max_size: int = 256) -> str:
+    """Crops `source_img` to `crop_box` (left, top, right, bottom) in the
+    image's own real pixel coordinates, downsizes to at most `max_size` on
+    a side, and returns a base64 PNG data: URI. Deliberately pure/Tk-free
+    (no canvas or dialog state) so the actual crop math is directly unit-
+    testable without simulating a mouse drag -- mouse-click automation is
+    already documented elsewhere in this project as unreliable in this
+    sandbox (see CLAUDE.md's Setup Wizard verification notes)."""
+    cropped = source_img.crop(crop_box)
+    cropped.thumbnail((max_size, max_size))
+    buf = io.BytesIO()
+    cropped.save(buf, format="PNG")
+    encoded = base64.b64encode(buf.getvalue()).decode("ascii")
+    return f"data:image/png;base64,{encoded}"
+
+
+def _parse_currency_value(text: str) -> Optional[float]:
+    """Extracts the first numeric amount from a loosely-formatted price
+    string (e.g. "$89", "Rs. 1,299.00", "$29/mo") -- returns None if no
+    number is found, rather than raising, since these are free-text fields
+    not a strict currency input."""
+    match = re.search(r"[\d,]+\.?\d*", text or "")
+    if not match:
+        return None
+    try:
+        return float(match.group(0).replace(",", ""))
+    except ValueError:
+        return None
+
+
+def compute_discount_percent(price: str, old_price: str) -> Optional[int]:
+    """Item 11.4 of the Live Testing Findings pass (Round 2): auto-calculated
+    discount % from the Sale Price / Original Price fields. Returns None
+    (no badge shown) whenever either field doesn't parse to a real number,
+    or the "sale" price isn't actually lower than the original -- a
+    discount badge should never show something misleading."""
+    new_val = _parse_currency_value(price)
+    old_val = _parse_currency_value(old_price)
+    if new_val is None or old_val is None or old_val <= 0 or new_val >= old_val:
+        return None
+    return round((1 - new_val / old_val) * 100)
+
+
 def _contact_key(contact: Contact) -> str:
     """Stable per-contact identifier used to line up AI-personalized messages."""
     return (contact.phone or contact.email or "").strip()
@@ -250,6 +329,10 @@ def generate_html(sections: list, meta: dict, for_preview: bool = False) -> str:
     accent   = meta.get("accent", "#6c63ff")
     app_name = safe_text(meta.get("app_name", "My App"))
     icon     = meta.get("icon", "⭐")
+    # Item 11.1 of the Live Testing Findings pass (Round 2): a real
+    # drag-and-drop-uploaded logo image takes priority over the plain
+    # emoji fallback when present.
+    icon_image = meta.get("icon_image", "")
     tagline  = safe_text(meta.get("tagline", ""))
     org      = safe_text(meta.get("org", ""))
     wa       = safe_text(meta.get("wa", ""))
@@ -279,14 +362,24 @@ def generate_html(sections: list, meta: dict, for_preview: bool = False) -> str:
             # identity, not per-section content.
             org_line = (f'<div style="font-size:10px;color:rgba(255,255,255,0.4)">'
                         f'{org}</div>') if org else ""
+            if icon_image:
+                icon_html = (
+                    f'<div style="width:44px;height:44px;border-radius:12px;overflow:hidden;flex-shrink:0">'
+                    f'<img src="{safe_attr(icon_image)}" '
+                    f'style="width:100%;height:100%;object-fit:cover;display:block"></div>'
+                )
+            else:
+                icon_html = (
+                    f'<div style="width:44px;height:44px;background:{accent};border-radius:12px;'
+                    f'display:flex;align-items:center;justify-content:center;font-size:22px">{icon}</div>'
+                )
             body_parts.append(f"""
     <div style="background:{header_bg};padding:20px 24px 0">
       <div style="height:3px;background:linear-gradient(90deg,{accent},{accent}88,{accent});
         margin:-20px -24px 20px;border-radius:20px 20px 0 0"></div>
       <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px">
         <div style="display:flex;align-items:center;gap:12px">
-          <div style="width:44px;height:44px;background:{accent};border-radius:12px;
-            display:flex;align-items:center;justify-content:center;font-size:22px">{icon}</div>
+          {icon_html}
           <div>
             <div style="font-size:17px;font-weight:500;color:#fff">{app_name}</div>
             {org_line}
@@ -363,14 +456,37 @@ def generate_html(sections: list, meta: dict, for_preview: bool = False) -> str:
             price     = safe_text(data.get("price",""))
             old_price = safe_text(data.get("old_price",""))
             note      = safe_text(data.get("note",""))
+            # Item 11.5 of the Live Testing Findings pass (Round 2): the
+            # purchase button's text/URL now live directly on the Price
+            # section itself -- the "most important" part of the item's own
+            # ask, since it removes the disconnect where the actual buy
+            # button only worked if the user separately filled a "buy" link
+            # in an unrelated Links section. Missing button_text/buy_url
+            # keys (e.g. a hand-built `data` dict from before this section
+            # had these fields) fall back to the pre-existing "BUY NOW" +
+            # the meta-level buy_url (still resolved from the Links section
+            # for backward compatibility) -- not a behavior change for any
+            # existing caller that never used the new fields.
+            button_label = safe_text((data.get("button_text") or "").strip() or "BUY NOW")
+            section_url = _clean_url(data.get("buy_url", ""))
+            effective_url = safe_attr(section_url) if section_url else buy_url
+            # Item 11.4: a real, auto-calculated discount badge -- computed
+            # by the caller (_collect_sections) via compute_discount_percent
+            # and passed through as plain data, same as every other
+            # pre-computed field this function already just renders.
+            discount_pct = data.get("discount_percent")
             if price:
                 old_html = f'<span style="font-size:12px;text-decoration:line-through;color:rgba(255,255,255,0.35);margin-left:8px">{old_price}</span>' if old_price else ""
+                discount_html = (
+                    f'<span style="font-size:11px;font-weight:700;color:#fff;background:{accent};'
+                    f'padding:2px 9px;border-radius:10px;margin-left:8px">{discount_pct}% OFF</span>'
+                ) if discount_pct else ""
                 note_html = f'<div style="font-size:11px;color:rgba(255,255,255,0.45);margin-top:3px">{note}</div>' if note else ""
                 buy_btn = (
-                    f'<a href="{buy_url}" target="_blank" '
+                    f'<a href="{effective_url}" target="_blank" '
                     f'style="background:{accent};color:#fff;font-size:12px;font-weight:500;'
                     f'padding:9px 20px;border-radius:20px;cursor:pointer;text-decoration:none;'
-                    f'display:inline-block">BUY NOW →</a>'
+                    f'display:inline-block">{button_label} →</a>'
                 )
                 body_parts.append(f"""
     <div style="margin:8px 24px;background:rgba(255,255,255,0.06);
@@ -379,7 +495,7 @@ def generate_html(sections: list, meta: dict, for_preview: bool = False) -> str:
       <div>
         <div style="display:flex;align-items:baseline">
           <span style="font-size:28px;font-weight:500;color:{accent}">{price}</span>
-          {old_html}
+          {old_html}{discount_html}
         </div>
         {note_html}
       </div>
@@ -447,6 +563,20 @@ def generate_html(sections: list, meta: dict, for_preview: bool = False) -> str:
   body{{background:{body_bg};font-family:Arial,Helvetica,sans-serif;
     min-height:100vh;display:flex;align-items:flex-start;
     justify-content:center;padding:20px}}
+  /* Item 19 of the Live Testing Findings pass (Round 2): the in-app Live
+     Card Preview panel showed significant blank space to the RIGHT of the
+     card, not centered padding on both sides -- confirmed the root cause
+     as the embedded preview renderer (tkinterweb.HtmlFrame, a lightweight
+     pure-Python HTML/CSS engine, not a full browser engine) not honoring
+     the body's `display:flex; justify-content:center` centering, so the
+     unstyled outer <div> below just rendered as a normal left-aligned
+     block at its natural width inside a wider viewport. .page below adds
+     classic box-model centering (max-width + margin:0 auto) as a fallback
+     that works regardless of flexbox support -- real browsers (Open in
+     Browser / the saved .html export) already center via the flex rule
+     above, so this is a redundant-but-harmless second centering mechanism
+     there, and the actual fix for the in-app preview specifically. */
+  .page{{max-width:560px;margin:0 auto}}
   .card{{width:100%;max-width:520px;background:{card_bg};
     border-radius:20px;overflow:hidden;
     border:0.5px solid rgba(255,255,255,0.08);
@@ -456,7 +586,7 @@ def generate_html(sections: list, meta: dict, for_preview: bool = False) -> str:
 </style>
 </head>
 <body>
-<div>
+<div class="page">
   <div class="card">
 {body_html}
   </div>
@@ -506,6 +636,16 @@ class CardCreatorV2(ctk.CTkFrame):
         self._mwa    = ctk.StringVar(value="")
         self._memail = ctk.StringVar(value="")
         self._maddr  = ctk.StringVar(value="")
+        # Item 17 of the Live Testing Findings pass (Round 2): tracks
+        # whether the card has any content a preset switch would silently
+        # discard. Set True by _schedule_preview (called by essentially
+        # every content-changing action already -- text/price/link/banner
+        # edits, section add/remove/reorder, AI generation, accent/style
+        # picks), then reset to False at the end of _load_preset itself
+        # (undoing whatever got marked dirty by ITS OWN internal section-
+        # building calls) -- so only genuine edits made *after* a preset
+        # finishes loading count as "unsaved," not the load's own setup.
+        self._card_dirty = False
         self._build_ui()
         # Load default sections
         self._load_preset("MessageCannon Pro")
@@ -533,13 +673,32 @@ class CardCreatorV2(ctk.CTkFrame):
         left = ctk.CTkFrame(parent, fg_color="transparent")
         left.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
         left.grid_columnconfigure(0, weight=1)
-        left.grid_rowconfigure(1, weight=1)
+        # Item 18 of the Live Testing Findings pass (Round 2): "top" (the
+        # Card Identity panel) previously had no row weight at all -- it
+        # just grew to its full natural height regardless of available
+        # space, which was fine when it was small. Item 11 added enough
+        # content to it (the logo drop zone, larger accent swatches, the
+        # template thumbnail gallery, custom-background controls, contact
+        # info fields) that its natural height now commonly exceeds the
+        # visible window, with no scrollbar anywhere to reach the overflow
+        # -- confirmed as the real cause, not guessed, by reading exactly
+        # which grid row/weight config governed it. Both rows below now get
+        # a real, bounded share of the available height and scroll their
+        # own content independently. Deliberately NOT one merged outer
+        # scroll region wrapping the sections list too -- that already has
+        # its own working scrollable frame (_sections_scroll), and nesting
+        # one scroll region inside another is an already-documented
+        # anti-pattern in this codebase (see the Campaigns-home "Recent
+        # Campaigns" fix elsewhere in CLAUDE.md).
+        left.grid_rowconfigure(0, weight=3)
+        left.grid_rowconfigure(1, weight=2)
 
         # ── Top: app selector + meta ──────────────────────────────────────────
-        top = ctk.CTkFrame(left, fg_color=T.BG_SURFACE, corner_radius=14,
+        top = ctk.CTkScrollableFrame(left, fg_color=T.BG_SURFACE, corner_radius=14,
                             border_width=1, border_color=T.BG_BORDER)
-        top.grid(row=0, column=0, sticky="ew", pady=(0, 8))
+        top.grid(row=0, column=0, sticky="nsew", pady=(0, 8))
         top.grid_columnconfigure(0, weight=1)
+        self._card_identity_panel = top
 
         ctk.CTkLabel(top, text="🎯  Card Identity",
                      font=ctk.CTkFont(size=14, weight="bold"),
@@ -555,7 +714,7 @@ class CardCreatorV2(ctk.CTkFrame):
         ai_header = ctk.CTkFrame(ai_row, fg_color="transparent")
         ai_header.grid(row=0, column=0, padx=12, pady=(12, 4), sticky="w")
         ctk.CTkLabel(ai_header, text="✨ AI-POWERED", fg_color=T.BADGE_BG,
-                     corner_radius=999, text_color=T.ACCENT,
+                     corner_radius=999, text_color=T.ACCENT_TEXT,
                      font=ctk.CTkFont(size=10, weight="bold"),
                      padx=10, pady=3).pack(side="left")
         ctk.CTkLabel(ai_header, text="  Describe your product — AI drafts the whole card",
@@ -591,7 +750,7 @@ class CardCreatorV2(ctk.CTkFrame):
                               font=ctk.CTkFont(size=11),
                               fg_color=T.BADGE_BG, hover_color=T.BG_BORDER,
                               text_color=T.TEXT_HEAD,
-                              command=lambda n=name: self._load_preset(n))
+                              command=lambda n=name: self._confirm_and_load_preset(n))
             b.grid(row=i//3, column=i%3, padx=3, pady=3, sticky="ew")
             bf.grid_columnconfigure(i%3, weight=1)
             self._app_btns[name] = b
@@ -615,59 +774,99 @@ class CardCreatorV2(ctk.CTkFrame):
         self._mname = ctk.StringVar(value="MessageCannon Pro")
         self._micon = ctk.StringVar(value="📨")
         self._mtag  = ctk.StringVar(value="Bulk Messaging Tool")
+        # Item 11.1 of the Live Testing Findings pass (Round 2): a real
+        # drag-and-drop logo upload, replacing the plain emoji text field as
+        # the primary path -- self._micon_image_uri holds the uploaded/
+        # cropped logo as a data: URI; self._micon (the emoji) remains the
+        # fallback actually rendered in the exported card whenever no logo
+        # has been uploaded (see generate_html's icon_image handling).
+        self._micon_image_uri: Optional[str] = None
 
         for i,(lbl,var,ph) in enumerate([
             ("App Name", self._mname, "My App"),
-            ("Icon",     self._micon, "⭐"),
             ("Tagline",  self._mtag,  "Short tagline"),
         ]):
+            col = 0 if i == 0 else 2
             ctk.CTkLabel(mf, text=lbl, text_color=T.TEXT_MUTED,
-                         font=ctk.CTkFont(size=11)).grid(row=0,column=i,sticky="w",padx=2)
+                         font=ctk.CTkFont(size=11)).grid(row=0,column=col,sticky="w",padx=2)
             ctk.CTkEntry(mf, textvariable=var, placeholder_text=ph,
                          fg_color=T.BG_INNER, border_color=T.BG_BORDER,
                          text_color=T.TEXT_HEAD,
                          placeholder_text_color=T.TEXT_DIM,
                          font=ctk.CTkFont(size=11)).grid(
-                row=1,column=i,sticky="ew",padx=2)
+                row=1,column=col,sticky="ew",padx=2)
             var.trace_add("write", lambda *_: self._schedule_preview())
+
+        ctk.CTkLabel(mf, text="Logo/Icon", text_color=T.TEXT_MUTED,
+                     font=ctk.CTkFont(size=11)).grid(row=0, column=1, sticky="w", padx=2)
+        self._build_icon_drop_zone(mf)
 
         ctk.CTkLabel(top, text="STYLE & APPEARANCE", text_color=T.TEXT_DIM,
                      font=ctk.CTkFont(size=10, weight="bold")).grid(
             row=6, column=0, padx=16, pady=(4, 4), sticky="w")
 
-        # Accent colors
+        # Item 11.3 of the Live Testing Findings pass (Round 2): larger
+        # visual accent swatches, replacing the previous tiny 2-char-wide
+        # tk.Button "dots" -- real 30x30px tk.Canvas squares (a Button's
+        # width/height are text-cell units, not pixels, unless an image is
+        # set; a Canvas gives genuine pixel control and a selection ring
+        # that redraws, the same drawing technique _draw_nav_accent already
+        # uses elsewhere in this app for a custom-painted element).
         cf = ctk.CTkFrame(top, fg_color="transparent")
         cf.grid(row=7, column=0, padx=16, pady=(0,12), sticky="w")
         ctk.CTkLabel(cf, text="Theme:", text_color=T.TEXT_MUTED,
-                     font=ctk.CTkFont(size=11)).grid(row=0,column=0,padx=(0,6))
+                     font=ctk.CTkFont(size=11)).grid(row=0,column=0,padx=(0,8))
+        self._accent_swatch_canvases: Dict[str, tk.Canvas] = {}
         for i,c in enumerate(ACCENT_COLORS):
-            b = tk.Button(cf, bg=c, relief="flat", width=2, height=1,
-                          cursor="hand2", command=lambda h=c: self._set_accent(h))
-            b.grid(row=0, column=i+1, padx=2)
-        ctk.CTkButton(cf, text="Custom", width=60,
+            sw = tk.Canvas(cf, width=30, height=30, highlightthickness=0,
+                            bg=T.resolve(T.BG_SURFACE), cursor="hand2")
+            sw.grid(row=0, column=i+1, padx=3)
+            sw.bind("<Button-1>", lambda _e, h=c: self._select_accent(h))
+            self._accent_swatch_canvases[c] = sw
+        ctk.CTkButton(cf, text="Custom…", width=70, height=30,
                       fg_color=T.BADGE_BG, hover_color=T.BG_BORDER,
+                      text_color=T.TEXT_HEAD,
                       font=ctk.CTkFont(size=11),
                       command=self._custom_color).grid(row=0,column=len(ACCENT_COLORS)+1,padx=(6,0))
+        self._redraw_accent_swatches()
 
-        tf = ctk.CTkFrame(top, fg_color="transparent")
-        tf.grid(row=8, column=0, padx=16, pady=(0, 14), sticky="ew")
-        ctk.CTkLabel(tf, text="Card Template:", text_color=T.TEXT_MUTED,
-                     font=ctk.CTkFont(size=11)).grid(row=0, column=0, padx=(0, 8))
+        # Item 11.3: a real visual thumbnail gallery for Card Template,
+        # replacing the plain-text CTkOptionMenu dropdown -- each thumbnail
+        # is a small tk.Canvas painted with that template's own bg/header/
+        # accent colors (a lightweight visual stand-in for a full HTML
+        # render, which would be far too heavy to do once per template on
+        # every rebuild). Gradient/image `body_bg` values (Gradient Bold,
+        # or a custom uploaded background) can't be drawn on a plain
+        # Canvas, so the swatch falls back to a flat neutral fill for
+        # *this thumbnail only* -- the real exported card is unaffected,
+        # this is purely a gallery-picker visual.
+        ctk.CTkLabel(top, text="Card Template:", text_color=T.TEXT_MUTED,
+                     font=ctk.CTkFont(size=11)).grid(
+            row=8, column=0, padx=16, pady=(0, 4), sticky="w")
+        gallery = ctk.CTkFrame(top, fg_color="transparent")
+        gallery.grid(row=9, column=0, padx=16, pady=(0, 14), sticky="ew")
         self._template_var = ctk.StringVar(value="Dark Premium")
-        # "Custom" is appended only to the dropdown's values list here, never
-        # inserted into CARD_STYLE_TEMPLATES itself (off-limits, see Design
-        # System rules) -- _apply_card_template branches on it separately.
-        ctk.CTkOptionMenu(
-            tf, values=list(CARD_STYLE_TEMPLATES.keys()) + ["Custom"],
-            variable=self._template_var, command=self._apply_card_template,
-            fg_color=T.BADGE_BG, button_color=T.BADGE_BG,
-            button_hover_color=T.BG_BORDER,
-            text_color=T.TEXT_HEAD,
-            dropdown_fg_color=T.BG_SURFACE,
-            dropdown_hover_color=T.BG_BORDER,
-            dropdown_text_color=T.TEXT_HEAD,
-            width=180, font=ctk.CTkFont(size=11),
-        ).grid(row=0, column=1, sticky="w")
+        self._template_var.trace_add("write", lambda *_: self._redraw_template_gallery())
+        # "Custom" is appended only to the gallery here, never inserted into
+        # CARD_STYLE_TEMPLATES itself (off-limits, see Design System rules)
+        # -- _apply_card_template branches on it separately.
+        gallery_names = list(CARD_STYLE_TEMPLATES.keys()) + ["Custom"]
+        self._template_thumb_canvases: Dict[str, tk.Canvas] = {}
+        self._template_thumb_labels: Dict[str, ctk.CTkLabel] = {}
+        for i, name in enumerate(gallery_names):
+            cell = ctk.CTkFrame(gallery, fg_color="transparent")
+            cell.grid(row=(i // 4) * 2, column=i % 4, padx=4, pady=(0, 2))
+            gallery.grid_columnconfigure(i % 4, weight=1)
+            thumb = tk.Canvas(cell, width=88, height=54, highlightthickness=0,
+                               bg=T.resolve(T.BG_SURFACE), cursor="hand2")
+            thumb.pack()
+            thumb.bind("<Button-1>", lambda _e, n=name: self._select_template(n))
+            name_lbl = ctk.CTkLabel(gallery, text=name, text_color=T.TEXT_MUTED,
+                                     font=ctk.CTkFont(size=9))
+            name_lbl.grid(row=(i // 4) * 2 + 1, column=i % 4, pady=(0, 6))
+            self._template_thumb_canvases[name] = thumb
+            self._template_thumb_labels[name] = name_lbl
+        self._redraw_template_gallery()
 
         # Custom background controls -- hidden unless "Custom" is the
         # selected template, so users don't see inactive controls.
@@ -734,12 +933,42 @@ class CardCreatorV2(ctk.CTkFrame):
         tb = ctk.CTkFrame(mid, fg_color=T.BG_SURFACE, corner_radius=12,
                            border_width=1, border_color=T.BG_BORDER)
         tb.grid(row=0, column=0, sticky="ew", pady=(0,6))
-        ctk.CTkLabel(tb, text="➕  Add Section:",
+        tb.grid_columnconfigure(0, weight=1)
+        # Item 24 of the Live Testing Findings pass (Round 2), follow-up:
+        # the AI box + presets + template gallery above are the primary,
+        # easy path (confirmed working well in recent live testing) --
+        # manual section management is the power-user path, and per the
+        # user's own explicit choice this is now collapsed behind a real
+        # toggle (not just relabeled), so it isn't visible by default.
+        ctk.CTkLabel(tb, text="🔧  Advanced: Sections",
                      font=ctk.CTkFont(size=12, weight="bold"),
                      text_color=T.TEXT_HEAD).grid(
             row=0,column=0,padx=12,pady=8,sticky="w")
-        sbf = ctk.CTkFrame(tb, fg_color="transparent")
-        sbf.grid(row=0,column=1,padx=(0,12),pady=6,sticky="e")
+
+        self._sections_advanced_expanded = False
+        # Item 27 (Final Premium Polish Pass): was fg_color="transparent" on
+        # this T.BG_SURFACE toolbar -- ACCENT text measured 2.16:1 in Dark
+        # mode, a real WCAG fail. Matches History's "Duplicate" button fix
+        # (Item 12): T.BG_INNER gives 3.2:1 (accepted) and a real, distinct
+        # hover_color.
+        self._adv_toggle_btn = ctk.CTkButton(
+            tb, text="▶  Show", width=76, height=26,
+            font=ctk.CTkFont(size=11, weight="bold"),
+            fg_color=T.BG_INNER, hover_color=T.BG_BORDER,
+            border_width=1, border_color=T.ACCENT, text_color=T.ACCENT_TEXT,
+            command=self._toggle_advanced_sections)
+        self._adv_toggle_btn.grid(row=0, column=1, padx=12, pady=6, sticky="e")
+
+        # Collapsible body: add-section buttons + the sections scroll list.
+        # Not grid()'d here -- stays hidden (collapsed) until the toggle
+        # above is clicked.
+        self._sections_body = ctk.CTkFrame(mid, fg_color="transparent")
+        self._sections_body.grid_columnconfigure(0, weight=1)
+        self._sections_body.grid_rowconfigure(1, weight=1)
+
+        sbf = ctk.CTkFrame(self._sections_body, fg_color=T.BG_SURFACE, corner_radius=12,
+                            border_width=1, border_color=T.BG_BORDER)
+        sbf.grid(row=0, column=0, sticky="ew", pady=(0,6))
         for i,(label,stype) in enumerate(SECTION_TYPES):
             ctk.CTkButton(sbf, text=label, width=1,
                           font=ctk.CTkFont(size=11),
@@ -751,7 +980,7 @@ class CardCreatorV2(ctk.CTkFrame):
 
         # Sections scroll area
         self._sections_scroll = ctk.CTkScrollableFrame(
-            mid, fg_color=T.BG_MAIN, corner_radius=12)
+            self._sections_body, fg_color=T.BG_MAIN, corner_radius=12)
         self._sections_scroll.grid(row=1,column=0,sticky="nsew")
         self._sections_scroll.grid_columnconfigure(0,weight=1)
         self._sec_row = 0
@@ -765,6 +994,7 @@ class CardCreatorV2(ctk.CTkFrame):
                       text="✨  Generate Card",
                       font=ctk.CTkFont(size=14, weight="bold"),
                       height=42, fg_color=T.ACCENT, hover_color=T.ACCENT_HOVER,
+                      text_color=T.TEXT_HEAD,
                       command=self._generate).grid(
             row=0, column=0, sticky="ew", pady=(0,6))
 
@@ -772,7 +1002,7 @@ class CardCreatorV2(ctk.CTkFrame):
         r2.grid(row=1, column=0, sticky="ew")
         r2.grid_columnconfigure((0,1,2), weight=1)
         ctk.CTkButton(r2, text="🌐 Open Browser",
-                      fg_color=T.SUCCESS, hover_color=T.SUCCESS,
+                      fg_color=T.SUCCESS, hover_color=T.SUCCESS_HOVER,
                       text_color=T.TEXT_HEAD,
                       command=self._open_browser).grid(row=0,column=0,padx=(0,4),sticky="ew")
         ctk.CTkButton(r2, text="💾 Save HTML",
@@ -783,6 +1013,17 @@ class CardCreatorV2(ctk.CTkFrame):
                       fg_color=T.DANGER, hover_color=T.DANGER_HOVER,
                       text_color=T.TEXT_HEAD,
                       command=self._show_bulk_send).grid(row=0,column=2,padx=(4,0),sticky="ew")
+
+        # Item 11.6 of the Live Testing Findings pass (Round 2): one-click
+        # hand-off into the real Compose send pipelines, instead of the
+        # card only ever being usable via this tab's own separate (and, for
+        # WhatsApp, mocked -- see this file's own "current state" caveat)
+        # bulk-send flow.
+        ctk.CTkButton(bot, text="📩 Insert into Compose", height=34,
+                      fg_color=T.BADGE_BG, hover_color=T.BG_BORDER,
+                      text_color=T.ACCENT_TEXT, font=ctk.CTkFont(size=12, weight="bold"),
+                      command=self._insert_into_compose).grid(
+            row=3, column=0, sticky="ew", pady=(6, 0))
 
         self._status = ctk.StringVar(value="Add sections and click Generate.")
         ctk.CTkLabel(bot, textvariable=self._status,
@@ -882,7 +1123,7 @@ class CardCreatorV2(ctk.CTkFrame):
                          font=ctk.CTkFont(size=9)).pack(anchor="w",padx=8,pady=(8,2))
             ctk.CTkLabel(f, textvariable=v,
                          font=ctk.CTkFont(size=18,weight="bold"),
-                         text_color=T.ACCENT).pack(anchor="w",padx=8,pady=(0,8))
+                         text_color=T.ACCENT_TEXT).pack(anchor="w",padx=8,pady=(0,8))
 
         # Daily summary list
         ctk.CTkLabel(stats, text="📅  Today's Activity (Read / Unread)",
@@ -902,6 +1143,36 @@ class CardCreatorV2(ctk.CTkFrame):
 
     # ─── Section management ───────────────────────────────────────────────────
 
+    def _insertion_index_for_new_section(self, stype: str) -> int:
+        """Item 22 of the Live Testing Findings pass (Round 2): where a
+        newly-added section of `stype` should land so the card reads
+        coherently without manual reordering -- right after the last
+        existing section whose own type is at or before `stype` in the
+        canonical _SECTION_ORDER (e.g. adding "Price Box" after
+        Header/Text/Contact already exist lands it between Text and
+        Contact, not appended after Contact). Unrecognized types (there
+        are none today, but defensively) sort last."""
+        new_rank = _SECTION_ORDER.index(stype) if stype in _SECTION_ORDER else len(_SECTION_ORDER)
+        for i, sec in enumerate(self._sections):
+            existing_rank = (_SECTION_ORDER.index(sec["type"])
+                              if sec["type"] in _SECTION_ORDER else len(_SECTION_ORDER))
+            if existing_rank > new_rank:
+                return i
+        return len(self._sections)
+
+    def _toggle_advanced_sections(self):
+        """Item 24 follow-up: the manual section-builder is collapsed by
+        default (a real hide, not just a visual de-emphasis) so a new user's
+        first look at Cards is the AI box/presets/template gallery, not a
+        wall of section-type buttons. Clicking the toggle reveals it."""
+        self._sections_advanced_expanded = not self._sections_advanced_expanded
+        if self._sections_advanced_expanded:
+            self._sections_body.grid(row=1, column=0, sticky="nsew")
+            self._adv_toggle_btn.configure(text="▼  Hide")
+        else:
+            self._sections_body.grid_remove()
+            self._adv_toggle_btn.configure(text="▶  Show")
+
     def _add_section(self, stype: str):
         idx = len(self._sections)
         data: dict = {}
@@ -909,9 +1180,7 @@ class CardCreatorV2(ctk.CTkFrame):
 
         card = ctk.CTkFrame(self._sections_scroll, fg_color=T.BG_SURFACE,
                              corner_radius=12, border_width=1, border_color=T.BG_BORDER)
-        card.grid(row=self._sec_row, column=0, sticky="ew", pady=(0, 6), padx=2)
         card.grid_columnconfigure(0, weight=1)
-        self._sec_row += 1
 
         label = next((lbl for lbl, t in SECTION_TYPES if t == stype), stype)
         section_num = idx + 1
@@ -920,7 +1189,7 @@ class CardCreatorV2(ctk.CTkFrame):
         hdr.grid(row=0, column=0, sticky="ew", padx=12, pady=(10, 4))
         hdr.grid_columnconfigure(1, weight=1)
 
-        ctk.CTkLabel(hdr, text="↕", text_color=T.ACCENT,
+        ctk.CTkLabel(hdr, text="↕", text_color=T.ACCENT_TEXT,
                      font=ctk.CTkFont(size=14)).grid(row=0, column=0, padx=(0, 8))
         title_lbl = ctk.CTkLabel(
             hdr,
@@ -945,6 +1214,8 @@ class CardCreatorV2(ctk.CTkFrame):
             command=toggle_visible,
             text_color=T.TEXT_MUTED,
             font=ctk.CTkFont(size=11),
+            fg_color=T.ACCENT, border_color=T.ACCENT,
+            hover_color=T.ACCENT_HOVER, checkmark_color=T.TEXT_HEAD,
         ).pack(side="left", padx=(0, 4))
 
         ctk.CTkButton(
@@ -1046,7 +1317,7 @@ class CardCreatorV2(ctk.CTkFrame):
             lbl("YouTube video link")
             entry(v, "https://youtube.com/watch?v=...")
             ctk.CTkLabel(body, text="▶ Video will play inside the card",
-                         text_color=T.ACCENT, font=ctk.CTkFont(size=11)).pack(anchor="w")
+                         text_color=T.ACCENT_TEXT, font=ctk.CTkFont(size=11)).pack(anchor="w")
             data["_url_var"] = v
 
         elif stype == "text":
@@ -1084,9 +1355,9 @@ class CardCreatorV2(ctk.CTkFrame):
             rr  = ctk.CTkFrame(body,fg_color="transparent")
             rr.pack(fill="x")
             rr.grid_columnconfigure((0,1),weight=1)
-            ctk.CTkLabel(rr,text="Price",text_color=T.TEXT_MUTED,
+            ctk.CTkLabel(rr,text="Sale Price",text_color=T.TEXT_MUTED,
                          font=ctk.CTkFont(size=11)).grid(row=0,column=0,sticky="w",padx=2)
-            ctk.CTkLabel(rr,text="Old price",text_color=T.TEXT_MUTED,
+            ctk.CTkLabel(rr,text="Original Price",text_color=T.TEXT_MUTED,
                          font=ctk.CTkFont(size=11)).grid(row=0,column=1,sticky="w",padx=2)
             ctk.CTkEntry(rr,textvariable=pv,fg_color=T.BG_INNER,
                          border_color=T.BG_BORDER,text_color=T.TEXT_HEAD,
@@ -1094,9 +1365,44 @@ class CardCreatorV2(ctk.CTkFrame):
             ctk.CTkEntry(rr,textvariable=opv,fg_color=T.BG_INNER,
                          border_color=T.BG_BORDER,text_color=T.TEXT_HEAD,
                          placeholder_text_color=T.TEXT_DIM).grid(row=1,column=1,sticky="ew",padx=2,pady=(2,4))
+            # Item 11.4: a live, auto-calculated discount % -- purely a
+            # display aid in the editor (the actual badge in the exported
+            # card is computed the same way, at collection time, by
+            # _collect_sections via the shared compute_discount_percent
+            # helper, so the editor and the real output can never disagree).
+            discount_var = ctk.StringVar(value="")
+            ctk.CTkLabel(rr, textvariable=discount_var, text_color=T.SUCCESS,
+                         font=ctk.CTkFont(size=11, weight="bold")).grid(
+                row=2, column=0, columnspan=2, sticky="w", padx=2, pady=(0, 6))
+
+            def _update_discount_preview(*_a, pv=pv, opv=opv, discount_var=discount_var):
+                pct = compute_discount_percent(pv.get(), opv.get())
+                discount_var.set(f"🔥 {pct}% OFF — auto-calculated" if pct else "")
+
+            pv.trace_add("write", _update_discount_preview)
+            opv.trace_add("write", _update_discount_preview)
+            _update_discount_preview()
+
             lbl("Price note")
             entry(nv,"e.g. One-time · Lifetime")
+
+            # Item 11.5: the purchase button now lives directly on the Price
+            # section -- "Button Text" (default "Buy Now") and "Purchase
+            # Link URL" -- instead of requiring a separate Links section
+            # with a specifically-labeled "buy" entry to make the button
+            # actually clickable.
+            btv = ctk.StringVar(value="Buy Now")
+            buv = ctk.StringVar(value="")
+            lbl("Button Text")
+            entry(btv, "Buy Now")
+            lbl("Purchase Link URL")
+            entry(buv, "https://your-payment-link.com")
+
+            for v in (pv, opv, nv, btv, buv):
+                v.trace_add("write", lambda *_: self._schedule_preview())
+
             data["_price"]=pv; data["_old"]=opv; data["_note"]=nv
+            data["_btn_text"]=btv; data["_buy_url"]=buv
 
         elif stype == "links":
             link_kinds = [
@@ -1125,10 +1431,17 @@ class CardCreatorV2(ctk.CTkFrame):
         elif stype == "contact":
             ctk.CTkLabel(body,
                          text="Contact footer uses your info from App Identity above.",
-                         text_color=T.ACCENT,
+                         text_color=T.ACCENT_TEXT,
                          font=ctk.CTkFont(size=11)).pack(anchor="w",pady=4)
 
-        self._sections.append(sec_entry)
+        insert_at = self._insertion_index_for_new_section(stype)
+        self._sections.insert(insert_at, sec_entry)
+        # Re-grid every section at its (possibly shifted) row position --
+        # same technique _move_section already uses for manual reordering.
+        for row, sec in enumerate(self._sections):
+            if sec["frame"].winfo_exists():
+                sec["frame"].grid(row=row, column=0, sticky="ew", pady=(0, 6), padx=2)
+        self._sec_row = len(self._sections)
         self._renumber_sections()
         self._schedule_preview()
 
@@ -1200,6 +1513,9 @@ class CardCreatorV2(ctk.CTkFrame):
                 d["price"]     = data.get("_price", ctk.StringVar()).get()
                 d["old_price"] = data.get("_old",   ctk.StringVar()).get()
                 d["note"]      = data.get("_note",  ctk.StringVar()).get()
+                d["button_text"] = data.get("_btn_text", ctk.StringVar()).get().strip()
+                d["buy_url"]     = _clean_url(data.get("_buy_url", ctk.StringVar()).get())
+                d["discount_percent"] = compute_discount_percent(d["price"], d["old_price"])
             elif stype == "links":
                 d["links"] = [
                     {"kind": kind, "label": label, "url": _clean_url(v.get())}
@@ -1223,6 +1539,8 @@ class CardCreatorV2(ctk.CTkFrame):
             self._custom_bg_row.grid_remove()
             style = CARD_STYLE_TEMPLATES.get(name, CARD_STYLE_TEMPLATES["Dark Premium"])
             self._accent = style.get("accent", self._accent)
+        if hasattr(self, "_accent_swatch_canvases"):
+            self._redraw_accent_swatches()
         self._schedule_preview()
 
     def _pick_custom_bg_color(self) -> None:
@@ -1236,13 +1554,27 @@ class CardCreatorV2(ctk.CTkFrame):
             "bg": color, "body_bg": color, "header_bg": color, "text": text_color,
         })
         self._custom_bg_status.set(f"✓ Solid color {color}")
+        self._redraw_template_gallery()
         self._schedule_preview()
 
     def _pick_custom_bg_image(self) -> None:
         def _on_picked(uri: str, filename: str) -> None:
             bg_value = f"url({uri}) center center / cover no-repeat"
-            self._custom_style.update({"bg": bg_value, "body_bg": bg_value})
+            # Item 23 of the Live Testing Findings pass (Round 2): this
+            # previously set BOTH "bg" (the actual .card panel background,
+            # the real visible card) AND "body_bg" (the full-page backdrop,
+            # only ever visible as a thin margin around the card) to the
+            # exact same image url(...) value -- embedding the same,
+            # potentially multi-hundred-KB base64-inflated image payload
+            # TWICE in the final HTML for essentially zero visual benefit.
+            # Confirmed directly with a diagnostic: a 50KB fake image
+            # payload appeared 2x in a real generate_html() render. Now
+            # only .card gets the image; body_bg falls back to this same
+            # plain neutral the feature already uses as its own default/
+            # cleared state, instead of a second copy of the image.
+            self._custom_style.update({"bg": bg_value, "body_bg": "#1a1a2e"})
             self._custom_bg_status.set(f"✓ Using image: {filename}")
+            self._redraw_template_gallery()
             self._schedule_preview()
         self._pick_local_image(_on_picked)
 
@@ -1253,6 +1585,7 @@ class CardCreatorV2(ctk.CTkFrame):
             "text": "rgba(255,255,255,0.85)",
         })
         self._custom_bg_status.set("")
+        self._redraw_template_gallery()
         self._schedule_preview()
 
     def _collect_buy_link(self) -> str:
@@ -1277,16 +1610,17 @@ class CardCreatorV2(ctk.CTkFrame):
         else:
             style = CARD_STYLE_TEMPLATES.get(self._style_name, CARD_STYLE_TEMPLATES["Dark Premium"])
         return {
-            "app_name": self._mname.get().strip(),
-            "icon":     self._micon.get().strip() or "⭐",
-            "tagline":  self._mtag.get().strip(),
-            "accent":   self._accent,
-            "org":      self._morg.get().strip(),
-            "wa":       self._mwa.get().strip(),
-            "email":    self._memail.get().strip(),
-            "addr":     self._maddr.get().strip(),
-            "style":    style,
-            "buy_link": self._collect_buy_link(),
+            "app_name":   self._mname.get().strip(),
+            "icon":       self._micon.get().strip() or "⭐",
+            "icon_image": self._micon_image_uri or "",
+            "tagline":    self._mtag.get().strip(),
+            "accent":     self._accent,
+            "org":        self._morg.get().strip(),
+            "wa":         self._mwa.get().strip(),
+            "email":      self._memail.get().strip(),
+            "addr":       self._maddr.get().strip(),
+            "style":      style,
+            "buy_link":   self._collect_buy_link(),
         }
 
     def _get_export_html(self) -> str:
@@ -1315,7 +1649,11 @@ class CardCreatorV2(ctk.CTkFrame):
             return False
 
     def _schedule_preview(self) -> None:
-        """Debounced live preview update (500 ms)."""
+        """Debounced live preview update (500 ms). Also the single, shared
+        place every content-changing action already routes through, so it
+        doubles as the "content is dirty" tracker for Item 17's preset-
+        switch confirmation."""
+        self._card_dirty = True
         if self._preview_job is not None:
             self.after_cancel(self._preview_job)
         self._preview_job = self.after(500, self._update_live_preview)
@@ -1358,6 +1696,75 @@ class CardCreatorV2(ctk.CTkFrame):
         if path:
             Path(path).write_text(self._html, encoding="utf-8")
             self._status.set(f"✅ Saved: {Path(path).name}")
+
+    # ─── Item 11.6: one-click Insert into Compose ─────────────────────────────
+
+    def _build_whatsapp_card_text(self, meta: dict) -> str:
+        """WhatsApp can't render HTML, so the card's key selling points
+        (headline, description, price/discount, and the real purchase
+        link) are flattened into a real plain-text message instead of a
+        static image or a broken embed."""
+        lines = [meta["app_name"] + (f" — {meta['tagline']}" if meta.get("tagline") else "")]
+
+        desc_box = next(
+            (s["data"].get("_text_box") for s in self._sections if s["type"] == "text"), None)
+        description = desc_box.get("1.0", "end").strip() if desc_box else ""
+        if description:
+            lines.append("")
+            lines.append(description)
+
+        price_sec = next((s for s in self._sections if s["type"] == "price"), None)
+        if price_sec:
+            price = price_sec["data"].get("_price", ctk.StringVar()).get().strip()
+            old_price = price_sec["data"].get("_old", ctk.StringVar()).get().strip()
+            if price:
+                pct = compute_discount_percent(price, old_price)
+                price_line = f"💰 {price}"
+                if old_price:
+                    price_line += f" (was {old_price})"
+                if pct:
+                    price_line += f" — {pct}% OFF"
+                lines.append("")
+                lines.append(price_line)
+            btn_text = price_sec["data"].get("_btn_text", ctk.StringVar()).get().strip() or "Buy Now"
+            buy_url = (_clean_url(price_sec["data"].get("_buy_url", ctk.StringVar()).get())
+                       or self._collect_buy_link())
+            if buy_url:
+                lines.append(f"👉 {btn_text}: {buy_url}")
+
+        return "\n".join(lines).strip()
+
+    def _insert_into_compose(self) -> None:
+        """One-click hand-off into the real Compose send pipelines (Item
+        11.6): the full HTML card for Email (via Item 10's rich-text
+        importer, so it lands as genuine editable/sendable content, not
+        raw markup), or a real plain-text summary + purchase link for
+        WhatsApp (which has no HTML rendering capability at all)."""
+        if self.main_window is None:
+            messagebox.showwarning(
+                "Unavailable", "Insert into Compose requires the main app window.")
+            return
+
+        self._html = self._get_export_html()
+        meta = self._collect_meta()
+        mw = self.main_window
+        channel = mw._compose_channel_var.get()
+
+        mw._show_view("Compose")
+        if channel == "Email":
+            mw._compose_em_body.delete("1.0", "end")
+            mw._load_html_into_email_editor(self._html)
+            subject = (f"{meta['app_name']} — {meta['tagline']}"
+                       if meta.get("tagline") else meta["app_name"])
+            mw._em_subj_var.set(subject)
+            mw._update_email_warnings()
+        else:
+            mw.message_textbox.delete("1.0", "end")
+            mw.message_textbox.insert("1.0", self._build_whatsapp_card_text(meta))
+            mw._on_wa_message_changed()
+
+        show_toast(mw, "Card inserted into Compose.", kind="success")
+        self._status.set("✅ Inserted into Compose.")
 
     # ─── Bulk Send dialog ─────────────────────────────────────────────────────
 
@@ -1450,17 +1857,23 @@ class CardCreatorV2(ctk.CTkFrame):
         channel_var = ctk.StringVar(value="whatsapp")
         ctk.CTkRadioButton(ch,text="📱 WhatsApp",
                            variable=channel_var,value="whatsapp",
-                           text_color=T.TEXT_MUTED).grid(
+                           text_color=T.TEXT_MUTED,
+                           fg_color=T.ACCENT, border_color=T.ACCENT,
+                           hover_color=T.ACCENT_HOVER).grid(
             row=1,column=0,padx=14,pady=(0,8),sticky="w")
         ctk.CTkRadioButton(ch,text="📧 Email (HTML card)",
                            variable=channel_var,value="email",
-                           text_color=T.TEXT_MUTED).grid(
+                           text_color=T.TEXT_MUTED,
+                           fg_color=T.ACCENT, border_color=T.ACCENT,
+                           hover_color=T.ACCENT_HOVER).grid(
             row=1,column=1,padx=14,pady=(0,8),sticky="w")
 
         consent_var = ctk.BooleanVar(value=False)
         ctk.CTkCheckBox(ch, text="I have consent from these contacts to message them",
                          variable=consent_var, text_color=T.TEXT_MUTED,
-                         font=ctk.CTkFont(size=11)).grid(
+                         font=ctk.CTkFont(size=11),
+                         fg_color=T.ACCENT, border_color=T.ACCENT,
+                         hover_color=T.ACCENT_HOVER, checkmark_color=T.TEXT_HEAD).grid(
             row=2,column=0,columnspan=2,padx=14,pady=(0,12),sticky="w")
 
         # Step 3 — AI personalization
@@ -1703,7 +2116,7 @@ class CardCreatorV2(ctk.CTkFrame):
         btn_row.grid(row=6,column=0,padx=20,pady=(0,20),sticky="ew")
         btn_row.grid_columnconfigure(0,weight=1)
         btn_send = ctk.CTkButton(btn_row,text="🚀 Start Sending",
-                                  fg_color=T.SUCCESS,hover_color=T.SUCCESS,
+                                  fg_color=T.SUCCESS,hover_color=T.SUCCESS_HOVER,
                                   text_color=T.TEXT_HEAD,
                                   command=do_send)
         btn_send.grid(row=0,column=0,sticky="ew",padx=(0,6))
@@ -1741,13 +2154,317 @@ class CardCreatorV2(ctk.CTkFrame):
 
     # ─── Helpers ──────────────────────────────────────────────────────────────
 
-    def _set_accent(self, h: str):
+    def _select_accent(self, h: str) -> None:
+        """Real replacement for the old _set_accent -- also redraws the
+        swatch selection ring and refreshes the live preview, neither of
+        which the old version did (a real, pre-existing gap: picking an
+        accent color previously never triggered a preview refresh at all)."""
         self._accent = h
+        self._redraw_accent_swatches()
+        self._schedule_preview()
+
+    def _redraw_accent_swatches(self) -> None:
+        for color, canvas in getattr(self, "_accent_swatch_canvases", {}).items():
+            if not canvas.winfo_exists():
+                continue
+            canvas.delete("all")
+            canvas.create_rectangle(2, 2, 28, 28, fill=color, outline="")
+            is_selected = color.lower() == self._accent.lower()
+            border_color = T.resolve(T.TEXT_HEAD) if is_selected else T.resolve(T.BG_BORDER)
+            canvas.create_rectangle(1, 1, 29, 29, outline=border_color,
+                                     width=3 if is_selected else 1)
 
     def _custom_color(self):
         c = colorchooser.askcolor(title="Pick color", color=self._accent)
         if c and c[1]:
-            self._accent = c[1]
+            self._select_accent(c[1])
+
+    def _select_template(self, name: str) -> None:
+        self._template_var.set(name)
+        self._apply_card_template(name)
+
+    def _redraw_template_gallery(self) -> None:
+        selected = self._template_var.get()
+        for name, canvas in getattr(self, "_template_thumb_canvases", {}).items():
+            if not canvas.winfo_exists():
+                continue
+            canvas.delete("all")
+            style = self._custom_style if name == "Custom" else CARD_STYLE_TEMPLATES.get(
+                name, CARD_STYLE_TEMPLATES["Dark Premium"])
+            header_color = _hex_or_fallback(style.get("header_bg"), "#1a1a2e")
+            body_color = _hex_or_fallback(style.get("body_bg"), "#111827")
+            accent_color = _hex_or_fallback(style.get("accent"), "#6c63ff")
+            text_color = _hex_or_fallback(style.get("text"), "#ffffff")
+            width, height = 88, 54
+            canvas.create_rectangle(0, 0, width, height, fill=body_color, outline="")
+            canvas.create_rectangle(0, 0, width, 14, fill=header_color, outline="")
+            canvas.create_oval(6, 20, 18, 32, fill=accent_color, outline="")
+            canvas.create_rectangle(24, 22, 70, 26, fill=accent_color, outline="")
+            canvas.create_rectangle(24, 30, 60, 33, fill=text_color, outline="")
+            is_selected = name == selected
+            border_color = T.resolve(T.ACCENT) if is_selected else T.resolve(T.BG_BORDER)
+            canvas.create_rectangle(1, 1, width - 1, height - 1, outline=border_color,
+                                     width=3 if is_selected else 1)
+        for name, label_widget in getattr(self, "_template_thumb_labels", {}).items():
+            if label_widget.winfo_exists():
+                label_widget.configure(
+                    text_color=T.ACCENT_TEXT if name == selected else T.TEXT_MUTED)
+
+    # ─── Item 11.1: drag-and-drop logo/icon upload + live preview + crop ──────
+
+    # A real drop zone, not a 44x44 icon -- Item 20 of the Live Testing
+    # Findings pass (Round 2). Big enough to hold "📁 / Drag & drop logo
+    # here, / or click to browse" comfortably in the empty state, and to
+    # show a genuinely readable thumbnail once an image is uploaded.
+    _ICON_ZONE_WIDTH = 128
+    _ICON_ZONE_HEIGHT = 100
+
+    def _build_icon_drop_zone(self, parent) -> None:
+        """Replaces the plain emoji text field with a real drop target
+        (drag-and-drop via tkinterdnd2, the same registration pattern
+        contact_import_review.py already uses -- TkinterDnD._require() is
+        already called once on the app root in main_window.py, so no extra
+        setup is needed here) plus a live thumbnail preview and a Crop
+        button. The emoji entry stays underneath as the fallback path for
+        anyone who doesn't want to upload an image at all.
+
+        Item 20 of the Live Testing Findings pass (Round 2): the original
+        version of this zone was a plain 44x44 canvas with no visual
+        indication it was a drop target at all (just a tiny emoji, "small,
+        plain, sketch-like" per the report) -- now a real dashed-border
+        drop zone with explicit "Drag & drop logo here, or click to
+        browse" helper text (matching the pattern Contacts' own CSV import
+        drop zone already established: an icon, helper text, and a click
+        affordance), a properly-sized thumbnail once filled instead of a
+        tiny icon, and real hover feedback (border + background both shift
+        on <Enter>/<Leave> -- a plain tk.Canvas has no CSS hover pseudo-
+        class, so this is hand-rolled the same way _draw_nav_accent already
+        hand-paints its own canvas elsewhere in this app)."""
+        zone_wrap = ctk.CTkFrame(parent, fg_color="transparent")
+        zone_wrap.grid(row=1, column=1, padx=2)
+
+        self._icon_preview_canvas = tk.Canvas(
+            zone_wrap, width=self._ICON_ZONE_WIDTH, height=self._ICON_ZONE_HEIGHT,
+            highlightthickness=0, bg=T.resolve(T.BG_INNER), cursor="hand2")
+        self._icon_preview_canvas.pack(pady=(0, 4))
+        self._icon_preview_canvas.bind("<Button-1>", lambda _e: self._browse_icon_image())
+        self._icon_zone_hovering = False
+        self._icon_preview_canvas.bind("<Enter>", lambda _e: self._set_icon_zone_hover(True))
+        self._icon_preview_canvas.bind("<Leave>", lambda _e: self._set_icon_zone_hover(False))
+        self._icon_photo_ref = None  # keeps the PhotoImage alive -- Tk drops it otherwise
+
+        if HAS_DND:
+            try:
+                self._icon_preview_canvas.drop_target_register(DND_FILES)
+                self._icon_preview_canvas.dnd_bind("<<Drop>>", self._on_icon_drop)
+            except Exception:
+                pass  # DnD registration can fail on some platforms -- click-to-browse still works
+
+        btn_row = ctk.CTkFrame(zone_wrap, fg_color="transparent")
+        btn_row.pack()
+        self._icon_crop_btn = ctk.CTkButton(
+            btn_row, text="✂ Crop", width=60, height=22, corner_radius=5,
+            fg_color=T.BADGE_BG, hover_color=T.BG_BORDER, text_color=T.TEXT_HEAD,
+            font=ctk.CTkFont(size=10), state="disabled",
+            command=self._open_icon_crop_dialog)
+        self._icon_crop_btn.pack(side="left", padx=(0, 2))
+        ctk.CTkButton(
+            btn_row, text="✕ Remove", width=68, height=22, corner_radius=5,
+            fg_color=T.BADGE_BG, hover_color=T.DANGER_HOVER, text_color=T.TEXT_HEAD,
+            font=ctk.CTkFont(size=10), command=self._clear_icon_image).pack(side="left")
+
+        emoji_row = ctk.CTkFrame(zone_wrap, fg_color="transparent")
+        emoji_row.pack(pady=(4, 0))
+        ctk.CTkLabel(emoji_row, text="or emoji:", text_color=T.TEXT_DIM,
+                     font=ctk.CTkFont(size=10)).pack(side="left", padx=(0, 4))
+        ctk.CTkEntry(emoji_row, textvariable=self._micon, placeholder_text="⭐",
+                     width=44, justify="center",
+                     fg_color=T.BG_INNER, border_color=T.BG_BORDER,
+                     text_color=T.TEXT_HEAD, placeholder_text_color=T.TEXT_DIM,
+                     font=ctk.CTkFont(size=11)).pack(side="left")
+        self._micon.trace_add(
+            "write", lambda *_: (self._redraw_icon_preview(), self._schedule_preview()))
+
+        self._redraw_icon_preview()
+
+    def _set_icon_zone_hover(self, hovering: bool) -> None:
+        self._icon_zone_hovering = hovering
+        self._redraw_icon_preview()
+
+    def _redraw_icon_preview(self) -> None:
+        """Live preview (Item 11.1, redesigned per Item 20): shows the
+        uploaded/cropped logo as a real, properly-sized thumbnail filling
+        most of the zone, or -- when empty -- a dashed-border drop zone
+        with explicit drag-and-drop helper text, not a tiny icon. Border/
+        background both shift on hover as the only available stand-in for
+        a CSS :hover state on a plain Canvas."""
+        canvas = getattr(self, "_icon_preview_canvas", None)
+        if canvas is None or not canvas.winfo_exists():
+            return
+        canvas.delete("all")
+        width, height = self._ICON_ZONE_WIDTH, self._ICON_ZONE_HEIGHT
+        hovering = getattr(self, "_icon_zone_hovering", False)
+        canvas.configure(bg=T.resolve(T.BADGE_BG if hovering else T.BG_INNER))
+        border_color = T.resolve(T.ACCENT) if hovering else T.resolve(T.BG_BORDER)
+
+        if self._micon_image_uri:
+            try:
+                img = decode_data_uri_to_image(self._micon_image_uri)
+                img.thumbnail((width - 12, height - 12))
+                photo = ImageTk.PhotoImage(img)
+                self._icon_photo_ref = photo
+                canvas.create_image(width // 2, height // 2, image=photo)
+                canvas.create_rectangle(1, 1, width - 1, height - 1,
+                                         outline=border_color, width=2)
+                return
+            except Exception:
+                logger.warning("Icon preview decode failed", exc_info=True)
+
+        canvas.create_rectangle(3, 3, width - 3, height - 3,
+                                 outline=border_color, width=2, dash=(5, 3))
+        # Item 25: a canvas text item with no `width=` never wraps, even
+        # with manual "\n" breaks -- "Drag & drop logo here," alone measures
+        # ~142px, wider than this 128px zone, so half of it rendered at a
+        # negative x-coordinate and was clipped by the canvas viewport
+        # (confirmed by direct measurement before fixing, not guessed) --
+        # exactly the reported "cut off on the left" symptom. `width=`
+        # forces real word-wrap regardless of theme/font-metrics variance.
+        canvas.create_text(
+            width // 2, height // 2,
+            text="📁\nDrag & drop logo here,\nor click to browse",
+            fill=T.resolve(T.TEXT_MUTED), font=("Segoe UI", 10), justify="center",
+            width=width - 16)
+
+    def _browse_icon_image(self) -> None:
+        path = filedialog.askopenfilename(
+            title="Choose a logo/icon image",
+            filetypes=[("Image files", "*.png *.jpg *.jpeg *.gif *.webp"),
+                       ("All files", "*.*")])
+        if path:
+            self._load_icon_image_path(path)
+
+    def _on_icon_drop(self, event) -> None:
+        raw = event.data.strip()
+        if raw.startswith("{") and raw.endswith("}"):
+            raw = raw[1:-1]
+        path = raw.split("} {")[0] if "} {" in raw else raw
+        if path:
+            self._load_icon_image_path(path)
+
+    def _load_icon_image_path(self, path: str) -> None:
+        try:
+            uri = image_file_to_data_uri(path)
+        except ImageUploadError as exc:
+            if self.main_window is not None:
+                show_toast(self.main_window, str(exc), kind="error")
+            else:
+                messagebox.showwarning("Image not used", str(exc))
+            return
+        self._micon_image_uri = uri
+        self._icon_crop_btn.configure(state="normal")
+        self._redraw_icon_preview()
+        self._schedule_preview()
+
+    def _clear_icon_image(self) -> None:
+        self._micon_image_uri = None
+        if hasattr(self, "_icon_crop_btn"):
+            self._icon_crop_btn.configure(state="disabled")
+        self._redraw_icon_preview()
+        self._schedule_preview()
+
+    def _open_icon_crop_dialog(self) -> None:
+        """A simple, scoped square-crop dialog: the source image is scaled
+        to fit a 300x300 canvas, a fixed-size square selection box can be
+        dragged (not resized -- a deliberately scoped "simple" crop, not a
+        full photo editor) to choose the crop region, then Apply Crop
+        re-crops the ORIGINAL full-resolution image (not the on-screen
+        scaled-down preview) via crop_and_encode_image."""
+        if not self._micon_image_uri:
+            return
+        try:
+            source_img = decode_data_uri_to_image(self._micon_image_uri)
+        except Exception:
+            messagebox.showerror("Crop", "Could not open this image for cropping.")
+            return
+
+        dlg = ctk.CTkToplevel(self)
+        dlg.title("Crop Logo")
+        parent_for_center = self.main_window if self.main_window is not None else self
+        center_on_parent(dlg, 380, 460, parent_for_center)
+        dlg.grab_set()
+        dlg.configure(fg_color=T.BG_MAIN)
+        dlg.bind("<Escape>", lambda _e: dlg.destroy())
+
+        ctk.CTkLabel(dlg, text="Drag the box to choose the crop area",
+                     text_color=T.TEXT_MUTED, font=ctk.CTkFont(size=11)).pack(pady=(16, 6))
+
+        canvas_size = 300
+        canvas = tk.Canvas(dlg, width=canvas_size, height=canvas_size,
+                            highlightthickness=1, highlightbackground=T.resolve(T.BG_BORDER),
+                            bg=T.resolve(T.BG_INNER))
+        canvas.pack(padx=16)
+
+        src_w, src_h = source_img.size
+        scale = min(canvas_size / src_w, canvas_size / src_h)
+        disp_w, disp_h = max(1, int(src_w * scale)), max(1, int(src_h * scale))
+        display_img = source_img.resize((disp_w, disp_h))
+        photo = ImageTk.PhotoImage(display_img)
+        offset_x, offset_y = (canvas_size - disp_w) // 2, (canvas_size - disp_h) // 2
+        canvas.create_image(offset_x, offset_y, anchor="nw", image=photo)
+        canvas.image_ref = photo  # keep alive -- Tk drops unreferenced PhotoImages
+
+        box_size = min(disp_w, disp_h)
+        box = {"x": offset_x + (disp_w - box_size) / 2, "y": offset_y + (disp_h - box_size) / 2}
+        rect_id = canvas.create_rectangle(
+            box["x"], box["y"], box["x"] + box_size, box["y"] + box_size,
+            outline=T.resolve(T.ACCENT), width=2)
+
+        def clamp(value, lo, hi):
+            return max(lo, min(value, hi))
+
+        drag_state = {"active": False, "last_x": 0, "last_y": 0}
+
+        def on_press(event):
+            drag_state["active"] = True
+            drag_state["last_x"], drag_state["last_y"] = event.x, event.y
+
+        def on_drag(event):
+            if not drag_state["active"]:
+                return
+            dx, dy = event.x - drag_state["last_x"], event.y - drag_state["last_y"]
+            new_x = clamp(box["x"] + dx, offset_x, offset_x + disp_w - box_size)
+            new_y = clamp(box["y"] + dy, offset_y, offset_y + disp_h - box_size)
+            canvas.move(rect_id, new_x - box["x"], new_y - box["y"])
+            box["x"], box["y"] = new_x, new_y
+            drag_state["last_x"], drag_state["last_y"] = event.x, event.y
+
+        def on_release(_event):
+            drag_state["active"] = False
+
+        canvas.bind("<Button-1>", on_press)
+        canvas.bind("<B1-Motion>", on_drag)
+        canvas.bind("<ButtonRelease-1>", on_release)
+
+        def apply_crop():
+            crop_x0 = (box["x"] - offset_x) / scale
+            crop_y0 = (box["y"] - offset_y) / scale
+            crop_side = box_size / scale
+            crop_box = (
+                int(crop_x0), int(crop_y0),
+                int(crop_x0 + crop_side), int(crop_y0 + crop_side),
+            )
+            self._micon_image_uri = crop_and_encode_image(source_img, crop_box)
+            self._redraw_icon_preview()
+            self._schedule_preview()
+            dlg.destroy()
+
+        btn_row = ctk.CTkFrame(dlg, fg_color="transparent")
+        btn_row.pack(pady=16)
+        ctk.CTkButton(btn_row, text="Cancel", fg_color=T.BADGE_BG, hover_color=T.BG_BORDER,
+                      text_color=T.TEXT_HEAD, command=dlg.destroy).pack(side="left", padx=(0, 10))
+        ctk.CTkButton(btn_row, text="Apply Crop", fg_color=T.ACCENT, hover_color=T.ACCENT_HOVER,
+                      text_color=T.TEXT_HEAD, font=ctk.CTkFont(weight="bold"),
+                      command=apply_crop).pack(side="left")
 
     def _pick_local_image(self, on_picked) -> None:
         """Shared local-image-upload flow for both the banner section and
@@ -1875,6 +2592,31 @@ class CardCreatorV2(ctk.CTkFrame):
                 sec["data"].get("_note", ctk.StringVar()).set(preset.get("price_note",""))
         self._status.set(f"Loaded: {name} — preview updating…")
         self._schedule_preview()
+        # See _card_dirty's own comment in __init__: reset here, after this
+        # method's own section-building calls already marked it dirty via
+        # _schedule_preview, so a fresh load always starts clean.
+        self._card_dirty = False
+
+    def _confirm_and_load_preset(self, name: str) -> None:
+        """Item 17 of the Live Testing Findings pass (Round 2): clicking a
+        preset used to silently call _load_preset directly, discarding any
+        existing AI-generated/edited card content with no warning at all.
+        Now asks first whenever there's real content that would be lost --
+        skipped when the card is already clean (e.g. right after a fresh
+        preset load, or at first launch) so this doesn't nag on every
+        click, only when it would actually cost the user something."""
+        if not self._card_dirty:
+            self._load_preset(name)
+            return
+        if not messagebox.askyesno(
+            "Discard current card?",
+            f"Switching to \"{name}\" will discard your current card content "
+            "(including any AI-generated or edited text, prices, links, and "
+            "images) and replace it with that preset's defaults.\n\n"
+            "This can't be undone. Continue?",
+        ):
+            return
+        self._load_preset(name)
 
 
 # ── Integration helper ────────────────────────────────────────────────────────
@@ -1888,4 +2630,10 @@ def build_card_creator_view(main_window) -> None:
     frame.grid_columnconfigure(0, weight=1)
     tab = CardCreatorV2(frame, main_window=main_window)
     tab.grid(row=0, column=0, sticky="nsew")
+    # Real bug found while studying this file for Item 11 of the Live
+    # Testing Findings pass: _sync_widget_theme's own theme-toggle handler
+    # (main_window.py) already reads getattr(self, "card_creator_tab", None)
+    # to re-color the Cards preview host's raw tk.Frame background on every
+    # Dark/Light/Warm Ivory switch -- but this attribute was never actually
+    # assigned anywhere, so that whole block was silently always a no-op.
     main_window.card_creator_tab = tab

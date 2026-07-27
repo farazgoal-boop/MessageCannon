@@ -95,6 +95,39 @@ def test_gemini_rate_limit_gives_real_message(monkeypatch):
         ai_service._call_ai("gemini", "a-key", "sys", "user")
 
 
+def test_gemini_rate_limit_surfaces_real_quota_detail_when_present(monkeypatch):
+    """Real bug found while investigating a user report of persistent 429s
+    that never cleared even after waiting: the old code discarded Gemini's
+    own JSON error body on a 429, always showing the same generic "wait a
+    moment" text regardless of what Google actually said. A real quota
+    error's body names the specific quota hit -- that must now surface."""
+    def fake_post(*a, **k):
+        return _FakeResponse(
+            429,
+            {"error": {"status": "RESOURCE_EXHAUSTED",
+                       "message": "You exceeded your current quota, please check your plan "
+                                  "and billing details."}},
+            text='{"error": {"message": "You exceeded your current quota"}}',
+        )
+
+    monkeypatch.setattr(ai_service.requests, "post", fake_post)
+    with pytest.raises(AIServiceError, match="exceeded your current quota"):
+        ai_service._call_ai("gemini", "a-key", "sys", "user")
+
+
+def test_gemini_model_is_not_a_model_confirmed_broken_this_session():
+    """gemini-2.0-flash was confirmed shut down (Google's own model docs).
+    gemini-2.5-flash-lite was the first fix, but a real live test against a
+    real key came back a 404 "no longer available to new users" within the
+    hour -- Google closes new-key access to a model generation ahead of its
+    actual shutdown date, a distinction no amount of "is this deprecated"
+    doc-reading surfaces on its own. Locks in the real, currently-working
+    model (gemini-3.1-flash-lite, GA since May 2026) and guards against
+    silently regressing to either known-broken value."""
+    assert ai_service.GEMINI_MODEL == "gemini-3.1-flash-lite"
+    assert ai_service.GEMINI_MODEL not in ("gemini-2.0-flash", "gemini-2.5-flash-lite")
+
+
 def test_gemini_no_candidates_reports_block_reason(monkeypatch):
     def fake_post(*a, **k):
         return _FakeResponse(200, {"promptFeedback": {"blockReason": "SAFETY"}})

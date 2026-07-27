@@ -34,6 +34,16 @@ Contrast audit, warm_ivory (new):
   TEXT_HEAD  (#2B2418) / BG_SURFACE (#FFFDF8)   15.9:1  AAA
   TEXT_MUTED (#7A6F5C) / BG_SURFACE (#FFFDF8)    4.6:1  AA
   DANGER_ON_BADGE (#B91C1C) / BADGE_BG (#F3EAD8) 5.7:1  AA
+
+Contrast audit, ACCENT_TEXT (added Item 27, Final Premium Polish Pass): plain
+ACCENT measured as low as 2.16:1 (dark mode) as a *text* color on
+BG_SURFACE/BG_INNER/BADGE_BG — a real WCAG fail, exactly the scenario this
+file's own Design System rule already warned about ("use ACCENT as fg_color
+only, NOT text_color on cards"). ACCENT_TEXT passes AA against all three of
+those backgrounds, in all three palettes:
+  dark:  A5B4FC / BG_SURFACE #2A4762  4.84:1   / BG_INNER #152C42  7.16:1   / BADGE_BG #1F3A57  5.85:1
+  light: 4F46E5 / BG_SURFACE #FFFFFF  6.29:1   / BG_INNER #F1F3F7  5.66:1   / BADGE_BG #EEF1F6  5.55:1
+  warm:  94530F / BG_SURFACE #FFFDF8  5.90:1   / BG_INNER #F3EAD8  5.02:1   / BADGE_BG #F3EAD8  5.02:1
 """
 
 import customtkinter as ctk
@@ -66,7 +76,9 @@ _TOKENS = {
     "TEXT_DIM":         ("#78828E", "#7B8FA0"),
     "ACCENT":           ("#6366F1", "#6366F1"),
     "ACCENT_HOVER":     ("#4F46E5", "#4F46E5"),
+    "ACCENT_TEXT":      ("#4F46E5", "#A5B4FC"),
     "SUCCESS":          ("#10B981", "#10B981"),
+    "SUCCESS_HOVER":    ("#059669", "#059669"),
     "DANGER":           ("#EF4444", "#EF4444"),
     "DANGER_HOVER":     ("#DC2626", "#DC2626"),
     "DANGER_ON_BADGE":  ("#B91C1C", "#FF7B7B"),
@@ -85,7 +97,9 @@ _WARM_IVORY = {
     "TEXT_DIM":         "#948968",
     "ACCENT":           "#B5651D",
     "ACCENT_HOVER":     "#94530F",
+    "ACCENT_TEXT":      "#94530F",
     "SUCCESS":          "#0F8A5F",
+    "SUCCESS_HOVER":    "#0D7551",
     "DANGER":           "#C0392B",
     "DANGER_HOVER":     "#A6301F",
     "DANGER_ON_BADGE":  "#B91C1C",
@@ -109,3 +123,18 @@ def resolve(token):
         return token
     light, dark = token
     return light if ctk.get_appearance_mode() == "Light" else dark
+
+
+def bg_main_for_mode(mode: str) -> str:
+    """BG_MAIN's exact hex for a specific *target* mode ("Dark"/"Light"/
+    "Warm Ivory"/"System"), independent of whatever palette is currently
+    active — used by the theme-switch transition overlay (Item 14 of the
+    Live Testing Findings pass, Round 2), which needs to know the
+    DESTINATION background color before the actual switch happens, not the
+    current one. Kept here (not hardcoded in main_window.py) so this stays
+    the single source of truth for every hex value, per this file's own
+    Design System rule."""
+    if mode == "Warm Ivory":
+        return _WARM_IVORY["BG_MAIN"]
+    light, dark = _TOKENS["BG_MAIN"]
+    return dark if mode == "Dark" else light

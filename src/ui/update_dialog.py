@@ -25,7 +25,10 @@ class UpdateDialog(ctk.CTkToplevel):
         self.main_window = main_window
         self.info = info
         self.title("Update available")
-        center_on_parent(self, 480, 420, main_window)
+        # Height bumped 420->450 (Item 29): the new version-info card below
+        # adds real padding a flat label stack didn't need; this keeps the
+        # release-notes box from being squeezed by the same fixed height.
+        center_on_parent(self, 480, 450, main_window)
         self.resizable(False, False)
         self.transient(main_window)
         self.grab_set()
@@ -34,34 +37,46 @@ class UpdateDialog(ctk.CTkToplevel):
         self.bind("<Escape>", lambda _e: self.destroy())
 
         self.grid_columnconfigure(0, weight=1)
-        self.grid_rowconfigure(2, weight=1)
+        self.grid_rowconfigure(1, weight=1)
 
-        ctk.CTkLabel(self, text=f"MessageCannon Pro {info.tag} is available",
-                     font=ctk.CTkFont(size=16, weight="bold"),
-                     text_color=T.TEXT_HEAD, wraplength=430, justify="left"
-                     ).grid(row=0, column=0, padx=22, pady=(20, 4), sticky="w")
-        ctk.CTkLabel(self, text=f"You have v{current_version} installed.",
+        # Item 29 (Final Premium Polish Pass): this version-info block used
+        # to be two bare labels sitting directly on T.BG_MAIN with no framing
+        # at all -- every other real dialog in the app (SendConfirmationDialog's
+        # recipients/delay/ETA "stats" strip is the direct precedent) wraps
+        # its key info in a real bordered T.BG_SURFACE card. Matched that
+        # pattern here instead of leaving this dialog looking plainer than
+        # its siblings. Title font bumped 16->18 to match the established
+        # dialog-title convention (SendConfirmationDialog/AIComposeDialog/
+        # ContactImportReviewDialog all use size=18).
+        version_card = ctk.CTkFrame(self, fg_color=T.BG_SURFACE, corner_radius=12,
+                                     border_width=1, border_color=T.BG_BORDER)
+        version_card.grid(row=0, column=0, padx=22, pady=(20, 14), sticky="ew")
+        ctk.CTkLabel(version_card, text=f"MessageCannon Pro {info.tag} is available",
+                     font=ctk.CTkFont(size=18, weight="bold"),
+                     text_color=T.TEXT_HEAD, wraplength=400, justify="left"
+                     ).grid(row=0, column=0, padx=16, pady=(14, 4), sticky="w")
+        ctk.CTkLabel(version_card, text=f"You have v{current_version} installed.",
                      text_color=T.TEXT_MUTED, font=ctk.CTkFont(size=12)
-                     ).grid(row=1, column=0, padx=22, pady=(0, 12), sticky="w")
+                     ).grid(row=1, column=0, padx=16, pady=(0, 14), sticky="w")
 
         notes_box = ctk.CTkTextbox(self, fg_color=T.BG_INNER, text_color=T.TEXT_MUTED,
                                     corner_radius=8, wrap="word", font=ctk.CTkFont(size=12))
-        notes_box.grid(row=2, column=0, padx=22, pady=(0, 14), sticky="nsew")
+        notes_box.grid(row=1, column=0, padx=22, pady=(0, 14), sticky="nsew")
         notes_box.insert("1.0", info.release_notes or "No release notes provided.")
         notes_box.configure(state="disabled")
 
         self._status_var = ctk.StringVar(value="")
         ctk.CTkLabel(self, textvariable=self._status_var, text_color=T.TEXT_MUTED,
                      font=ctk.CTkFont(size=11), wraplength=430, justify="left"
-                     ).grid(row=3, column=0, padx=22, pady=(0, 4), sticky="w")
+                     ).grid(row=2, column=0, padx=22, pady=(0, 4), sticky="w")
 
         self._progress = ctk.CTkProgressBar(self, progress_color=T.ACCENT)
         self._progress.set(0)
-        self._progress.grid(row=4, column=0, padx=22, pady=(0, 10), sticky="ew")
+        self._progress.grid(row=3, column=0, padx=22, pady=(0, 10), sticky="ew")
         self._progress.grid_remove()
 
         footer = ctk.CTkFrame(self, fg_color="transparent")
-        footer.grid(row=5, column=0, padx=22, pady=(0, 20), sticky="ew")
+        footer.grid(row=4, column=0, padx=22, pady=(0, 20), sticky="ew")
         footer.grid_columnconfigure(0, weight=1)
 
         ctk.CTkButton(footer, text="Later", width=90, fg_color=T.BADGE_BG,

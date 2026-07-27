@@ -28,7 +28,7 @@ class SendConfirmationDialog(ctk.CTkToplevel):
     rendered preview, and an explicit confirmation before anything sends."""
 
     def __init__(self, main_window, channel: str, recipient_count: int,
-                 delay_seconds: float, preview_lines: list, on_confirm):
+                 delay_seconds: float, preview_lines: list, on_confirm, subject: str = ""):
         super().__init__(main_window)
         self.on_confirm = on_confirm
         self.title("Confirm Send")
@@ -41,7 +41,7 @@ class SendConfirmationDialog(ctk.CTkToplevel):
         self.bind("<Return>", lambda _e: self._confirm())
 
         self.grid_columnconfigure(0, weight=1)
-        self.grid_rowconfigure(3, weight=1)
+        self.grid_rowconfigure(4 if subject else 3, weight=1)
 
         ctk.CTkLabel(self, text=f"📤 Send via {channel.capitalize()}?",
                      font=ctk.CTkFont(size=18, weight="bold"), text_color=T.TEXT_HEAD).grid(
@@ -64,19 +64,33 @@ class SendConfirmationDialog(ctk.CTkToplevel):
             ctk.CTkLabel(cell, text=value, text_color=T.TEXT_HEAD,
                          font=ctk.CTkFont(size=16, weight="bold")).pack(anchor="w")
 
+        # Item 10 of the Live Testing Findings pass: an explicit subject-
+        # line row for email sends (WhatsApp has no subject, so `subject`
+        # is only ever passed non-empty from the email compose path).
+        next_row = 2
+        if subject:
+            subj_row = ctk.CTkFrame(self, fg_color="transparent")
+            subj_row.grid(row=next_row, column=0, padx=24, pady=(0, 12), sticky="ew")
+            ctk.CTkLabel(subj_row, text="Subject", text_color=T.TEXT_MUTED,
+                         font=ctk.CTkFont(size=11)).pack(anchor="w")
+            ctk.CTkLabel(subj_row, text=subject, text_color=T.TEXT_HEAD,
+                         font=ctk.CTkFont(size=13, weight="bold"), wraplength=500,
+                         justify="left").pack(anchor="w")
+            next_row += 1
+
         ctk.CTkLabel(self, text="Preview (real recipient data)",
                      text_color=T.TEXT_HEAD, font=ctk.CTkFont(size=12, weight="bold")).grid(
-            row=2, column=0, padx=24, pady=(0, 4), sticky="nw")
+            row=next_row, column=0, padx=24, pady=(0, 4), sticky="nw")
         preview_box = ctk.CTkTextbox(self, fg_color=T.BG_INNER, text_color=T.TEXT_HEAD,
                                       border_color=T.BG_BORDER, border_width=1,
                                       font=ctk.CTkFont(size=12))
-        preview_box.grid(row=3, column=0, padx=24, pady=(0, 12), sticky="nsew")
+        preview_box.grid(row=next_row + 1, column=0, padx=24, pady=(0, 12), sticky="nsew")
         preview_box.insert("1.0", "\n\n---\n\n".join(preview_lines) if preview_lines
                             else "No recipients selected.")
         preview_box.configure(state="disabled")
 
         footer = ctk.CTkFrame(self, fg_color="transparent")
-        footer.grid(row=4, column=0, padx=24, pady=(0, 20), sticky="ew")
+        footer.grid(row=next_row + 2, column=0, padx=24, pady=(0, 20), sticky="ew")
         footer.grid_columnconfigure(0, weight=1)
         ctk.CTkButton(footer, text="Cancel", width=100, fg_color=T.BADGE_BG,
                       hover_color=T.BG_BORDER, text_color=T.TEXT_HEAD,
@@ -161,8 +175,10 @@ class SendReportDialog(ctk.CTkToplevel):
                       text_color=T.TEXT_HEAD, command=self.destroy).pack(side="right")
 
 
-def show_send_confirmation(main_window, channel, recipient_count, delay_seconds, preview_lines, on_confirm):
-    return SendConfirmationDialog(main_window, channel, recipient_count, delay_seconds, preview_lines, on_confirm)
+def show_send_confirmation(main_window, channel, recipient_count, delay_seconds, preview_lines,
+                            on_confirm, subject: str = ""):
+    return SendConfirmationDialog(main_window, channel, recipient_count, delay_seconds,
+                                   preview_lines, on_confirm, subject=subject)
 
 
 def show_send_report(main_window, channel, sent, failed, failed_details, on_retry_failed=None, on_export=None):

@@ -230,11 +230,15 @@ class ContactImportReviewDialog(ctk.CTkToplevel):
             ctk.CTkRadioButton(radios, text="Skip duplicates (keep existing data as-is)",
                                variable=self.dup_resolution, value="skip",
                                command=self._update_import_button_label,
-                               text_color=T.TEXT_MUTED).pack(anchor="w", pady=2)
+                               text_color=T.TEXT_MUTED,
+                               fg_color=T.ACCENT, border_color=T.ACCENT,
+                               hover_color=T.ACCENT_HOVER).pack(anchor="w", pady=2)
             ctk.CTkRadioButton(radios, text="Merge (fill in blanks on the existing contact, never overwrites)",
                                variable=self.dup_resolution, value="merge",
                                command=self._update_import_button_label,
-                               text_color=T.TEXT_MUTED).pack(anchor="w", pady=2)
+                               text_color=T.TEXT_MUTED,
+                               fg_color=T.ACCENT, border_color=T.ACCENT,
+                               hover_color=T.ACCENT_HOVER).pack(anchor="w", pady=2)
 
         if counts["invalid"]:
             ctk.CTkLabel(self.content, text=f"{counts['invalid']} invalid row(s) will be skipped automatically.",
