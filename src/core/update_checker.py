@@ -173,3 +173,56 @@ def spawn_detached(command: list) -> None:
     if sys.platform == "win32":
         kwargs["creationflags"] = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
     subprocess.Popen(command, close_fds=True, **kwargs)
+
+
+def spawn_update_after_current_process_exits(installer_path: str, pid: Optional[int] = None) -> None:
+    """Real bug fix (2026-07-28): the previous sequence was
+    `spawn_detached(install_command)` immediately followed by `_on_close()` —
+    launching the installer and closing the app at essentially the same
+    moment. Confirmed via a real, controlled reproduction (a genuine
+    installed v1.3.0, launched for real, with the real v1.3.1 installer run
+    against it while still open): the silent install does NOT queue a
+    delayed replace or otherwise degrade gracefully -- it fails outright
+    with a real Inno Setup exit code 5 ("fatal error during install"),
+    because it cannot overwrite this app's own locked, in-use .exe.
+    `spawn_detached` never checked the exit code (it's fire-and-forget by
+    design, so the install could survive the app closing), so this failure
+    was completely invisible: the app closed anyway and implied success,
+    leaving the user on the old version indefinitely while believing they'd
+    updated.
+
+    Fix: launch a background helper that waits for THIS process's own PID to
+    fully exit -- guaranteed by Windows' own process-wait semantics, not a
+    fixed sleep/guess -- before running the installer at all. This
+    eliminates the race structurally rather than trying to close faster.
+
+    A second real, isolated bug found while verifying THIS fix (via a
+    marker-file test harness, not assumed): `subprocess.CREATE_NO_WINDOW`'s
+    sibling `subprocess.DETACHED_PROCESS` -- previously used by the sibling
+    `spawn_detached()` above, and initially copied into this function too --
+    reliably prevented the helper from ever completing its job, confirmed by
+    testing each `creationflags` combination in isolation (`DETACHED_PROCESS`
+    alone: fails; `DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP`: fails;
+    `CREATE_NEW_PROCESS_GROUP` alone: works; no flags at all: also works).
+    `CREATE_NEW_PROCESS_GROUP` alone is used here -- it still isolates the
+    helper from this process's own Ctrl+C/console signals, and `-WindowStyle
+    Hidden` (passed to the PowerShell command itself, not a Popen flag)
+    already keeps it invisible, so nothing is lost by dropping
+    `DETACHED_PROCESS`."""
+    if pid is None:
+        pid = os.getpid()
+    install_cmd = launch_silent_install_and_get_command(installer_path)
+    escaped_path = install_cmd[0].replace("'", "''")
+    args_literal = ",".join(f"'{a}'" for a in install_cmd[1:])
+    ps_script = (
+        f"Wait-Process -Id {pid} -ErrorAction SilentlyContinue; "
+        f"Start-Process -FilePath '{escaped_path}' -ArgumentList {args_literal}"
+    )
+    command = ["powershell.exe", "-NoProfile", "-WindowStyle", "Hidden", "-Command", ps_script]
+    kwargs = {}
+    if sys.platform == "win32":
+        kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+    subprocess.Popen(
+        command, close_fds=True,
+        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        **kwargs)

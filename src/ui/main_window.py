@@ -27,7 +27,7 @@ from ..ui.card_creator_tab import build_card_creator_view
 from ..ui.reports_chart import ReportsChart
 from ..ui.update_dialog import show_update_dialog
 from ..ui.accessibility import enable_keyboard_accessibility
-from ..core.update_checker import check_for_update, spawn_detached, launch_silent_install_and_get_command, UpdateInfo
+from ..core.update_checker import check_for_update, spawn_update_after_current_process_exits, UpdateInfo
 
 try:
     from tkinterdnd2 import TkinterDnD
@@ -5109,14 +5109,26 @@ class MainWindow(ctk.CTk):
         show_update_dialog(self, self._update_info, APP_VERSION)
 
     def _apply_downloaded_update(self, installer_path: str) -> None:
-        """Launches the downloaded Windows installer as a detached process,
-        then cleanly closes MessageCannon so the installer can overwrite the
-        running .exe (Inno Setup cannot do this while it's still open).
-        Contacts/templates/settings live in %APPDATA%\\MessageCannon Pro
-        (see db_manager.py), entirely outside the install directory the
-        installer touches, so they are structurally untouched by this."""
+        """Real bug fixed (2026-07-28): this used to launch the installer via
+        spawn_detached() immediately, then close -- racing the two. Confirmed
+        via a real, controlled reproduction (a genuine v1.3.0 install,
+        launched for real, with the real v1.3.1 installer run against it
+        while still open) that the silent install genuinely fails outright
+        (real Inno Setup exit code 5) when the app it's replacing is still
+        running and holding its own .exe open -- and since spawn_detached
+        never checked the exit code, that failure was completely invisible:
+        the app closed anyway and implied success, leaving the user stuck on
+        the old version while believing they'd updated.
+
+        Fix: spawn_update_after_current_process_exits() launches a detached
+        helper that waits for THIS process's own PID to fully disappear
+        (a real Windows process-wait, not a fixed sleep/guess) before it
+        ever runs the installer, structurally eliminating the race. Contacts/
+        templates/settings live in %APPDATA%\\MessageCannon Pro (see
+        db_manager.py), entirely outside the install directory the installer
+        touches, so they are structurally untouched by this."""
         try:
-            spawn_detached(launch_silent_install_and_get_command(installer_path))
+            spawn_update_after_current_process_exits(installer_path)
         except Exception as exc:
             Logger.warning(f"Failed to launch downloaded installer: {exc}")
             show_toast(self, f"Could not start the installer: {exc}", kind="error")
