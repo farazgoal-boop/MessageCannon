@@ -4575,3 +4575,71 @@ plain `tests/` — 365/365 clean when accounting for the confirmed flake.
 Card Creator itself (matching Compose's own Item-9 pill-insert dropdown) — the user's own answer
 confirmed the mechanism (typing `{name}` directly into a Card Creator field) was what they wanted
 verified, not a new authoring UI; flagged here rather than silently assumed out of scope.
+
+## Real bug found via a genuine live email send: stray whitespace in SMTP settings silently failed every send (2026-07-29)
+
+`v1.3.3` shipped the Visual HTML Card feature above; the user then asked for a real end-to-end
+proof — an actual email sent through the app's real, already-configured Gmail SMTP account, not a
+mocked one. Built a script driving a real `MainWindow` (mocking only the unrelated WhatsApp
+session-bootstrap thread and the update-checker's GitHub call, the same two things
+`tests/ui/conftest.py` already mocks for this exact reason) through the real
+`_enter_email_card_mode` → `_start_email_from_compose` → real `smtplib` path, sending to
+`farazgoal@gmail.com` only (confirmed with the user first, since the real production DB's other 4
+email-having contacts are real people who never asked to receive a test) via an in-memory-only
+`Contact` never written to the real contacts table.
+
+**Two real, previously-unknown bugs found by this one real test — neither would have been caught by
+any mocked-SMTP test this session already had**:
+
+1. **The send itself failed**: `folded header contains newline: 'From: Faraz Automation  <ikrash
+   ikrama398@gmail.com\n>\n'`. Root cause, confirmed by reading the real stored settings directly:
+   `smtp_from_addr` had a literal trailing `\n` and `smtp_from_name` a trailing space — almost
+   certainly from a clipboard paste into the Settings field at some point (a plain `CTkEntry` won't
+   let you *type* a newline, but pasting one in works fine). `_load_settings`/`_save_settings`
+   never stripped any SMTP field (host/port/user/from_name/from_addr/provider/delay), so the stray
+   character reached `email.mime.text.MIMEText`'s real header-folding check unstripped and broke
+   **every single email send this app has ever made with this account**, not just card-mode sends —
+   a pre-existing bug this feature's own real-send test happened to be the first thing in the whole
+   session to actually exercise a real `smtplib` call end-to-end (every prior "real send" proof in
+   this file mocked `smtplib`/`WhatsAppSender` at the network boundary). Fixed by adding `.strip()`
+   on load (self-heals any already-corrupted stored value on the very next app start, for any user
+   already affected) and on save (a future paste can't reintroduce it). Also corrected the two
+   affected keys directly in the real production settings blob (scoped update to exactly those two
+   string values, not a blanket rewrite) so the fix took effect immediately rather than waiting for
+   the user's next Settings save.
+2. **The pre-send confirmation dialog's preview text also showed the price garbled**
+   (`$19950% OFF`) — a second instance of the exact concatenation bug fixed earlier this session in
+   `_HTMLToRichText.handle_data`, but in a *different* function I'd written for this same feature:
+   `_strip_html_for_preview` (the plain-text preview generator for card mode) had no equivalent
+   space-insertion logic for adjacent inline tags. My own new test file
+   (`test_email_visual_card_mode.py`) hadn't asserted the exact spacing, only that no raw tags
+   leaked through — a real gap in that test's coverage, only caught by this live run. Fixed the same
+   way: a blanket single space inserted after any closing tag not already handled by the
+   block-tag-to-newline rule, before stripping all tags.
+
+**Verified, both by the real live re-run and by new automated coverage**: re-ran the identical real
+send script after both fixes — the confirmation preview now reads `$199 50% OFF` (correct spacing)
+and the real send succeeded (`Done — ✅ 1 sent ❌ 0 failed`), confirmed via a direct query of the
+real `message_logs` table (`status='sent'`, `error_message=NULL`). New
+`tests/ui/test_smtp_settings_whitespace.py` (3 tests) — load strips a trailing newline/space from
+stored SMTP fields; save persists stripped values even if the live entry currently holds an
+untrimmed one; and the exact real crash site (`MIMEText`'s header folding) no longer raises with a
+previously-corrupted value. Confirmed all 3 fail against the pre-fix code with the literal real
+error (`email.errors.HeaderWriteError: folded header contains newline`) via `git stash`, then pass
+after restoring the fix.
+
+**Cleanup, same discipline as every real-send proof in this file**: the test campaign/message_log
+rows this real send created (one failed attempt before the fix, one real successful send after)
+were deleted by exact ID immediately after, not a blanket clear. Real production database
+reconfirmed at its correct baseline throughout: **9 contacts, 0 campaigns, 0 message_logs**.
+
+Full regression check per this file's standing discipline: **243/244 functional** (`-n 39`, worker
+count bumped 38→39 in `tests/ui/README.md` for the new test file — the one failure,
+`test_window_utils.py`, reconfirmed as this suite's own already-documented resource-contention
+flake, passing clean alone), **7/7** navigation-timing alone, **1/1** close-button alone, **2/2**
+nav-accent-timing alone, **119/119** plain `tests/` — 372/373 when accounting for the confirmed
+flake.
+
+**Shipped as `v1.3.4`** (bumped from the `v1.3.3` this same session already released, since this is
+a second, independent real bug fix found after that release): tagged, pushed, all 4 CI jobs green,
+real assets attached, `check_for_update("1.3.3")` confirmed detecting it.

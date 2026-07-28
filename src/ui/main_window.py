@@ -3869,17 +3869,26 @@ class MainWindow(ctk.CTk):
         # Falls back to the old plaintext "smtp_pass" key for anyone upgrading
         # from a version that saved it that way, so existing users don't have
         # to re-enter their password after this change.
-        self._em_provider.set(str(settings.get("smtp_provider", "Gmail")))
-        self._em_host.set(str(settings.get("smtp_host", "smtp.gmail.com")))
-        self._em_port.set(str(settings.get("smtp_port", "587")))
-        self._em_user.set(str(settings.get("smtp_user", "")))
+        # Real bug found via a live end-to-end send test: a stray trailing
+        # newline in a stored field (almost certainly from a clipboard paste
+        # into a Settings entry -- a plain CTkEntry doesn't let you *type* a
+        # literal "\n", but pasting one in is possible) reached smtplib's
+        # real "From" header construction unstripped and raised "folded
+        # header contains newline", silently failing every single email
+        # send. .strip() here self-heals any already-corrupted stored value
+        # on the very next load; _save_settings below also strips so a
+        # fresh paste can't reintroduce it.
+        self._em_provider.set(str(settings.get("smtp_provider", "Gmail")).strip())
+        self._em_host.set(str(settings.get("smtp_host", "smtp.gmail.com")).strip())
+        self._em_port.set(str(settings.get("smtp_port", "587")).strip())
+        self._em_user.set(str(settings.get("smtp_user", "")).strip())
         smtp_pass = decrypt_secret(str(settings.get("smtp_pass_enc", "")))
         if not smtp_pass:
             smtp_pass = str(settings.get("smtp_pass", ""))  # legacy plaintext fallback
         self._em_pass.set(smtp_pass)
-        self._em_from_name.set(str(settings.get("smtp_from_name", "My Business")))
-        self._em_from_addr.set(str(settings.get("smtp_from_addr", "")))
-        self._em_delay.set(str(settings.get("smtp_delay", "5")))
+        self._em_from_name.set(str(settings.get("smtp_from_name", "My Business")).strip())
+        self._em_from_addr.set(str(settings.get("smtp_from_addr", "")).strip())
+        self._em_delay.set(str(settings.get("smtp_delay", "5")).strip())
 
         # AI Cards API key — encrypted at rest, decrypted only into memory here
         ai_key = decrypt_secret(str(settings.get("ai_api_key_enc", "")))
@@ -3908,14 +3917,14 @@ class MainWindow(ctk.CTk):
                 "email_warmup_enabled": self.email_warmup_enabled_var.get(),
                 "email_warmup_start_date": self._email_warmup_start_date,
                 # SMTP
-                "smtp_provider":   self._em_provider.get(),
-                "smtp_host":       self._em_host.get(),
-                "smtp_port":       self._em_port.get(),
-                "smtp_user":       self._em_user.get(),
+                "smtp_provider":   self._em_provider.get().strip(),
+                "smtp_host":       self._em_host.get().strip(),
+                "smtp_port":       self._em_port.get().strip(),
+                "smtp_user":       self._em_user.get().strip(),
                 "smtp_pass_enc":   encrypt_secret(self._em_pass.get()),
-                "smtp_from_name":  self._em_from_name.get(),
-                "smtp_from_addr":  self._em_from_addr.get(),
-                "smtp_delay":      self._em_delay.get(),
+                "smtp_from_name":  self._em_from_name.get().strip(),
+                "smtp_from_addr":  self._em_from_addr.get().strip(),
+                "smtp_delay":      self._em_delay.get().strip(),
                 # AI Cards
                 "ai_api_key_enc":  encrypt_secret(self._ai_api_key.get()),
                 "ai_provider":     self._ai_provider.get(),
@@ -4973,6 +4982,14 @@ class MainWindow(ctk.CTk):
         text = re.sub(r"(?is)<(script|style)[^>]*>.*?</\1>", " ", html)
         text = re.sub(r"(?i)<br\s*/?>", "\n", text)
         text = re.sub(r"(?i)</(p|div|li|h[1-6])>", "\n", text)
+        # Same concatenation risk _HTMLToRichText.handle_data fixes for the
+        # rich-text importer: sibling inline elements (e.g. price/old-price/
+        # discount-badge <span>s) often have zero whitespace between them in
+        # the source HTML, relying entirely on CSS margin for visual
+        # separation -- a real repro caught this producing "$199 50% OFF"
+        # -> "$19950% OFF" here. A blanket space after any other closing tag
+        # (block tags above already got a real newline) prevents that.
+        text = re.sub(r"(?i)</[a-zA-Z0-9]+>", " ", text)
         text = re.sub(r"<[^>]+>", "", text)
         text = html_module.unescape(text)
         text = re.sub(r"[ \t]+", " ", text)
