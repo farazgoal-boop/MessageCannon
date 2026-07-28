@@ -29,6 +29,7 @@ from ..core.ai_service import AIServiceError
 from ..models import Contact
 from ..modules.data_importer import UniversalDataImporter
 from ..utils.validators import DataValidator, PhoneValidator
+from ..utils.helpers import parse_dropped_file_path
 from . import theme as T
 from .toast import show_toast
 from .window_utils import center_on_parent
@@ -1189,7 +1190,16 @@ class CardCreatorV2(ctk.CTkFrame):
         hdr.grid(row=0, column=0, sticky="ew", padx=12, pady=(10, 4))
         hdr.grid_columnconfigure(1, weight=1)
 
-        ctk.CTkLabel(hdr, text="↕", text_color=T.ACCENT_TEXT,
+        # Real bug found via the same audit that fixed the sidebar tagline:
+        # a classic drag-handle glyph styled in T.ACCENT_TEXT (this app's
+        # real "clickable" color) with no drag support at all -- the actual
+        # reorder mechanism is the real ↑/↓ buttons a few pixels to the
+        # right, not dragging this icon. Restyled to T.TEXT_MUTED (this
+        # card is T.BG_SURFACE -- T.TEXT_DIM is only contrast-verified on
+        # T.BG_MAIN, per the Design System rules) so it reads as a purely
+        # decorative position indicator instead of implying a drag action
+        # neither the icon nor a real gesture actually performs.
+        ctk.CTkLabel(hdr, text="↕", text_color=T.TEXT_MUTED,
                      font=ctk.CTkFont(size=14)).grid(row=0, column=0, padx=(0, 8))
         title_lbl = ctk.CTkLabel(
             hdr,
@@ -1316,8 +1326,13 @@ class CardCreatorV2(ctk.CTkFrame):
             v.trace_add("write", lambda *_: self._schedule_preview())
             lbl("YouTube video link")
             entry(v, "https://youtube.com/watch?v=...")
+            # Real bug found via the same audit: a play-icon glyph in
+            # T.ACCENT_TEXT reads as "click to preview" -- it's actually
+            # just a caption describing export-time behavior, nothing here
+            # is clickable. Restyled to T.TEXT_MUTED, matching this app's
+            # established caption/helper-text convention.
             ctk.CTkLabel(body, text="▶ Video will play inside the card",
-                         text_color=T.ACCENT_TEXT, font=ctk.CTkFont(size=11)).pack(anchor="w")
+                         text_color=T.TEXT_MUTED, font=ctk.CTkFont(size=11)).pack(anchor="w")
             data["_url_var"] = v
 
         elif stype == "text":
@@ -1429,9 +1444,14 @@ class CardCreatorV2(ctk.CTkFrame):
             data["_link_vars"] = link_vars
 
         elif stype == "contact":
+            # Real bug found via the same audit: a plain explanatory
+            # caption styled in T.ACCENT_TEXT (this app's real "clickable"
+            # color) with nothing to click -- restyled to T.TEXT_MUTED,
+            # matching this app's established caption/helper-text
+            # convention.
             ctk.CTkLabel(body,
                          text="Contact footer uses your info from App Identity above.",
-                         text_color=T.ACCENT_TEXT,
+                         text_color=T.TEXT_MUTED,
                          font=ctk.CTkFont(size=11)).pack(anchor="w",pady=4)
 
         insert_at = self._insertion_index_for_new_section(stype)
@@ -2268,10 +2288,41 @@ class CardCreatorV2(ctk.CTkFrame):
             font=ctk.CTkFont(size=10), state="disabled",
             command=self._open_icon_crop_dialog)
         self._icon_crop_btn.pack(side="left", padx=(0, 2))
-        ctk.CTkButton(
+        # Real bug found while investigating a live report of "Crop stays
+        # disabled after a successful-looking upload": Remove had no
+        # state= at all, so it was ALWAYS clickable regardless of whether
+        # an image actually existed -- meaning "Remove looks active" was
+        # never real evidence an upload had succeeded, unlike Crop, which
+        # tracks the real state correctly. Made both track the same
+        # condition so they can no longer visually disagree.
+        self._icon_remove_btn = ctk.CTkButton(
             btn_row, text="✕ Remove", width=68, height=22, corner_radius=5,
             fg_color=T.BADGE_BG, hover_color=T.DANGER_HOVER, text_color=T.TEXT_HEAD,
-            font=ctk.CTkFont(size=10), command=self._clear_icon_image).pack(side="left")
+            font=ctk.CTkFont(size=10), state="disabled",
+            command=self._clear_icon_image)
+        self._icon_remove_btn.pack(side="left")
+
+        # Real fix for "if there's a legitimate reason Crop would be
+        # unavailable, show a clear message explaining why instead of just
+        # silently disabling it": a persistent label under the buttons,
+        # not just a transient toast (easy to miss / not tied visually to
+        # the disabled button it explains). Populated by
+        # _load_icon_image_path on any real upload failure, cleared on any
+        # success.
+        # T.DANGER_ON_BADGE is only contrast-verified on T.BADGE_BG (per the
+        # Design System rules) -- matches the same fg_color=BADGE_BG +
+        # text_color=DANGER_ON_BADGE pairing already used for this file's
+        # own AI-status-error label and the WhatsApp ban-risk banner, so
+        # this reuses an established, verified-contrast combination rather
+        # than inventing a new one.
+        self._icon_upload_error_var = ctk.StringVar(value="")
+        self._icon_upload_error_label = ctk.CTkLabel(
+            zone_wrap, textvariable=self._icon_upload_error_var,
+            fg_color=T.BADGE_BG, corner_radius=6,
+            text_color=T.DANGER_ON_BADGE, font=ctk.CTkFont(size=9),
+            wraplength=self._ICON_ZONE_WIDTH, justify="center")
+        self._icon_upload_error_label.pack(pady=(2, 0))
+        self._icon_upload_error_label.pack_forget()  # hidden until a real failure occurs
 
         emoji_row = ctk.CTkFrame(zone_wrap, fg_color="transparent")
         emoji_row.pack(pady=(4, 0))
@@ -2344,10 +2395,7 @@ class CardCreatorV2(ctk.CTkFrame):
             self._load_icon_image_path(path)
 
     def _on_icon_drop(self, event) -> None:
-        raw = event.data.strip()
-        if raw.startswith("{") and raw.endswith("}"):
-            raw = raw[1:-1]
-        path = raw.split("} {")[0] if "} {" in raw else raw
+        path = parse_dropped_file_path(event.data)
         if path:
             self._load_icon_image_path(path)
 
@@ -2355,6 +2403,11 @@ class CardCreatorV2(ctk.CTkFrame):
         try:
             uri = image_file_to_data_uri(path)
         except ImageUploadError as exc:
+            # Real fix: a transient toast alone was easy to miss and left
+            # Crop disabled with no visible explanation next to it -- now
+            # also shown persistently right under the drop zone, in
+            # addition to (not instead of) the existing toast.
+            self._set_icon_upload_error(str(exc))
             if self.main_window is not None:
                 show_toast(self.main_window, str(exc), kind="error")
             else:
@@ -2362,13 +2415,30 @@ class CardCreatorV2(ctk.CTkFrame):
             return
         self._micon_image_uri = uri
         self._icon_crop_btn.configure(state="normal")
+        if hasattr(self, "_icon_remove_btn"):
+            self._icon_remove_btn.configure(state="normal")
+        self._set_icon_upload_error("")
         self._redraw_icon_preview()
         self._schedule_preview()
+
+    def _set_icon_upload_error(self, message: str) -> None:
+        label = getattr(self, "_icon_upload_error_label", None)
+        var = getattr(self, "_icon_upload_error_var", None)
+        if label is None or var is None:
+            return
+        var.set(message)
+        if message:
+            label.pack(pady=(2, 0))
+        else:
+            label.pack_forget()
 
     def _clear_icon_image(self) -> None:
         self._micon_image_uri = None
         if hasattr(self, "_icon_crop_btn"):
             self._icon_crop_btn.configure(state="disabled")
+        if hasattr(self, "_icon_remove_btn"):
+            self._icon_remove_btn.configure(state="disabled")
+        self._set_icon_upload_error("")
         self._redraw_icon_preview()
         self._schedule_preview()
 

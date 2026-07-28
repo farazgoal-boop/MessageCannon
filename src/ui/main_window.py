@@ -758,9 +758,18 @@ class MainWindow(ctk.CTk):
             font=ctk.CTkFont(size=14, weight="bold"),
             text_color=T.TEXT_HEAD)
         self._brand_title_label.grid(row=0, column=1, sticky="w")
+        # Real bug found via live feedback: this tagline was styled in
+        # T.ACCENT_TEXT (this app's real, established "clickable link" color
+        # -- see "Configure in Settings ->", "View recipient list ->",
+        # "Get an API key ->", all real CTkButtons) with no command/binding
+        # at all, so it visually implied a link/action that didn't exist.
+        # It's a plain descriptor, not a navigable destination -- restyled
+        # to T.TEXT_MUTED, the Design System's own token for "labels,
+        # descriptions", matching how every other non-interactive
+        # subtitle/caption in this app is styled.
         self._brand_subtitle_label = ctk.CTkLabel(
             brand_panel, text="Pro  |  Campaign Suite",
-            text_color=T.ACCENT_TEXT, font=ctk.CTkFont(size=10, weight="bold"))
+            text_color=T.TEXT_MUTED, font=ctk.CTkFont(size=10, weight="bold"))
         self._brand_subtitle_label.grid(row=1, column=1, sticky="w")
 
         # Collapse/expand toggle — a real, always-visible manual control.
@@ -1232,12 +1241,19 @@ class MainWindow(ctk.CTk):
             font=ctk.CTkFont(size=12),
         ).grid(row=1, column=0, padx=16, pady=(0, 12), sticky="w")
 
+        # Real bug found via a live-feedback audit of the sidebar tagline:
+        # this is a plain informational notice, not a link or a real
+        # warning (T.DANGER_ON_BADGE is this app's real warning-severity
+        # color, used a few lines below for license_message_var) -- it was
+        # styled in T.ACCENT_TEXT, this app's real "clickable" color, with
+        # nothing to click. Restyled to T.TEXT_MUTED to match plain
+        # informational text elsewhere.
         ctk.CTkLabel(
             right_panel,
             text="If you close the app without activating, the workspace remains locked until a valid passkey is entered.",
             wraplength=240,
             justify="left",
-            text_color=T.ACCENT_TEXT,
+            text_color=T.TEXT_MUTED,
             font=ctk.CTkFont(size=11),
         ).grid(row=2, column=0, padx=16, pady=(0, 16), sticky="w")
 
@@ -1269,11 +1285,16 @@ class MainWindow(ctk.CTk):
         secure_note = ctk.CTkFrame(right_panel, fg_color=T.BADGE_BG, corner_radius=12,
                                    border_width=1, border_color=T.BG_BORDER)
         secure_note.grid(row=5, column=0, padx=24, pady=(0, 14), sticky="ew")
+        # Real bug found via the same audit: a plain card heading (followed
+        # by a TEXT_MUTED description right below, same as every other
+        # info-card heading in this app, e.g. "Session Status" in Settings)
+        # was styled in T.ACCENT_TEXT with nothing to click -- restyled to
+        # T.TEXT_HEAD, the established heading color used everywhere else.
         ctk.CTkLabel(
             secure_note,
             text="Secure local activation",
             font=ctk.CTkFont(size=13, weight="bold"),
-            text_color=T.ACCENT_TEXT,
+            text_color=T.TEXT_HEAD,
         ).pack(anchor="w", padx=14, pady=(12, 4))
         ctk.CTkLabel(
             secure_note,

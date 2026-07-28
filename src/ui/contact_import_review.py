@@ -13,6 +13,7 @@ import customtkinter as ctk
 
 from . import theme as T
 from .window_utils import center_on_parent
+from ..utils.helpers import parse_dropped_file_path
 
 try:
     from tkinterdnd2 import DND_FILES
@@ -111,10 +112,14 @@ class ContactImportReviewDialog(ctk.CTkToplevel):
             self._start_analysis(path)
 
     def _on_drop(self, event) -> None:
-        raw = event.data.strip()
-        if raw.startswith("{") and raw.endswith("}"):
-            raw = raw[1:-1]
-        path = raw.split("} {")[0] if "} {" in raw else raw
+        # Shared parsing now lives in utils/helpers.py -- was previously
+        # duplicated, byte-for-byte, with card_creator_tab.py's own
+        # _on_icon_drop, and never handled a real, documented tkinterdnd2
+        # cross-platform quirk (a file:// URI instead of a plain path);
+        # fixed there while investigating a live Card Creator bug report,
+        # extracted here too so this sibling drop zone gets the same fix
+        # instead of silently keeping the same latent gap.
+        path = parse_dropped_file_path(event.data)
         if path:
             self._start_analysis(path)
 

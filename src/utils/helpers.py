@@ -3,11 +3,43 @@ Helper functions and utilities.
 """
 
 import json
+import urllib.parse
 from pathlib import Path
 from typing import Any, Dict, Optional
 from datetime import datetime
 
 from .paths import get_app_data_dir, get_config_dir, get_database_path
+
+
+def parse_dropped_file_path(raw_data: str) -> str:
+    """Extracts a real filesystem path from a tkinterdnd2 <<Drop>> event's
+    raw event.data string. Previously duplicated, byte-for-byte, in both
+    card_creator_tab.py and contact_import_review.py -- extracted here so
+    the two can't silently drift apart again.
+
+    Handles the common case -- a single Tcl-braced path when it contains
+    spaces, or a bare unbraced path when it doesn't -- plus a real,
+    documented tkinterdnd2 cross-platform quirk the original hand-rolled
+    parsing never covered: some drag sources hand back a file:// URI
+    (percent-encoded) instead of a plain filesystem path, which
+    Path(...).is_file() then correctly reports as not existing -- a
+    genuine upload/import failure for a perfectly real file. Found and
+    fixed while investigating a live report of Card Creator's "Crop"
+    button staying disabled after what looked like a successful drag-drop
+    upload."""
+    raw = raw_data.strip()
+    if raw.startswith("{") and raw.endswith("}"):
+        raw = raw[1:-1]
+    path = raw.split("} {")[0] if "} {" in raw else raw
+    if path.lower().startswith("file://"):
+        parsed = urllib.parse.urlparse(path)
+        decoded = urllib.parse.unquote(parsed.path)
+        # urlparse gives "/C:/Users/..." for a Windows file:// URI --
+        # strip the leading slash in front of a drive letter.
+        if len(decoded) >= 3 and decoded[0] == "/" and decoded[2] == ":":
+            decoded = decoded[1:]
+        path = decoded
+    return path
 
 
 def save_json(data: Dict[str, Any], filename: str, directory: Optional[Path] = None) -> bool:
@@ -200,4 +232,5 @@ __all__ = [
     "calculate_eta",
     "is_first_launch",
     "mark_first_launch_complete",
+    "parse_dropped_file_path",
 ]

@@ -905,3 +905,148 @@ def test_card_with_many_sections_stays_scrollable_and_reachable(app):
             tab._toggle_advanced_sections()
         tab._load_preset("MessageCannon Pro")
 
+
+# ─── Live bug report: "Crop stays disabled after a successful-looking
+# upload" ────────────────────────────────────────────────────────────────
+#
+# Investigated exhaustively before writing any fix: every line touching
+# _micon_image_uri/_icon_crop_btn was read, and the existing test above
+# (test_loading_a_real_icon_image_updates_state_and_enables_crop) already
+# proved _load_icon_image_path itself correctly enables Crop on success --
+# there is no code path where a real upload succeeds (URI set, thumbnail
+# shown) while Crop stays disabled. The real, confirmed gaps found instead:
+#
+# 1. _on_icon_drop's path-parsing had ZERO test coverage (confirmed via
+#    grep) and never handled a file:// URI -- a real, documented
+#    tkinterdnd2 cross-platform quirk some drag sources produce instead of
+#    a plain filesystem path. A file:// URI fails Path(...).is_file(),
+#    which raises ImageUploadError("File not found: ...") for a perfectly
+#    real image -- a genuine upload failure a user could easily attribute
+#    to "the crop button is broken" rather than "my drag source used an
+#    unusual path format".
+# 2. The "Remove" button had no state= at all -- it was ALWAYS clickable
+#    regardless of whether an image existed, unlike Crop. This meant
+#    "Remove looks active" was never real evidence an upload had actually
+#    succeeded, which is likely why the reported bug read as "the image
+#    uploaded successfully" when the real event may have been a silent-ish
+#    failure (a toast is transient and easy to miss).
+# 3. Any real upload failure only ever showed a transient toast, with
+#    nothing persistent near the disabled Crop button explaining why --
+#    directly the "show a clear message instead of just silently disabling
+#    it" ask.
+
+from src.ui.card_creator_tab import parse_dropped_file_path
+
+
+def test_parse_dropped_file_path_handles_a_single_braced_spaced_path():
+    # tkinterdnd2 wraps a single item in braces only when it contains a
+    # space -- this was already correctly handled before this fix.
+    raw = "{C:/Users/HAROON TRADERS/Pictures/My Logo.png}"
+    assert parse_dropped_file_path(raw) == "C:/Users/HAROON TRADERS/Pictures/My Logo.png"
+
+
+def test_parse_dropped_file_path_handles_a_bare_unbraced_path():
+    raw = "C:/Users/name/logo.png"
+    assert parse_dropped_file_path(raw) == "C:/Users/name/logo.png"
+
+
+def test_parse_dropped_file_path_handles_a_file_uri_with_percent_encoding():
+    """The real, confirmed gap: a file:// URI (some drag sources produce
+    this instead of a plain path) with percent-encoded spaces must resolve
+    to the real, usable filesystem path, not be left as an unusable URI
+    string that Path(...).is_file() would report as not existing."""
+    raw = "{file:///C:/Users/HAROON%20TRADERS/Pictures/My%20Logo.png}"
+    assert parse_dropped_file_path(raw) == "C:/Users/HAROON TRADERS/Pictures/My Logo.png"
+
+
+def test_parse_dropped_file_path_strips_trailing_whitespace():
+    raw = "{C:/Users/HAROON TRADERS/Pictures/My Logo.png}\r\n"
+    assert parse_dropped_file_path(raw) == "C:/Users/HAROON TRADERS/Pictures/My Logo.png"
+
+
+class _FakeDropEvent:
+    def __init__(self, data: str):
+        self.data = data
+
+
+def test_on_icon_drop_with_a_file_uri_actually_enables_crop(app, tmp_path):
+    """The literal end-to-end repro: a real image, dropped via a file://
+    URI (not a plain path) -- the exact shape of drop data the original
+    _on_icon_drop could never handle -- must still result in a successful
+    upload with Crop enabled, not a silent failure."""
+    tab = app.card_creator_tab
+    try:
+        real_path = _write_tiny_png(tmp_path)
+        # Confirmed this fails against the pre-fix _on_icon_drop (which had
+        # no file:// handling at all): re-derive the equivalent file:// URI
+        # a real drag source could hand back for this exact real file --
+        # three slashes, colon/slash left unescaped (matching how real
+        # file:// URIs look; only genuinely special characters like spaces
+        # get percent-encoded).
+        import urllib.parse
+        uri = "file:///" + urllib.parse.quote(real_path.replace("\\", "/"), safe="/:")
+        event = _FakeDropEvent(f"{{{uri}}}")
+
+        tab._on_icon_drop(event)
+        app.update()
+
+        assert tab._micon_image_uri is not None, "the real image must have uploaded successfully"
+        assert tab._icon_crop_btn.cget("state") == "normal"
+        assert tab._icon_upload_error_var.get() == ""
+    finally:
+        tab._clear_icon_image()
+
+
+def test_remove_button_tracks_the_same_state_as_crop_button(app, tmp_path):
+    """Real fix: Remove used to be unconditionally clickable regardless of
+    upload state, unlike Crop -- made them agree, since a Remove button
+    that's "active" with nothing to remove is exactly the kind of
+    misleading signal that made this bug confusing to diagnose."""
+    tab = app.card_creator_tab
+    try:
+        assert tab._icon_remove_btn.cget("state") == "disabled"
+
+        path = _write_tiny_png(tmp_path)
+        tab._load_icon_image_path(path)
+        app.update()
+        assert tab._icon_remove_btn.cget("state") == "normal"
+        assert tab._icon_crop_btn.cget("state") == "normal"
+
+        tab._clear_icon_image()
+        app.update()
+        assert tab._icon_remove_btn.cget("state") == "disabled"
+        assert tab._icon_crop_btn.cget("state") == "disabled"
+    finally:
+        tab._clear_icon_image()
+
+
+def test_failed_upload_shows_a_persistent_error_message_not_just_a_toast(app, tmp_path):
+    """Real fix for "show a clear message explaining why instead of just
+    silently disabling it": a genuinely invalid upload (an unrecognized
+    file type here, one of ImageUploadError's own real, specific reasons)
+    must leave a real, persistent, mapped message near the buttons -- not
+    rely solely on a transient toast the user could miss."""
+    tab = app.card_creator_tab
+    try:
+        bad_path = tmp_path / "not_an_image.txt"
+        bad_path.write_text("hello")
+
+        tab._load_icon_image_path(str(bad_path))
+        app.update()
+
+        assert tab._micon_image_uri is None
+        assert tab._icon_crop_btn.cget("state") == "disabled"
+        assert tab._icon_upload_error_var.get() != ""
+        assert "not_an_image.txt" in tab._icon_upload_error_var.get() or \
+            "recognized" in tab._icon_upload_error_var.get().lower()
+        assert tab._icon_upload_error_label.winfo_ismapped()
+
+        # A subsequent SUCCESSFUL upload must clear the persistent message.
+        good_path = _write_tiny_png(tmp_path)
+        tab._load_icon_image_path(good_path)
+        app.update()
+        assert tab._icon_upload_error_var.get() == ""
+        assert not tab._icon_upload_error_label.winfo_ismapped()
+    finally:
+        tab._clear_icon_image()
+

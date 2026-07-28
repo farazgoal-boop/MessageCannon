@@ -4276,3 +4276,134 @@ resolution, not a real install); and the AI-content-quality /
 real-SMTP-send / real-WhatsApp-QR-session items already flagged elsewhere
 in this file remain separate, already-disclosed gaps unrelated to the
 update system itself.
+
+## Real bug: Card Creator's "Crop" button stayed disabled after a drag-drop upload (2026-07-28)
+
+User reported this live, on the just-released real `v1.3.0` install (confirmed via a running
+`MessageCannon.exe` process on this machine, launched independently of anything this session did)
+— asked to investigate whether Crop is disabled for a specific, uncommunicated reason, or is a
+genuine bug, and to fix so a successful upload always allows cropping, showing a clear message
+whenever it legitimately can't.
+
+**Investigated exhaustively before touching any code**: read every line touching
+`_micon_image_uri`/`_icon_crop_btn` in `card_creator_tab.py`. Confirmed there is no code path where
+a real upload succeeds (URI set, thumbnail rendered) while Crop stays disabled — `_load_icon_image_path`
+already unconditionally enables Crop right after a successful `image_file_to_data_uri()` call, and
+the existing test suite already had direct coverage proving this
+(`test_loading_a_real_icon_image_updates_state_and_enables_crop`, still passing). Tested a
+`mimetypes.guess_type()`-based Windows-registry-gotcha hypothesis directly (a real, documented
+Python/Windows quirk for less-common extensions) and disproved it with direct measurement — all
+common image extensions, including `.webp`, resolve correctly via Python's own hardcoded default
+map, registry-independent.
+
+**Two real, confirmed gaps found instead, which together explain the reported experience:**
+
+1. **`_on_icon_drop`'s path-parsing had zero test coverage** (confirmed via grep — every existing
+   test called `_load_icon_image_path` directly with an already-clean path, bypassing the actual
+   drop-event parsing entirely) **and never handled a `file://` URI** — a real, documented
+   tkinterdnd2 cross-platform quirk where some drag sources hand back a URI instead of a plain
+   filesystem path. A `file://` URI fails `Path(...).is_file()`, so a perfectly real dropped image
+   would raise `ImageUploadError("File not found: ...")` — a genuine upload failure for a valid
+   file, not a deliberate/legitimate restriction.
+2. **The "Remove" button had no `state=` at all** — unlike Crop, it was unconditionally clickable
+   regardless of whether an image actually existed. This means "Remove is active" was never real
+   evidence a prior upload had succeeded, which is almost certainly why the reported bug read as
+   "the image uploaded successfully but Crop won't work" — the real event was likely a silent-ish
+   upload failure (only a transient, easy-to-miss toast) that Remove's always-on state made look
+   like a completed upload.
+
+**Fix:**
+- Extracted the drop-parsing logic to a new, pure, directly-testable
+  `utils/helpers.parse_dropped_file_path()` — handles the existing Tcl-brace cases unchanged, plus
+  the new `file://` URI case (scheme stripped, percent-decoded, Windows drive-letter leading slash
+  corrected). **Found the identical logic duplicated byte-for-byte in
+  `contact_import_review.py`'s own `_on_drop`** — fixed that sibling drop zone too, rather than
+  leaving the same latent gap there silently, and pointed both call sites at the one shared,
+  tested function so they can't drift apart again.
+- `_load_icon_image_path` now also sets `self._icon_remove_btn`'s `state` in lockstep with Crop's
+  (`normal` after a real success, `disabled` after clear/on failure) — Remove can no longer look
+  "active" when there's nothing to remove.
+- New persistent `_icon_upload_error_label`/`_icon_upload_error_var` under the drop zone's button
+  row — shown with the real `ImageUploadError` message (already specific: "File not found: ...",
+  "Image is X MB — please use one under 5MB...", "Not a recognized image file: ...") on any real
+  failure, cleared on the next success. Uses the same `fg_color=T.BADGE_BG` +
+  `text_color=T.DANGER_ON_BADGE` pairing already established elsewhere in this exact file (the AI
+  status error label, the WhatsApp ban-risk banner) — the only combination this app's Design System
+  actually verifies `DANGER_ON_BADGE`'s contrast against, not a new, unverified pairing. This
+  directly satisfies "show a clear message explaining why instead of just silently disabling it" —
+  in addition to, not instead of, the existing toast.
+
+**Verified**: new `tests/ui/test_dnd_file_uri_parsing.py` (2 tests, Contact Import's sibling fix)
+and 7 new tests appended to `tests/ui/test_card_creator_premium.py` — 4 pure `parse_dropped_file_path`
+unit tests (braced/unbraced/`file://`-URI/trailing-whitespace), the literal end-to-end repro
+(`_on_icon_drop` fed a real `file://`-URI-wrapped event for a real image, confirmed Crop ends up
+enabled), Remove/Crop state tracking in lockstep across upload→clear, and the persistent error
+message appearing on a real failure and clearing on a subsequent real success. Confirmed the tests
+are load-bearing, not trivially green: temporarily reverted `card_creator_tab.py`'s changes via
+`git stash` and reran — collection itself failed with `ImportError: cannot import name
+'parse_dropped_file_path'`, confirming the test module genuinely depends on the new code; restored
+and reconfirmed all pass. Full regression suite re-run clean: **231/231** functional (`-n 36`,
+worker count bumped 35→36 in `tests/ui/README.md` for the two new/extended files — the one
+already-documented `test_window_utils.py` flake reconfirmed passing alone), **7/7**
+navigation-timing alone, **1/1** close-button alone, **2/2** nav-accent-timing alone, **115/115**
+plain `tests/` — 356/356.
+
+**Not committed yet** — left in the working tree per this file's standing "commit/push is the
+user's own call" discipline, since this fix wasn't part of an explicit commit instruction.
+
+## Real bug: sidebar tagline (and 5 sibling elements) styled as fake links (2026-07-28)
+
+User confirmed the update badge's correct no-op behavior (already on `v1.3.0`, nothing to fix), then
+reported: the sidebar's "Pro | Campaign Suite" subtitle is styled in the accent/link color but does
+nothing when clicked — asked whether to make it real or restyle it, and to audit the whole app for
+the same "looks clickable but isn't" pattern.
+
+**Audited systematically, not by eyeballing grep output**: wrote an AST scanner (not just `grep`)
+over `main_window.py`/`card_creator_tab.py`/`ai_compose_dialog.py`/`update_dialog.py` that parses
+every `CTkLabel`/`CTkButton`/`CTkOptionMenu` call and flags any using `T.ACCENT_TEXT`/`T.ACCENT` as
+`text_color` with no `command=` — 45 raw matches. Manually reviewed each one's real surrounding
+context (not just the flag) and confirmed two large categories are legitimate, established, and
+NOT this bug: badge/pill chips (`fg_color=T.BADGE_BG` + `corner_radius=999`-ish — e.g. "45 sec
+cadence", "Live Monitoring", the Insert-variable pills) and bare KPI/stat-value numbers under a
+muted label (Settings/Dashboard stat tiles) — neither reads as a link to a real user, and both are
+already-consistent visual languages used throughout this app.
+
+**Six real, confirmed instances of the actual bug, all fixed the same way (restyled to their real,
+established non-interactive-text convention, not left as a mismatched link color)**:
+
+1. **The reported one** — sidebar's "Pro | Campaign Suite" tagline. Decided restyle over "make it
+   real": there's no existing About/version screen this app has, and the text itself doesn't imply
+   any specific destination a user could guess (license info is already in Settings) — inventing a
+   new navigation target wasn't part of what was asked and would be guessing at intent. Restyled
+   `T.ACCENT_TEXT` -> `T.TEXT_MUTED` (the Design System's own "labels, descriptions" token).
+2. **Card Creator's per-section "↕" icon** — a genuine, worse instance of the same bug: a classic
+   drag-handle glyph, but the real reorder mechanism is the real ↑/↓ buttons right next to it (Item
+   22's insertion-order work) — the icon itself has zero drag support. Restyled to `T.TEXT_MUTED`
+   (not `T.TEXT_DIM`, which the Design System documents as BG_MAIN-only contrast-verified; this
+   icon sits on a `T.BG_SURFACE` card).
+3. **Card Creator's "▶ Video will play inside the card" caption** — a play-icon glyph implying
+   "click to preview"; it's just a caption describing export-time behavior. Restyled to
+   `T.TEXT_MUTED`.
+4. **Card Creator's "Contact footer uses your info from App Identity above." caption** — plain
+   explanatory text with nothing to click. Restyled to `T.TEXT_MUTED`.
+5. **License-activation dialog's "If you close the app without activating..." notice** — not even a
+   real warning (`T.DANGER_ON_BADGE` is this app's real warning color, used a few lines below it for
+   `license_message_var`) — plain informational text. Restyled to `T.TEXT_MUTED`.
+6. **License-activation dialog's "Secure local activation" card heading** — every other info-card
+   heading in this app (e.g. Settings' "Session Status") uses `T.TEXT_HEAD`; this one alone used the
+   link color. Restyled to `T.TEXT_HEAD`.
+
+**Verified**: new `tests/ui/test_no_fake_clickable_text.py` (5 tests) — one per fixed element,
+locating each by its real text/attribute in a real rendered widget tree (not just re-reading
+source), asserting the corrected token and that it's no longer `T.ACCENT_TEXT`. Two tests needed a
+fix mid-build, caught by a real failure, not assumed: searching `tab._sections[-1]` for a
+newly-added section's content came back empty, because Item 22's own "smart insertion order" work
+means a new section isn't necessarily appended at the end of the list — fixed by searching all
+sections instead of assuming positional order. Confirmed all 5 tests are load-bearing: reverted the
+two source files via `git stash`, reran, watched all 5 fail (each on the un-fixed `T.ACCENT_TEXT`
+value), restored, reconfirmed all 5 pass. Full regression suite re-run clean: **236/236** functional
+(`-n 37`, worker count bumped 36->37 in `tests/ui/README.md`; the one already-documented
+`test_window_utils.py` flake reconfirmed passing alone), **7/7** navigation-timing alone, **1/1**
+close-button alone, **2/2** nav-accent-timing alone, **115/115** plain `tests/` — 361/361.
+
+**Not committed yet** — same standing discipline as the fix above.
