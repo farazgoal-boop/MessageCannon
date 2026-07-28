@@ -4406,4 +4406,12 @@ value), restored, reconfirmed all 5 pass. Full regression suite re-run clean: **
 `test_window_utils.py` flake reconfirmed passing alone), **7/7** navigation-timing alone, **1/1**
 close-button alone, **2/2** nav-accent-timing alone, **115/115** plain `tests/` — 361/361.
 
-**Not committed yet** — same standing discipline as the fix above.
+**Committed and released as `v1.3.1`** (2026-07-28, user's explicit request so their own installed
+`v1.3.0` app could pick these fixes up via the real update flow, not just a commit on `main`):
+committed (`391d0c0`), bumped `APP_VERSION` to `1.3.1` (`2450b60`), tagged and pushed. Real CI run
+(`30317439094`) succeeded on all 4 jobs (build-linux 2m46s, build-windows 2m43s, build-macos 3m23s,
+create-release 14s). Confirmed live: `v1.3.1` is the real latest release
+(published 2026-07-28T00:32:56Z) with all 4 real assets attached (Windows 71,893,700 bytes, Mac
+57,200,558 bytes, Linux .deb 72,646,832 bytes, AppImage 91,071,680 bytes). Confirmed
+`check_for_update("1.3.0")` (simulating the user's actual currently-installed version) correctly
+detects `v1.3.1` with a populated `asset_url`.
