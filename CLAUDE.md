@@ -4643,3 +4643,56 @@ flake.
 **Shipped as `v1.3.4`** (bumped from the `v1.3.3` this same session already released, since this is
 a second, independent real bug fix found after that release): tagged, pushed, all 4 CI jobs green,
 real assets attached, `check_for_update("1.3.3")` confirmed detecting it.
+
+## Real bug found via a WhatsApp-path audit: phone number never URL-encoded in the chat URL (2026-07-29)
+
+After the SMTP whitespace bug above, the user asked whether the WhatsApp send path had the same
+class of bug. Investigated thoroughly: contact phone numbers already get sanitized by
+`PhoneValidator.normalize_phone()` at import time (`.strip()` + `re.sub(r'[\s\-\(\)]+', '', phone)`,
+which strips whitespace anywhere in the string, not just the ends), and there is no WhatsApp
+equivalent of a `smtp_from_addr`-style free-text settings field — `message_processor._get_variable_
+value` only ever reads `contact.phone`/`contact.name`/`contact.custom_fields`. So the *exact* same
+bug class doesn't exist there.
+
+**A different, real bug was found instead while auditing `whatsapp_sender.py`**: `_open_chat` built
+the chat URL as `f"{WHATSAPP_WEB_URL}send?phone={phone}"` — `phone` was never passed through
+`urllib.parse.quote()`, unlike `message` right below it (`quote(message)`). Normalized phones only
+ever contain `+` and digits, but a raw `+` in a URL query string is ambiguous under form-encoded
+parsing conventions (`application/x-www-form-urlencoded`, which JS `URLSearchParams` and Python's
+own `urllib.parse.parse_qs` both follow) — that convention treats a literal `+` as a space.
+
+**Proven real, not just theoretical**, before calling it a bug: reverted the fix and ran
+`parse_qs` (Python's own standard-library implementation of that exact decoding convention) against
+the pre-fix URL — `+923...` decoded back out as `' 923...'`, a **leading space where the `+` should
+be**, not `+923...`. This is the literal mechanism a real WhatsApp Web client could hit if its own
+query-string parsing follows the same convention.
+
+**Fix**: wrap `phone` in `quote()`, matching the existing `message` pattern —
+`f"{WHATSAPP_WEB_URL}send?phone={quote(phone)}"`. `quote()` percent-encodes `+` to `%2B`, which
+survives `+`-as-space decoding unambiguously (no literal `+` character exists in the encoded string
+for that step to touch, and percent-decoding then correctly restores it).
+
+**Verified two ways**: new `tests/test_whatsapp_sender.py` (3 tests, a `WhatsAppSender` constructed
+via `__new__` with a `MagicMock` driver so no real Selenium/session is needed) — confirms the URL
+contains `%2B`, not a raw `+`; confirms `parse_qs` on the real constructed URL round-trips the phone
+number back to its exact original value (the literal repro above, now fixed); confirms `message`'s
+own pre-existing encoding is unaffected. Confirmed all 3 fail against the pre-fix code (`git stash`)
+with `parse_qs` producing the exact `' 923...'` corruption, then pass after restoring the fix.
+**Then verified live**, per the user's own explicit request, against the real, already-authenticated
+WhatsApp session on this machine: called the real `_open_chat("+923162400657")` (the user's own
+number, provided for this test) with no `message` argument, so nothing was ever typed or sent — a
+Selenium screenshot (the browser's own rendered viewport, not a physical-screen capture, so it can't
+accidentally show unrelated windows the way `PIL.ImageGrab` already proved risky elsewhere in this
+file) confirmed the chat opened correctly as **"Comfarazgoal@gmail (You)" / "Message yourself"** —
+WhatsApp's own special self-chat indicator — proving the number resolved correctly, not to a wrong
+contact or an error page. A first verification attempt read a misleading header (WhatsApp Web's DOM
+has multiple `<header>` elements; a generic CSS selector grabbed the wrong one) — caught by not
+trusting an ambiguous single-selector text read and re-verifying with a real screenshot instead. No
+message was sent; real production DB confirmed untouched throughout (9 contacts, 0 campaigns, 0
+message_logs — this test only used a raw `WhatsAppSender`/Selenium call, never the app's own
+DB-logging send path).
+
+Full regression check: **122/122** plain `tests/` (was 119, +3 new) — no UI code touched by this
+fix, so the UI suite wasn't re-run for this specific change.
+
+**Shipped as `v1.3.5`.**

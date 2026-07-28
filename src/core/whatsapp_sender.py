@@ -273,7 +273,14 @@ class WhatsAppSender:
         if self.driver is None:
             raise RuntimeError("WhatsApp driver is not initialized")
 
-        chat_url = f"{WHATSAPP_WEB_URL}send?phone={phone}"
+        # Real issue found via code audit (2026-07-29): the phone number was
+        # never URL-encoded here, unlike `message` right below -- normalized
+        # phones only ever contain "+" and digits, but a raw "+" in a query
+        # string is ambiguous: `quote()` percent-encodes it to "%2B",
+        # removing any risk of a downstream form-encoded parser (e.g.
+        # JS `URLSearchParams`, which treats a literal "+" as a space)
+        # misreading it and resolving the wrong number.
+        chat_url = f"{WHATSAPP_WEB_URL}send?phone={quote(phone)}"
         if message is not None:
             chat_url += f"&text={quote(message)}"
         self.driver.get(chat_url)
