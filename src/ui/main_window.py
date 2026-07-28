@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import html as html_module
 import json
 import os
 import random
@@ -23,7 +24,7 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 import customtkinter as ctk
 from PIL import Image
-from ..ui.card_creator_tab import build_card_creator_view
+from ..ui.card_creator_tab import build_card_creator_view, HAS_HTML_PREVIEW
 from ..ui.reports_chart import ReportsChart
 from ..ui.update_dialog import show_update_dialog
 from ..ui.accessibility import enable_keyboard_accessibility
@@ -291,6 +292,10 @@ class _HTMLToRichText(HTMLParser):
                 self._has_content = True
             self._href = None
 
+    def _last_char(self) -> str:
+        content = self.widget.get("1.0", "end")
+        return content[-2] if len(content) >= 2 else ""
+
     def handle_data(self, data):
         if self._skip:
             return
@@ -300,6 +305,18 @@ class _HTMLToRichText(HTMLParser):
         if self._need_break:
             self.widget.insert("end", "\n\n")
             self._need_break = False
+        elif self._has_content:
+            # Adjacent inline elements (e.g. sibling <span>s used for a
+            # price/old-price/discount-badge row) are often concatenated
+            # with zero whitespace in the source HTML -- real browsers
+            # still visually separate them via CSS margin/padding, but
+            # flattening to plain text drops all of that. Insert a single
+            # space so two text runs never silently run together (e.g.
+            # "$299$59950% OFF"), without double-spacing runs that already
+            # had real whitespace between them (handled above via strip()).
+            last = self._last_char()
+            if last and not last.isspace():
+                self.widget.insert("end", " ")
         self.widget.insert("end", text, self._tags())
         self._has_content = True
 
@@ -532,6 +549,15 @@ class MainWindow(ctk.CTk):
         self._em_contacts_list: list = []
         self._em_count_var = StringVar(value="No email contacts imported")
         self._em_compose_count_var = StringVar(value="0 contacts with email")
+
+        # "Send as Visual HTML Card" mode (Card Creator's Insert-into-Compose):
+        # when active, _compose_em_body is locked read-only and the real
+        # generated card HTML (with {variable} tokens preserved, substituted
+        # per-recipient the same way as any other email template) is sent
+        # as-is instead of the rich-text editor's own exported HTML -- see
+        # _enter_email_card_mode/_exit_email_card_mode.
+        self._compose_card_mode = False
+        self._compose_card_html_template = ""
 
         self.title(f"{APP_NAME} v{APP_VERSION}")
         # Real bug found via live testing: geometry() alone leaves placement
@@ -1818,18 +1844,28 @@ class MainWindow(ctk.CTk):
         # scoped toolbar, not a full word processor.
         fmt_row = ctk.CTkFrame(em_chips, fg_color="transparent")
         fmt_row.grid(row=0, column=1, padx=(10, 0), sticky="w")
-        ctk.CTkButton(fmt_row, text="B", width=28, height=28, corner_radius=6,
-                      fg_color=T.BADGE_BG, hover_color=T.BG_BORDER, text_color=T.TEXT_HEAD,
-                      font=ctk.CTkFont(size=13, weight="bold"),
-                      command=lambda: self._toggle_email_char_tag("b")).pack(side="left", padx=(0, 4))
-        ctk.CTkButton(fmt_row, text="I", width=28, height=28, corner_radius=6,
-                      fg_color=T.BADGE_BG, hover_color=T.BG_BORDER, text_color=T.TEXT_HEAD,
-                      font=ctk.CTkFont(size=13, weight="bold", slant="italic"),
-                      command=lambda: self._toggle_email_char_tag("i")).pack(side="left", padx=(0, 4))
-        ctk.CTkButton(fmt_row, text="≡ List", width=48, height=28, corner_radius=6,
-                      fg_color=T.BADGE_BG, hover_color=T.BG_BORDER, text_color=T.TEXT_HEAD,
-                      font=ctk.CTkFont(size=11),
-                      command=self._toggle_email_bullet_list).pack(side="left")
+        self._em_fmt_bold_btn = ctk.CTkButton(
+            fmt_row, text="B", width=28, height=28, corner_radius=6,
+            fg_color=T.BADGE_BG, hover_color=T.BG_BORDER, text_color=T.TEXT_HEAD,
+            font=ctk.CTkFont(size=13, weight="bold"),
+            command=lambda: self._toggle_email_char_tag("b"))
+        self._em_fmt_bold_btn.pack(side="left", padx=(0, 4))
+        self._em_fmt_italic_btn = ctk.CTkButton(
+            fmt_row, text="I", width=28, height=28, corner_radius=6,
+            fg_color=T.BADGE_BG, hover_color=T.BG_BORDER, text_color=T.TEXT_HEAD,
+            font=ctk.CTkFont(size=13, weight="bold", slant="italic"),
+            command=lambda: self._toggle_email_char_tag("i"))
+        self._em_fmt_italic_btn.pack(side="left", padx=(0, 4))
+        self._em_fmt_list_btn = ctk.CTkButton(
+            fmt_row, text="≡ List", width=48, height=28, corner_radius=6,
+            fg_color=T.BADGE_BG, hover_color=T.BG_BORDER, text_color=T.TEXT_HEAD,
+            font=ctk.CTkFont(size=11),
+            command=self._toggle_email_bullet_list)
+        self._em_fmt_list_btn.pack(side="left")
+        self._em_card_mode_controls = [
+            self._em_fmt_bold_btn, self._em_fmt_italic_btn, self._em_fmt_list_btn,
+            self.em_insert_variable_menu, self.em_template_menu,
+        ]
 
         em_ai_row = ctk.CTkFrame(em_left, fg_color="transparent")
         em_ai_row.grid(row=3, column=0, padx=16, pady=(0, 8), sticky="ew")
@@ -1873,6 +1909,36 @@ class MainWindow(ctk.CTk):
         if not getattr(self, "_em_subj_trace_added", False):
             self._em_subj_var.trace_add("write", lambda *_a: self._update_email_warnings())
             self._em_subj_trace_added = True
+
+        # "Send as Visual HTML Card" lock panel -- occupies the exact same
+        # grid cell as _compose_em_body, swapped in/out via grid()/
+        # grid_remove() (same technique already used for the sidebar's
+        # preview-host/fallback swap) so the locked state can't be
+        # accidentally edited through the rich-text editor underneath.
+        self._em_card_lock_frame = ctk.CTkFrame(em_left, fg_color=T.BG_INNER, corner_radius=10)
+        self._em_card_lock_frame.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(
+            self._em_card_lock_frame, text="🔒 Visual HTML Card",
+            font=ctk.CTkFont(size=14, weight="bold"), text_color=T.TEXT_HEAD,
+        ).grid(row=0, column=0, padx=16, pady=(16, 4), sticky="w")
+        ctk.CTkLabel(
+            self._em_card_lock_frame,
+            text="This message will send exactly as designed in Card Creator "
+                 "(see the real rendered preview on the right) — not editable "
+                 "here as rich text. To change it, edit the card in Card "
+                 "Creator and click \"Insert into Compose\" again.",
+            text_color=T.TEXT_MUTED, font=ctk.CTkFont(size=11),
+            wraplength=420, justify="left",
+        ).grid(row=1, column=0, padx=16, pady=(0, 12), sticky="w")
+        ctk.CTkButton(
+            self._em_card_lock_frame, text="✎ Switch to Rich Text Editing",
+            fg_color=T.BG_INNER, hover_color=T.BG_BORDER, border_width=1,
+            border_color=T.ACCENT, text_color=T.ACCENT_TEXT, corner_radius=6,
+            height=30, font=ctk.CTkFont(size=11),
+            command=self._exit_email_card_mode,
+        ).grid(row=2, column=0, padx=16, pady=(0, 16), sticky="w")
+        # Not grid()'d here -- only shown while _compose_card_mode is True,
+        # toggled by _enter_email_card_mode/_exit_email_card_mode.
 
         # Email right column — SMTP status + recipients
         em_smtp_card = ctk.CTkFrame(self._em_compose_frame, fg_color=T.BG_SURFACE, corner_radius=14,
@@ -1946,6 +2012,25 @@ class MainWindow(ctk.CTk):
         self._em_preview_text.tag_configure("i", font=("Segoe UI", 11, "italic"))
         self._em_preview_text.tag_configure("muted", foreground=T.resolve(T.TEXT_MUTED))
         self._em_preview_text.grid(row=1, column=0, padx=16, pady=(0, 16), sticky="nsew")
+
+        # Card-mode preview host: real rendered HTML (gradients/images/CTA
+        # button intact), same lazy-create-on-first-use HtmlFrame pattern
+        # already used by Card Creator's own Live Preview panel -- reused
+        # here rather than a second, separate implementation. Occupies the
+        # same cell as _em_preview_text, swapped via grid()/grid_remove().
+        self._em_card_preview_host = ctk.CTkFrame(em_preview_card, fg_color=T.BG_INNER)
+        self._em_card_preview_host.grid(row=1, column=0, padx=16, pady=(0, 16), sticky="nsew")
+        self._em_card_preview_host.grid_remove()
+        self._em_card_html_frame = None
+        self._em_card_preview_fallback = ctk.CTkLabel(
+            self._em_card_preview_host,
+            text="Visual card preview needs the tkinterweb package, which "
+                 "isn't installed. The card will still send correctly — "
+                 "click \"Preview in Browser\" from Card Creator to see it.",
+            text_color=T.TEXT_MUTED, font=ctk.CTkFont(size=11),
+            wraplength=320, justify="left")
+        if not HAS_HTML_PREVIEW:
+            self._em_card_preview_fallback.pack(fill="both", expand=True, padx=12, pady=24)
 
         def _smtp_changed(*_):
             if not hasattr(self, "_em_smtp_chip"):
@@ -2028,6 +2113,12 @@ class MainWindow(ctk.CTk):
         self.compose_progress.grid(row=1, column=0, sticky="ew", pady=(4, 0))
         self.compose_progress.set(0)
         self._update_send_rate_warning()
+        # A view rebuild (e.g. entering/leaving Warm Ivory) constructs fresh
+        # widgets every time -- re-apply whatever card-mode state was
+        # already active so it isn't silently lost/reset by the rebuild.
+        self._apply_email_card_mode_ui()
+        if self._compose_card_mode:
+            self._render_email_card_preview()
 
     def _on_channel_switch(self, channel: str) -> None:
         if channel == "WhatsApp":
@@ -2039,7 +2130,10 @@ class MainWindow(ctk.CTk):
             self._em_compose_frame.grid()
             self._compose_pause_btn.configure(state="normal")
             self._refresh_compose_email_recipients()
-            self._refresh_email_preview()
+            if self._compose_card_mode:
+                self._render_email_card_preview()
+            else:
+                self._refresh_email_preview()
 
     def _dispatch_send(self) -> None:
         if self._compose_channel_var.get() == "Email":
@@ -2092,15 +2186,23 @@ class MainWindow(ctk.CTk):
 
         if hasattr(self, "_em_validation_label"):
             self._em_validation_label.configure(text="")
-        # Item 10 of the Live Testing Findings pass: the editor is now a
-        # rich-text (bold/italic/bullet) surface, not raw HTML text -- its
-        # real content has to be exported into HTML (not read as plain
-        # text) or bold/italic/bullet formatting would silently never reach
-        # the sent email.
-        html_template = self._email_rich_export_html(self._compose_em_body) if hasattr(
-            self, "_compose_em_body") else ""
-        plain_template = self._get_text_with_tokens(self._compose_em_body) if hasattr(
-            self, "_compose_em_body") else ""
+        if self._compose_card_mode and self._compose_card_html_template:
+            # "Send as Visual HTML Card": the real generated card HTML sends
+            # as-is (with its own {variable} tokens substituted per-contact
+            # below, same as any other template) instead of the rich-text
+            # editor's export -- the editor is locked/unused in this mode.
+            html_template = self._compose_card_html_template
+            plain_template = self._strip_html_for_preview(html_template)
+        else:
+            # Item 10 of the Live Testing Findings pass: the editor is now a
+            # rich-text (bold/italic/bullet) surface, not raw HTML text -- its
+            # real content has to be exported into HTML (not read as plain
+            # text) or bold/italic/bullet formatting would silently never reach
+            # the sent email.
+            html_template = self._email_rich_export_html(self._compose_em_body) if hasattr(
+                self, "_compose_em_body") else ""
+            plain_template = self._get_text_with_tokens(self._compose_em_body) if hasattr(
+                self, "_compose_em_body") else ""
         if not plain_template.strip():
             self.progress_status_var.set("⚠ Email body is empty.")
             return
@@ -4603,9 +4705,23 @@ class MainWindow(ctk.CTk):
     def _update_email_warnings(self) -> None:
         if not hasattr(self, "_compose_em_body"):
             return
+        subject = self._em_subj_var.get()
+        if self._compose_card_mode:
+            # The locked body isn't the real rich-text content in this mode
+            # -- skip pillify/spam-word checks against it (meaningless here)
+            # and don't let the rich-text mirror preview clobber the real
+            # card preview panel. Subject-length validation still applies —
+            # Subject stays editable in this mode.
+            warnings = []
+            _ok, subj_msg = DataValidator.check_subject_length(subject)
+            if subj_msg:
+                warnings.append(subj_msg)
+            self._em_warning_var.set(
+                " · ".join(warnings) if warnings else
+                "🔒 Visual HTML card — formatting/spam checks don't apply to card content.")
+            return
         self._pillify_text_widget(self._compose_em_body)
         body = self._get_text_with_tokens(self._compose_em_body).strip()
-        subject = self._em_subj_var.get()
         warnings = []
         _ok, subj_msg = DataValidator.check_subject_length(subject)
         if subj_msg:
@@ -4846,6 +4962,127 @@ class MainWindow(ctk.CTk):
             # for both pill and plain-text runs.
             preview.insert("end", sub(value), tuple(tags))
         preview.configure(state="disabled")
+
+    # ── "Send as Visual HTML Card" mode (Card Creator's Insert-into-Compose) ──
+
+    def _strip_html_for_preview(self, html: str) -> str:
+        """Cheap, best-effort HTML->plain-text for the pre-send confirmation
+        dialog's preview text only (not the real sent content, which stays
+        real HTML) -- good enough to show "does this look like the right
+        card", not a full renderer."""
+        text = re.sub(r"(?is)<(script|style)[^>]*>.*?</\1>", " ", html)
+        text = re.sub(r"(?i)<br\s*/?>", "\n", text)
+        text = re.sub(r"(?i)</(p|div|li|h[1-6])>", "\n", text)
+        text = re.sub(r"<[^>]+>", "", text)
+        text = html_module.unescape(text)
+        text = re.sub(r"[ \t]+", " ", text)
+        text = re.sub(r"\n\s*\n+", "\n\n", text)
+        return text.strip()
+
+    def _apply_email_card_mode_ui(self) -> None:
+        """(Re)applies the current _compose_card_mode state to the Compose
+        Email widgets. Called both when entering/exiting the mode and at
+        the end of every _build_compose_view rebuild (e.g. a Warm Ivory
+        theme switch rebuilds every widget from scratch, which would
+        otherwise silently drop a card that was active before the rebuild
+        back into a plain, unlocked rich-text editor)."""
+        if not hasattr(self, "_compose_em_body"):
+            return
+        locked = self._compose_card_mode
+        if locked:
+            self._compose_em_body.grid_remove()
+            self._em_card_lock_frame.grid(row=4, column=0, padx=16, pady=(0, 16), sticky="nsew")
+        else:
+            self._em_card_lock_frame.grid_remove()
+            self._compose_em_body.grid(row=4, column=0, padx=16, pady=(0, 16), sticky="nsew")
+        state = "disabled" if locked else "normal"
+        for widget in getattr(self, "_em_card_mode_controls", []):
+            try:
+                widget.configure(state=state)
+            except Exception:
+                pass
+
+    def _enter_email_card_mode(self, html_template: str, subject: str) -> None:
+        """Called from Card Creator's "Send as Visual HTML Card" choice:
+        locks the rich-text editor and stores the real generated card HTML
+        (with {variable} tokens preserved) to be sent as-is, substituted
+        per-recipient at send time exactly like any other email template."""
+        self._compose_card_html_template = html_template
+        self._compose_card_mode = True
+        self._apply_email_card_mode_ui()
+        if hasattr(self, "_em_validation_label"):
+            self._em_validation_label.configure(text="")
+        self._em_subj_var.set(subject)
+        self._update_email_warnings()
+        self._render_email_card_preview()
+
+    def _exit_email_card_mode(self) -> None:
+        """Reverses _enter_email_card_mode. As a courtesy (not required —
+        the user asked for editing to be locked, not for a dead end), the
+        real card HTML is flattened into the rich-text editor via the same
+        importer already used for legacy HTML templates, so the user isn't
+        left with an empty box if they want to keep editing by hand."""
+        html_template = self._compose_card_html_template
+        self._compose_card_mode = False
+        self._compose_card_html_template = ""
+        self._apply_email_card_mode_ui()
+        if hasattr(self, "_em_card_preview_host"):
+            self._em_card_preview_host.grid_remove()
+        if hasattr(self, "_em_preview_text"):
+            self._em_preview_text.grid()
+        if html_template and hasattr(self, "_compose_em_body"):
+            self._compose_em_body.delete("1.0", "end")
+            self._load_html_into_email_editor(html_template)
+        self._update_email_warnings()
+
+    def _ensure_em_card_html_frame(self) -> bool:
+        """Lazily creates the real HTML preview widget on first use — same
+        pattern as Card Creator's own _ensure_html_frame, reusing the exact
+        same optional dependency rather than a second implementation."""
+        if self._em_card_html_frame is not None:
+            return True
+        if not HAS_HTML_PREVIEW:
+            return False
+        try:
+            from ..ui.card_creator_tab import HtmlFrame
+            self._em_card_preview_fallback.pack_forget()
+            self._em_card_html_frame = HtmlFrame(self._em_card_preview_host, messages_enabled=False)
+            self._em_card_html_frame.pack(fill="both", expand=True)
+            return True
+        except Exception as exc:
+            Logger.warning(f"Email card HtmlFrame init failed: {exc}")
+            self._em_card_html_frame = None
+            return False
+
+    def _render_email_card_preview(self) -> None:
+        """Renders the real, visually-complete card HTML (gradients/images/
+        CTA button intact) into the locked preview panel, substituted with
+        the first eligible real contact's data — the genuine "this is what
+        the recipient will see" proof the rich-text mirror preview can't
+        give for a card this visually rich."""
+        if not hasattr(self, "_em_card_preview_host"):
+            return
+        if hasattr(self, "_em_preview_text"):
+            self._em_preview_text.grid_remove()
+        self._em_card_preview_host.grid()
+        contacts = [c for c in self.contacts if c.email and not c.opted_out]
+        vars_map = {"name": "", "email": "", "phone": "", "sender": self._em_from_name.get()}
+        if contacts:
+            contact = contacts[0]
+            vars_map = {
+                "name": contact.name, "email": contact.email,
+                "phone": contact.phone, "sender": self._em_from_name.get(),
+            }
+            vars_map.update(contact.custom_fields)
+
+        def sub(text: str) -> str:
+            for key, value in vars_map.items():
+                text = text.replace(f"{{{key}}}", str(value))
+            return text
+
+        rendered = sub(self._compose_card_html_template)
+        if self._ensure_em_card_html_frame():
+            self._em_card_html_frame.load_html(rendered)
 
     def _show_email_recipients_list(self) -> None:
         """Item 10 of the Live Testing Findings pass: makes the "Recipients"

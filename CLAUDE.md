@@ -4496,3 +4496,82 @@ navigation-timing alone, **1/1** close-button alone, **2/2** nav-accent-timing a
 plain `tests/` (was 115 — the 4 new tests) — 365/365.
 
 **Not committed yet** — same standing discipline as prior fixes in this session.
+
+## Real bugs found via AI Cards live testing: invisible feature bullets + garbled price on Insert-into-Compose (2026-07-29)
+
+User reported a generated "Career Copilot Premium" card showed 4 checkmark icons in the Features
+List with no visible text next to them, and asked to investigate whether this was the AI failing to
+write feature text or a rendering bug — plus, separately, that Insert-into-Compose (Email) produced
+a garbled price line (`$299$59950% OFF`, no spacing) once a card landed in the rich-text editor.
+
+**Bug 1, confirmed a rendering bug, not an AI-generation bug** — reproduced directly:
+`generate_card_copy`'s real feature text (e.g. "Real-time job matching") genuinely lands in the
+card's data; `card_creator_tab.py`'s `"features"` branch of `generate_html()` hardcoded
+`color:rgba(255,255,255,0.8)` on every bullet's `<span>`, ignoring the active template's own
+`text_col` (every other text section already used it correctly). On a light-background template
+(Light Minimal, Corporate Blue) this is near-white text on a near-white background — invisible —
+while the ✅ emoji itself still renders fully, since color-emoji glyphs ignore CSS `color`. Fixed by
+using `{text_col}` instead of the hardcoded value.
+
+**Bug 2, confirmed and reproduced byte-for-byte** — the price/old-price/discount-badge are three
+sibling `<span>`s with zero whitespace between them in the source HTML (real browsers separate them
+via CSS margin, which a plain-text flattener can't see). `main_window.py`'s `_HTMLToRichText`
+importer (Item 10) had no logic to insert a separator between adjacent inline elements, so
+`handle_data` concatenated them directly — reproduced the exact reported string
+(`'$299$59950% OFF\n'`) with a standalone repro before fixing. Fixed by inserting a single space in
+`handle_data` when starting a new inline text run if the previously-inserted character wasn't
+already whitespace (checked via a new `_last_char()` helper reading the widget's real content, not
+assumed) — verified the same repro now produces `'$299 $599 50% OFF\n'`, and this doesn't
+double-space text that already had real whitespace between elements (existing bold-in-sentence
+flattening tests re-ran clean).
+
+**New feature, built on the same report** (user explicitly confirmed both design questions before
+any code): Insert-into-Compose (Email only) now asks **"Send as Visual HTML Card"** vs **"Insert as
+Editable Rich Text"** via a new small modal (`CardCreatorV2._ask_email_insert_mode`), addressing the
+user's own follow-up question — recipients were only ever getting the flattened rich-text version of
+a card (losing gradients/images/the Buy Now button) even though the real generated HTML exists.
+
+- **Visual HTML Card** (`MainWindow._enter_email_card_mode`): the real generated card HTML (with its
+  own `{variable}` tokens — typed directly into any Card Creator field, e.g. `{name}` in a
+  description or price note — surviving untouched through `generate_html()`'s `safe_text`, which
+  never escapes braces) is stored as `self._compose_card_html_template` and sent as-is by
+  `_start_email_from_compose`, substituted per-recipient by the exact same `sub()` logic every other
+  email template already uses — no new send path, no new mock, per this file's own standing "must
+  send for real" rule. Per the user's explicit choice: the rich-text editor (`_compose_em_body`)
+  locks read-only (occupies the same grid cell as a new `_em_card_lock_frame`, swapped via
+  `grid()`/`grid_remove()`), the formatting toolbar/template/insert-variable dropdowns disable
+  (`_em_card_mode_controls`), and the Compose "Live preview" panel renders the *real* visual card —
+  reusing Card Creator's own lazy `tkinterweb.HtmlFrame` pattern (`_ensure_em_card_html_frame`, with
+  the same graceful no-tkinterweb fallback) rather than a second implementation — substituted with a
+  real contact's data, not raw tokens. Subject stays editable per the user's own framing. A "Switch
+  to Rich Text Editing" button reverses it (`_exit_email_card_mode`), flattening the card back into
+  the rich-text editor via the existing `_HTMLToRichText` importer as a courtesy, not a requirement.
+- **Insert as Editable Rich Text**: unchanged, pre-existing Item 10 behavior.
+- `_update_email_warnings` gained a card-mode branch: subject-length validation still runs (Subject
+  stays editable), but body-based pillify/spam-word checks and the rich-text mirror preview are
+  skipped (meaningless against a locked, irrelevant body) — a clear status message explains why
+  instead of silently doing nothing.
+
+**Verified**: new `tests/ui/test_email_visual_card_mode.py` (4 tests) — entering card mode locks the
+editor/toolbar/dropdowns and shows the lock panel; exiting reverses it and flattens the card back in;
+and the literal end-to-end proof — starting a send in card mode carries the real generated card HTML
+(price row, `$299`/`50% OFF` intact) through to the actual per-recipient send list with `{name}`
+genuinely substituted to a real contact's name, not the locked editor's irrelevant content (verified
+by patching `_execute_email_send` to capture the real `recipients` tuples the send path would have
+used, and `send_dialogs.show_send_confirmation` to auto-confirm rather than opening a real dialog).
+Also covers the new `_strip_html_for_preview` helper (confirmation-dialog preview text) producing
+real readable text, not raw tags. All 4 pass.
+
+Full regression check per this file's standing discipline: **242 functional** (`-n 38`, worker count
+bumped 37→38 in `tests/ui/README.md` for the new file) — 2 failures
+(`test_light_theme_default.py`, `test_card_creator_premium.py::test_editing_content_after_a_
+preset_load_marks_the_card_dirty`) reconfirmed as this suite's own already-documented
+resource-contention flakiness (this run took 19 minutes vs. the usual ~6 — real, unusual load, not a
+code issue) by re-running both files alone immediately after: both pass clean. **7/7**
+navigation-timing alone, **1/1** close-button alone, **2/2** nav-accent-timing alone, **119/119**
+plain `tests/` — 365/365 clean when accounting for the confirmed flake.
+
+**Not done / explicit scope note**: no dedicated "insert `{variable}` token" UI was added inside
+Card Creator itself (matching Compose's own Item-9 pill-insert dropdown) — the user's own answer
+confirmed the mechanism (typing `{name}` directly into a Card Creator field) was what they wanted
+verified, not a new authoring UI; flagged here rather than silently assumed out of scope.

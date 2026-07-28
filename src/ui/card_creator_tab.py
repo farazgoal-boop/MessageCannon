@@ -446,9 +446,16 @@ def generate_html(sections: list, meta: dict, for_preview: bool = False) -> str:
         elif stype == "features":
             items = [safe_text(f.strip()) for f in data.get("items","").split("\n") if f.strip()]
             if items:
+                # Was hardcoded to rgba(255,255,255,0.8) regardless of the
+                # active card style -- invisible (near-white text on a
+                # near-white background) on any light template (Light
+                # Minimal, Corporate Blue), while the checkmark emoji itself
+                # still rendered fine since color-emoji glyphs ignore CSS
+                # `color`. Now uses the same text_col every other text
+                # section already respects.
                 rows = "".join(
                     f'<div style="display:flex;align-items:flex-start;gap:8px;margin-bottom:7px">'
-                    f'<span style="font-size:13px;color:rgba(255,255,255,0.8);line-height:1.5">{f}</span>'
+                    f'<span style="font-size:13px;color:{text_col};line-height:1.5">{f}</span>'
                     f'</div>' for f in items)
                 body_parts.append(f"""
     <div style="padding:12px 24px">{rows}</div>""")
@@ -1754,12 +1761,79 @@ class CardCreatorV2(ctk.CTkFrame):
 
         return "\n".join(lines).strip()
 
+    def _ask_email_insert_mode(self) -> Optional[str]:
+        """Small modal choice for Insert-into-Compose (Email only): "Insert
+        as Editable Rich Text" (the pre-existing Item 10 flatten-into-rich-
+        text behavior — gradients/images/CTA-button chrome dropped, but
+        stays editable) vs "Send as Visual HTML Card" (the real generated
+        card HTML sends exactly as designed — locked from further editing
+        in Compose, see MainWindow._enter_email_card_mode). Returns
+        "rich_text", "visual_card", or None if cancelled/closed."""
+        result: dict = {"choice": None}
+        dlg = ctk.CTkToplevel(self.main_window)
+        dlg.title("Insert into Compose")
+        center_on_parent(dlg, 440, 340, self.main_window)
+        dlg.resizable(False, False)
+        dlg.transient(self.main_window)
+        dlg.grab_set()
+        dlg.configure(fg_color=T.BG_MAIN)
+        dlg.protocol("WM_DELETE_WINDOW", dlg.destroy)
+        dlg.grid_columnconfigure(0, weight=1)
+
+        ctk.CTkLabel(dlg, text="How should this card be sent?",
+                     font=ctk.CTkFont(size=16, weight="bold"),
+                     text_color=T.TEXT_HEAD).grid(row=0, column=0, padx=22, pady=(22, 4), sticky="w")
+        ctk.CTkLabel(
+            dlg, text="Choose whether recipients see the full designed card, "
+                      "or a plain, still-editable version.",
+            text_color=T.TEXT_MUTED, font=ctk.CTkFont(size=11),
+            wraplength=390, justify="left").grid(row=1, column=0, padx=22, pady=(0, 16), sticky="w")
+
+        def pick(choice: str) -> None:
+            result["choice"] = choice
+            dlg.destroy()
+
+        ctk.CTkButton(
+            dlg, text="🖼  Send as Visual HTML Card", height=42, corner_radius=8,
+            fg_color=T.ACCENT, hover_color=T.ACCENT_HOVER, text_color=T.TEXT_HEAD,
+            font=ctk.CTkFont(size=13, weight="bold"),
+            command=lambda: pick("visual_card")).grid(row=2, column=0, padx=22, pady=(0, 4), sticky="ew")
+        ctk.CTkLabel(
+            dlg, text="Real gradient/image/Buy-Now card design, sent exactly as "
+                      "designed. Locked from further editing in Compose.",
+            text_color=T.TEXT_DIM, font=ctk.CTkFont(size=10),
+            wraplength=390, justify="left").grid(row=3, column=0, padx=22, pady=(0, 14), sticky="w")
+
+        ctk.CTkButton(
+            dlg, text="✏  Insert as Editable Rich Text", height=42, corner_radius=8,
+            fg_color=T.BG_INNER, hover_color=T.BG_BORDER, border_width=1,
+            border_color=T.ACCENT, text_color=T.ACCENT_TEXT,
+            font=ctk.CTkFont(size=13, weight="bold"),
+            command=lambda: pick("rich_text")).grid(row=4, column=0, padx=22, pady=(0, 4), sticky="ew")
+        ctk.CTkLabel(
+            dlg, text="Flattens into plain bold/italic/bullet text (no gradients/"
+                      "images/buttons) but stays fully editable.",
+            text_color=T.TEXT_DIM, font=ctk.CTkFont(size=10),
+            wraplength=390, justify="left").grid(row=5, column=0, padx=22, pady=(0, 16), sticky="w")
+
+        ctk.CTkButton(dlg, text="Cancel", fg_color=T.BADGE_BG, hover_color=T.BG_BORDER,
+                      text_color=T.TEXT_HEAD, command=dlg.destroy).grid(
+            row=6, column=0, padx=22, pady=(0, 20), sticky="w")
+        dlg.bind("<Escape>", lambda _e: dlg.destroy())
+
+        dlg.wait_window()
+        return result["choice"]
+
     def _insert_into_compose(self) -> None:
         """One-click hand-off into the real Compose send pipelines (Item
-        11.6): the full HTML card for Email (via Item 10's rich-text
-        importer, so it lands as genuine editable/sendable content, not
-        raw markup), or a real plain-text summary + purchase link for
-        WhatsApp (which has no HTML rendering capability at all)."""
+        11.6): for WhatsApp, a real plain-text summary + purchase link
+        (WhatsApp has no HTML rendering capability at all). For Email, the
+        user picks between the pre-existing rich-text-editable insert and
+        (Live Testing Findings, 2026-07-29) a locked "Visual HTML Card" mode
+        where the real generated card HTML sends exactly as designed,
+        substituted per-recipient by MainWindow._start_email_from_compose
+        exactly like any other email template — see
+        MainWindow._enter_email_card_mode."""
         if self.main_window is None:
             messagebox.showwarning(
                 "Unavailable", "Insert into Compose requires the main app window.")
@@ -1769,16 +1843,24 @@ class CardCreatorV2(ctk.CTkFrame):
         meta = self._collect_meta()
         mw = self.main_window
         channel = mw._compose_channel_var.get()
+        subject = (f"{meta['app_name']} — {meta['tagline']}"
+                   if meta.get("tagline") else meta["app_name"])
 
-        mw._show_view("Compose")
         if channel == "Email":
-            mw._compose_em_body.delete("1.0", "end")
-            mw._load_html_into_email_editor(self._html)
-            subject = (f"{meta['app_name']} — {meta['tagline']}"
-                       if meta.get("tagline") else meta["app_name"])
-            mw._em_subj_var.set(subject)
-            mw._update_email_warnings()
+            mode = self._ask_email_insert_mode()
+            if mode is None:
+                return
+            mw._show_view("Compose")
+            if mode == "visual_card":
+                mw._enter_email_card_mode(self._html, subject)
+            else:
+                mw._exit_email_card_mode()
+                mw._compose_em_body.delete("1.0", "end")
+                mw._load_html_into_email_editor(self._html)
+                mw._em_subj_var.set(subject)
+                mw._update_email_warnings()
         else:
+            mw._show_view("Compose")
             mw.message_textbox.delete("1.0", "end")
             mw.message_textbox.insert("1.0", self._build_whatsapp_card_text(meta))
             mw._on_wa_message_changed()
