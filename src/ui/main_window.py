@@ -61,6 +61,7 @@ def _ensure_tcl_tk_paths() -> None:
 
 _ensure_tcl_tk_paths()
 
+from ..core import bounce_checker
 from ..core import reputation, warmup_scheduler
 from ..core import whatsapp_accounts as wa_accounts
 from ..core.contact_manager import ContactManager
@@ -68,7 +69,10 @@ from ..core.message_processor import MessageProcessor
 from ..core.whatsapp_sender import WhatsAppSender
 from ..database.db_manager import DatabaseManager
 from ..models import Contact, Template, Campaign, MessageLog, MessageStatus
-from ..utils.constants import APP_NAME, APP_VERSION, DEVELOPER, WINDOW_HEIGHT, WINDOW_WIDTH, JITTER_RANGE
+from ..utils.constants import (
+    APP_NAME, APP_VERSION, DEVELOPER, WINDOW_HEIGHT, WINDOW_WIDTH, JITTER_RANGE,
+    BOUNCE_AUTO_CHECK_DELAY_MS,
+)
 from . import theme as T
 from .toast import show_toast
 from .window_utils import center_on_parent, center_on_screen
@@ -2160,7 +2164,7 @@ class MainWindow(ctk.CTk):
             messagebox.showinfo("Campaign Running", "An email campaign is already in progress.")
             return
 
-        contacts = [c for c in self.contacts if c.email and not c.opted_out]
+        contacts = [c for c in self.contacts if c.email and not c.opted_out and not c.bounced]
         if not contacts:
             self.progress_status_var.set(
                 "⚠ No contacts with email. Import contacts in the Contacts tab first.")
@@ -2273,6 +2277,17 @@ class MainWindow(ctk.CTk):
                 if result.get("sent", 0) > 0:
                     self._ensure_email_warmup_started()
                     self._update_email_warmup_status_label()
+                    # Real bounces (address doesn't exist, blocked, etc.)
+                    # come back as a separate message to the sending
+                    # inbox on their own schedule -- this campaign's own
+                    # Sent count only ever meant "SMTP accepted it," never
+                    # "delivered." One automatic, silent reconciliation
+                    # pass a few minutes later closes most of that gap for
+                    # fast hard-bounces; "Check for Bounces" in the report
+                    # dialog/History covers anything slower.
+                    self.after(BOUNCE_AUTO_CHECK_DELAY_MS,
+                               lambda cid=result.get("campaign_id"):
+                                   self._check_campaign_for_bounces(cid, silent=True))
                 self._show_email_report(result)
 
             self.after(0, finish)
@@ -2303,11 +2318,127 @@ class MainWindow(ctk.CTk):
                 writer.writerow([f"{result['sent']} sent total", "", "sent", ""])
             show_toast(self, f"Report exported to {os.path.basename(path)}", kind="success")
 
+        campaign_id = result.get("campaign_id")
+        initial_bounced = (self.db.get_campaign_bounce_stats(campaign_id)["bounced_count"]
+                            if campaign_id else 0)
+
+        def check_bounces(dialog_callback) -> None:
+            def on_done(check_result) -> None:
+                if check_result is None:
+                    dialog_callback(False, 0, "No campaign to check.")
+                    return
+                if not check_result.ok:
+                    dialog_callback(False, 0, check_result.error)
+                    return
+                bounced_count = (self.db.get_campaign_bounce_stats(campaign_id)["bounced_count"]
+                                  if campaign_id else 0)
+                dialog_callback(True, bounced_count, "")
+            self._check_campaign_for_bounces(campaign_id, silent=False, on_done=on_done)
+
         show_send_report(
             self, "email", result.get("sent", 0), result.get("failed", 0), failed_details,
             on_retry_failed=retry_failed if failed_recipients else None,
             on_export=export_csv,
+            on_check_bounces=check_bounces if campaign_id else None,
+            bounced=initial_bounced,
         )
+
+    def _check_campaign_for_bounces(self, campaign_id: Optional[int], silent: bool = False,
+                                     on_done=None) -> None:
+        """Real IMAP bounce/NDR reconciliation for one campaign: reads the
+        sending account's own inbox (read-only) for real bounce messages and
+        cross-references them against the exact set of addresses this
+        campaign actually sent to (SMTP-accepted, i.e. status='sent' and
+        not yet reconciled). Any confirmed bounce updates message_logs
+        (bounced/bounce_reason) and the matching contact's own bounced flag,
+        so future campaigns don't keep sending to a dead address.
+
+        Runs entirely in a background thread; never blocks the UI, never
+        raises into it -- matches this app's own established pattern for
+        every other background network call (update checks, AI calls,
+        SMTP test). `silent=True` (the automatic post-send check) only logs
+        + updates data on success and stays quiet on a soft failure (no
+        IMAP settings guessable, offline, etc.) rather than popping a toast
+        for something the user didn't explicitly ask for; a manual "Check
+        for Bounces" click (silent=False) always shows a real result."""
+        if not campaign_id:
+            if on_done:
+                on_done(None)
+            return
+
+        logs = self.db.get_sent_email_logs_for_bounce_check(campaign_id)
+        candidate_emails = {log.contact_email for log in logs if log.contact_email}
+        if not candidate_emails:
+            if not silent:
+                show_toast(self, "Nothing to check — no un-reconciled sent emails "
+                                  "for this campaign.", kind="info")
+            if on_done:
+                on_done(bounce_checker.BounceCheckResult(ok=True, bounces={}))
+            return
+
+        imap_target = bounce_checker.guess_imap_host(self._em_host.get(), self._em_provider.get())
+        if imap_target is None:
+            message = ("Can't auto-detect IMAP settings for this email provider — "
+                       "bounce checking isn't available for a custom SMTP host yet.")
+            if not silent:
+                show_toast(self, message, kind="error")
+            self._log_activity(f"Bounce check skipped for campaign {campaign_id}: {message}")
+            if on_done:
+                on_done(bounce_checker.BounceCheckResult(ok=False, error=message))
+            return
+        imap_host, imap_port = imap_target
+        username = self._em_user.get()
+        password = self._em_pass.get()
+
+        def worker():
+            result = bounce_checker.check_for_bounces(
+                imap_host, imap_port, username, password, candidate_emails)
+
+            def finish():
+                if not result.ok:
+                    if not silent:
+                        show_toast(self, f"Bounce check failed: {result.error}", kind="error")
+                    self._log_activity(f"Bounce check failed for campaign {campaign_id}: {result.error}")
+                    if on_done:
+                        on_done(result)
+                    return
+
+                newly_marked = 0
+                for log in logs:
+                    addr = (log.contact_email or "").strip().lower()
+                    if addr in result.bounces and not log.bounced:
+                        reason = result.bounces[addr]
+                        if self.db.mark_message_log_bounced(log.id, reason):
+                            newly_marked += 1
+                            self.db.set_contact_bounced_by_email(log.contact_email, True)
+                            for contact in self.contacts:
+                                if contact.email and contact.email.strip().lower() == addr:
+                                    contact.bounced = True
+
+                if newly_marked:
+                    self._log_activity(
+                        f"Bounce check: {newly_marked} confirmed bounce(s) found "
+                        f"for campaign {campaign_id}.")
+                    if not silent:
+                        show_toast(self, f"{newly_marked} bounce(s) confirmed and reconciled.",
+                                   kind="success")
+                    if hasattr(self, "_history_scroll"):
+                        self._history_campaigns = self.db.get_recent_campaigns_summary(limit=100)
+                        self._render_history_rows(self._header_search_var.get()
+                                                   if hasattr(self, "_header_search_var") else "")
+                    if getattr(self, "_contacts_directory_rendered", False):
+                        self._render_contacts_directory()
+                    if hasattr(self, "compose_contacts_frame"):
+                        self._render_compose_contacts()
+                elif not silent:
+                    show_toast(self, "Checked — no new bounces found.", kind="success")
+
+                if on_done:
+                    on_done(result)
+
+            self.after(0, finish)
+
+        threading.Thread(target=worker, daemon=True).start()
 
     def _add_unsubscribe_footer(self, html_body: str) -> str:
         """Append a compliance footer to every outgoing email, no exceptions
@@ -2654,14 +2785,17 @@ class MainWindow(ctk.CTk):
             created = camp.get("created_at", "")
             sent = camp.get("sent_count", 0)
             failed = camp.get("failed_count", 0)
+            bounced = camp.get("bounced_count", 0)
             status = "sent" if sent > 0 else "failed" if failed > 0 else "draft"
 
             ctk.CTkLabel(row_frame, text=name,
                          font=ctk.CTkFont(size=13, weight="bold"),
                          text_color=T.TEXT_HEAD).grid(
                 row=0, column=0, padx=14, pady=(10, 2), sticky="w")
-            ctk.CTkLabel(row_frame,
-                         text=f"📅 {created}  ·  ✅ {sent} sent  ·  ❌ {failed} failed",
+            summary_text = f"📅 {created}  ·  ✅ {sent} sent  ·  ❌ {failed} failed"
+            if bounced:
+                summary_text += f"  ·  🚫 {bounced} bounced"
+            ctk.CTkLabel(row_frame, text=summary_text,
                          text_color=T.TEXT_MUTED, font=ctk.CTkFont(size=11),
                          ).grid(row=1, column=0, padx=14, pady=(0, 10), sticky="w")
             ctk.CTkLabel(row_frame, text=status, fg_color=T.BADGE_BG, corner_radius=999,
@@ -2696,6 +2830,28 @@ class MainWindow(ctk.CTk):
                           border_width=1, border_color=T.ACCENT,
                           text_color=T.ACCENT_TEXT, font=ctk.CTkFont(size=11, weight="bold"),
                           command=duplicate).pack(side="left", padx=4)
+
+            if sent > 0 and camp.get("id") is not None:
+                bounce_btn = ctk.CTkButton(
+                    actions, text="🔍 Check Bounces", width=124, corner_radius=6,
+                    fg_color="transparent", hover_color=T.BG_BORDER,
+                    border_width=1, border_color=T.ACCENT,
+                    text_color=T.ACCENT_TEXT, font=ctk.CTkFont(size=11, weight="bold"))
+
+                def check_bounces(campaign_id=camp.get("id"), btn=bounce_btn):
+                    btn.configure(state="disabled", text="Checking…")
+
+                    def on_done(check_result):
+                        if not btn.winfo_exists():
+                            return
+                        btn.configure(state="normal", text="🔍 Check Bounces")
+                        if check_result is not None and not check_result.ok:
+                            show_toast(self, f"Bounce check failed: {check_result.error}", kind="error")
+
+                    self._check_campaign_for_bounces(campaign_id, silent=False, on_done=on_done)
+
+                bounce_btn.configure(command=check_bounces)
+                bounce_btn.pack(side="left", padx=4)
 
     def _export_campaigns_csv(self) -> None:
         import csv
@@ -4407,7 +4563,17 @@ class MainWindow(ctk.CTk):
             ctk.CTkLabel(top, text=contact.name or "Unnamed Contact",
                          font=ctk.CTkFont(size=13, weight="bold"),
                          text_color=T.TEXT_HEAD).pack(anchor="w", side="left")
-            if contact.opted_out:
+            # Bounced takes priority over Unsubscribed/Active -- it's a
+            # more specific, more actionable signal (a real confirmed
+            # delivery failure, not a preference), and a contact can be
+            # both bounced and opted-out at once without needing two badges.
+            if contact.bounced:
+                ctk.CTkLabel(top, text="Bounced",
+                             fg_color=T.BADGE_BG, corner_radius=999,
+                             padx=8, pady=3,
+                             text_color=T.DANGER_ON_BADGE, font=ctk.CTkFont(size=10, weight="bold"),
+                             ).pack(anchor="e", side="right")
+            elif contact.opted_out:
                 ctk.CTkLabel(top, text="Unsubscribed",
                              fg_color=T.BADGE_BG, corner_radius=999,
                              padx=8, pady=3,
@@ -4421,6 +4587,20 @@ class MainWindow(ctk.CTk):
                              ).pack(anchor="e", side="right")
             ctk.CTkLabel(card, text=contact.phone, text_color=T.TEXT_MUTED,
                          font=ctk.CTkFont(size=12)).pack(anchor="w", padx=16, pady=(0, 3))
+
+            if contact.bounced:
+                bounce_row = ctk.CTkFrame(card, fg_color="transparent")
+                bounce_row.pack(fill="x", padx=16, pady=(0, 3))
+                ctk.CTkLabel(bounce_row, text="✉ Email bounced — excluded from future email sends",
+                             text_color=T.DANGER_ON_BADGE, font=ctk.CTkFont(size=10, weight="bold"),
+                             ).pack(side="left")
+                ctk.CTkButton(bounce_row, text="Clear Bounced Flag", width=130, height=22, corner_radius=6,
+                              fg_color="transparent", hover_color=T.BG_BORDER,
+                              border_width=1, border_color=T.ACCENT, text_color=T.ACCENT_TEXT,
+                              font=ctk.CTkFont(size=10),
+                              command=lambda c=contact: self._toggle_contact_bounced(c, False),
+                              ).pack(side="right")
+
             footer = ctk.CTkFrame(card, fg_color="transparent")
             footer.pack(fill="x", padx=16, pady=(0, 12))
             ctk.CTkLabel(footer,
@@ -4452,6 +4632,28 @@ class MainWindow(ctk.CTk):
                               ).pack(side="right")
 
         self._bind_scrollable_frame_mousewheel(self.contacts_directory)
+
+    def _toggle_contact_bounced(self, contact: Contact, bounced: bool) -> None:
+        """Manual clear (or, in principle, re-set) of a contact's bounced
+        flag -- e.g. after confirming a typo'd address was fixed. Bounced is
+        normally set automatically by a real IMAP bounce check, never by
+        guessing; this is the escape hatch for a false positive or a
+        since-corrected address."""
+        if contact.id is None:
+            return
+        ok = self.db.set_contact_bounced(contact.id, bounced)
+        if not ok:
+            show_toast(self, "Could not update contact.", kind="error")
+            return
+        contact.bounced = bounced
+        self._log_activity(
+            f"{'Marked bounced' if bounced else 'Cleared bounced flag'}: {contact.name or contact.phone}")
+        show_toast(
+            self,
+            f"{contact.name or contact.phone} {'marked as bounced' if bounced else 'bounced flag cleared — eligible for email again'}.",
+            kind="success")
+        self._render_contacts_directory()
+        self._render_compose_contacts()
 
     def _toggle_contact_opt_out(self, contact: Contact, opted_out: bool) -> None:
         if contact.id is None:
@@ -4944,7 +5146,7 @@ class MainWindow(ctk.CTk):
         preview = self._em_preview_text
         preview.configure(state="normal")
         preview.delete("1.0", "end")
-        contacts = [c for c in self.contacts if c.email and not c.opted_out]
+        contacts = [c for c in self.contacts if c.email and not c.opted_out and not c.bounced]
         if not contacts:
             preview.insert("1.0", "Import a contact with an email address to preview "
                            "personalized output.", ("muted",))
@@ -5082,7 +5284,7 @@ class MainWindow(ctk.CTk):
         if hasattr(self, "_em_preview_text"):
             self._em_preview_text.grid_remove()
         self._em_card_preview_host.grid()
-        contacts = [c for c in self.contacts if c.email and not c.opted_out]
+        contacts = [c for c in self.contacts if c.email and not c.opted_out and not c.bounced]
         vars_map = {"name": "", "email": "", "phone": "", "sender": self._em_from_name.get()}
         if contacts:
             contact = contacts[0]
@@ -5105,7 +5307,7 @@ class MainWindow(ctk.CTk):
         """Item 10 of the Live Testing Findings pass: makes the "Recipients"
         count clickable/expandable, listing exactly which contacts are
         included instead of leaving the user to guess from a bare number."""
-        contacts = [c for c in self.contacts if c.email and not c.opted_out]
+        contacts = [c for c in self.contacts if c.email and not c.opted_out and not c.bounced]
         dlg = ctk.CTkToplevel(self)
         dlg.title("Email Recipients")
         center_on_parent(dlg, 420, 480, self)

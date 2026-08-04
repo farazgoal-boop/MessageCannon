@@ -31,6 +31,7 @@ class Contact:
     custom_fields: Dict[str, Any] = field(default_factory=dict)
     created_at: datetime = field(default_factory=datetime.now)
     opted_out: bool = False
+    bounced: bool = False
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary."""
@@ -50,6 +51,7 @@ class Contact:
         contact.tags = data.get('tags', '').split(',') if data.get('tags') else []
         contact.custom_fields = data.get('custom_fields', {})
         contact.opted_out = bool(data.get('opted_out', False))
+        contact.bounced = bool(data.get('bounced', False))
 
         if isinstance(data.get('created_at'), str):
             contact.created_at = datetime.fromisoformat(data['created_at'])
@@ -72,7 +74,10 @@ class MessageLog:
     sent_at: Optional[datetime] = None
     error_message: Optional[str] = None
     retry_count: int = 0
-    
+    bounced: bool = False
+    bounce_reason: Optional[str] = None
+    bounce_checked_at: Optional[datetime] = None
+
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary."""
         data = {
@@ -87,6 +92,9 @@ class MessageLog:
             'sent_at': self.sent_at.isoformat() if self.sent_at else None,
             'error_message': self.error_message,
             'retry_count': self.retry_count,
+            'bounced': self.bounced,
+            'bounce_reason': self.bounce_reason,
+            'bounce_checked_at': self.bounce_checked_at.isoformat() if self.bounce_checked_at else None,
         }
         return data
 

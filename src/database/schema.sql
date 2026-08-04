@@ -12,7 +12,8 @@ CREATE TABLE IF NOT EXISTS contacts (
     tags TEXT,
     custom_fields TEXT,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    opted_out INTEGER DEFAULT 0
+    opted_out INTEGER DEFAULT 0,
+    bounced INTEGER DEFAULT 0
 );
 
 -- Campaigns table
@@ -46,6 +47,9 @@ CREATE TABLE IF NOT EXISTS message_logs (
     error_message TEXT,
     retry_count INTEGER DEFAULT 0,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    bounced INTEGER DEFAULT 0,
+    bounce_reason TEXT,
+    bounce_checked_at TIMESTAMP,
     FOREIGN KEY (campaign_id) REFERENCES campaigns(id)
 );
 

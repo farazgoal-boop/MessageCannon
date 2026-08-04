@@ -106,24 +106,39 @@ class SendConfirmationDialog(ctk.CTkToplevel):
 
 
 class SendReportDialog(ctk.CTkToplevel):
-    """Post-send report: counts, delivery rate, failed-contact list with
-    reasons, "Retry Failed Only", and Export (reuses the existing real
-    DeliveryTracker/WhatsAppSender.export_report — not rebuilt)."""
+    """Post-send report: counts, failed-contact list with reasons, "Retry
+    Failed Only", and Export (reuses the existing real
+    DeliveryTracker/WhatsAppSender.export_report — not rebuilt).
+
+    Email reports additionally show a real, honest three-state picture
+    instead of assuming every SMTP-accepted send was delivered: Sent
+    (attempted — SMTP accepted it), Bounced (confirmed via a real IMAP
+    inbox check, only ever a positive/confirmed fact, never guessed), and
+    Delivered (assumed — sent minus any confirmed bounce; email gives no
+    positive delivery confirmation the way SMS/WhatsApp read-receipts can,
+    so this is explicitly labeled an assumption, not a fact). `on_check_bounces`
+    is only ever passed for email (WhatsApp already has its own real
+    delivery-status tracking via delivery_tracker.py, a different, already-
+    confirmed signal this dialog doesn't need to touch)."""
 
     def __init__(self, main_window, channel: str, sent: int, failed: int,
-                 failed_details: list, on_retry_failed=None, on_export=None):
+                 failed_details: list, on_retry_failed=None, on_export=None,
+                 on_check_bounces=None, bounced: int = 0):
         super().__init__(main_window)
         self.title("Campaign Report")
-        center_on_parent(self, 520, 560, main_window)
+        center_on_parent(self, 520, 600 if on_check_bounces else 560, main_window)
         self.transient(main_window)
         self.grab_set()
         self.configure(fg_color=T.BG_MAIN)
         self.protocol("WM_DELETE_WINDOW", self.destroy)
         self.bind("<Escape>", lambda _e: self.destroy())
 
+        self.on_check_bounces = on_check_bounces
+        self._sent = sent
+        self._bounced = bounced
+        self._bounce_checked = False
+
         self.grid_columnconfigure(0, weight=1)
-        total = sent + failed
-        rate = (sent / total * 100) if total else 0
 
         ctk.CTkLabel(self, text="✅ Campaign complete" if failed == 0 else "⚠ Campaign complete with failures",
                      font=ctk.CTkFont(size=18, weight="bold"), text_color=T.TEXT_HEAD).grid(
@@ -131,27 +146,55 @@ class SendReportDialog(ctk.CTkToplevel):
 
         stats = ctk.CTkFrame(self, fg_color=T.BG_SURFACE, corner_radius=12,
                              border_width=1, border_color=T.BG_BORDER)
-        stats.grid(row=1, column=0, padx=24, pady=(0, 16), sticky="ew")
-        stats.grid_columnconfigure((0, 1, 2), weight=1)
-        for i, (label, value, color) in enumerate([
+        stats.grid(row=1, column=0, padx=24, pady=(0, 4 if on_check_bounces else 16), sticky="ew")
+        columns = 4 if on_check_bounces else 3
+        stats.grid_columnconfigure(tuple(range(columns)), weight=1)
+
+        cells = [
             ("Sent", str(sent), T.SUCCESS),
             ("Failed", str(failed), T.DANGER_ON_BADGE if failed else T.TEXT_MUTED),
-            ("Delivery rate", f"{rate:.0f}%", T.ACCENT),
-        ]):
+        ]
+        if on_check_bounces:
+            cells.append(("Bounced", str(bounced), T.DANGER_ON_BADGE if bounced else T.TEXT_MUTED))
+            cells.append(("Delivered (assumed)", str(max(0, sent - bounced)), T.ACCENT))
+        else:
+            total = sent + failed
+            rate = (sent / total * 100) if total else 0
+            cells.append(("Delivery rate", f"{rate:.0f}%", T.ACCENT))
+
+        self._bounced_value_label = None
+        self._delivered_value_label = None
+        for i, (label, value, color) in enumerate(cells):
             cell = ctk.CTkFrame(stats, fg_color="transparent")
             cell.grid(row=0, column=i, padx=14, pady=14, sticky="w")
             ctk.CTkLabel(cell, text=label, text_color=T.TEXT_MUTED,
                          font=ctk.CTkFont(size=11)).pack(anchor="w")
-            ctk.CTkLabel(cell, text=value, text_color=color,
-                         font=ctk.CTkFont(size=18, weight="bold")).pack(anchor="w")
+            value_label = ctk.CTkLabel(cell, text=value, text_color=color,
+                                        font=ctk.CTkFont(size=18, weight="bold"))
+            value_label.pack(anchor="w")
+            if label == "Bounced":
+                self._bounced_value_label = value_label
+            elif label == "Delivered (assumed)":
+                self._delivered_value_label = value_label
+
+        next_row = 1
+        if on_check_bounces:
+            self._bounce_note_var = ctk.StringVar(
+                value="Not checked yet — email gives no positive delivery confirmation; "
+                      "\"Delivered\" above is an assumption until you check for real bounces.")
+            ctk.CTkLabel(self, textvariable=self._bounce_note_var, text_color=T.TEXT_MUTED,
+                         font=ctk.CTkFont(size=10), wraplength=470, justify="left").grid(
+                row=next_row, column=0, padx=24, pady=(0, 12), sticky="w")
+            next_row += 1
 
         if failed_details:
             ctk.CTkLabel(self, text=f"Failed ({len(failed_details)}) — reason shown per contact",
                          text_color=T.TEXT_HEAD, font=ctk.CTkFont(size=12, weight="bold")).grid(
-                row=2, column=0, padx=24, pady=(0, 6), sticky="w")
-            self.grid_rowconfigure(3, weight=1)
+                row=next_row, column=0, padx=24, pady=(0, 6), sticky="w")
+            next_row += 1
+            self.grid_rowconfigure(next_row, weight=1)
             fail_list = ctk.CTkScrollableFrame(self, fg_color=T.BG_INNER, corner_radius=10)
-            fail_list.grid(row=3, column=0, padx=24, pady=(0, 12), sticky="nsew")
+            fail_list.grid(row=next_row, column=0, padx=24, pady=(0, 12), sticky="nsew")
             fail_list.grid_columnconfigure(0, weight=1)
             for i, (label, reason) in enumerate(failed_details):
                 row = ctk.CTkFrame(fail_list, fg_color="transparent")
@@ -160,19 +203,66 @@ class SendReportDialog(ctk.CTkToplevel):
                              font=ctk.CTkFont(size=11, weight="bold")).pack(anchor="w")
                 ctk.CTkLabel(row, text=reason, text_color=T.DANGER_ON_BADGE,
                              font=ctk.CTkFont(size=10), wraplength=440, justify="left").pack(anchor="w")
+            next_row += 1
 
         footer = ctk.CTkFrame(self, fg_color="transparent")
-        footer.grid(row=4, column=0, padx=24, pady=(0, 20), sticky="ew")
+        footer.grid(row=next_row, column=0, padx=24, pady=(0, 20), sticky="ew")
         if failed_details and on_retry_failed:
             ctk.CTkButton(footer, text=f"↻ Retry Failed Only ({len(failed_details)})",
                           fg_color=T.DANGER, hover_color=T.DANGER_HOVER, text_color=T.TEXT_HEAD,
                           command=lambda: (self.destroy(), on_retry_failed())).pack(side="left", padx=(0, 10))
+        if on_check_bounces:
+            self._check_bounces_btn = ctk.CTkButton(
+                footer, text="🔍 Check for Bounces", corner_radius=6,
+                fg_color=T.BG_INNER, hover_color=T.BG_BORDER,
+                border_width=1, border_color=T.ACCENT, text_color=T.ACCENT_TEXT,
+                font=ctk.CTkFont(size=11, weight="bold"),
+                command=self._run_bounce_check)
+            self._check_bounces_btn.pack(side="left", padx=(0, 10))
         if on_export:
             ctk.CTkButton(footer, text="Export Report", fg_color=T.BADGE_BG,
                           hover_color=T.BG_BORDER, text_color=T.TEXT_HEAD,
                           command=on_export).pack(side="left", padx=(0, 10))
         ctk.CTkButton(footer, text="Close", fg_color=T.ACCENT, hover_color=T.ACCENT_HOVER,
                       text_color=T.TEXT_HEAD, command=self.destroy).pack(side="right")
+
+    def _run_bounce_check(self) -> None:
+        if not self.on_check_bounces:
+            return
+        self._check_bounces_btn.configure(state="disabled", text="Checking…")
+        self._bounce_note_var.set("Checking your inbox for real bounce notifications…")
+        self.on_check_bounces(self._on_bounce_check_result)
+
+    def _on_bounce_check_result(self, ok: bool, bounced_count: int, error: str = "") -> None:
+        """Called back once a real bounce check finishes -- ok/bounced_count/
+        error describe the CURRENT reconciled state (bounced_count is the
+        real running total for this campaign, not just "new this check"),
+        so re-running the check multiple times is always shown correctly."""
+        if not self.winfo_exists():
+            return
+        self._check_bounces_btn.configure(state="normal", text="🔍 Check for Bounces")
+        if not ok:
+            self._bounce_note_var.set(f"⚠ Bounce check failed: {error}" if error
+                                       else "⚠ Bounce check failed — see activity log for details.")
+            return
+        self._bounced = bounced_count
+        self._bounce_checked = True
+        if self._bounced_value_label is not None:
+            self._bounced_value_label.configure(
+                text=str(bounced_count),
+                text_color=T.DANGER_ON_BADGE if bounced_count else T.TEXT_MUTED)
+        if self._delivered_value_label is not None:
+            self._delivered_value_label.configure(text=str(max(0, self._sent - bounced_count)))
+        if bounced_count:
+            self._bounce_note_var.set(
+                f"✓ Checked — {bounced_count} confirmed bounce(s) found and excluded from "
+                "future sends. \"Delivered\" is still an assumption for the rest — email has "
+                "no positive delivery confirmation.")
+        else:
+            self._bounce_note_var.set(
+                "✓ Checked — no bounce notifications found (yet). \"Delivered\" above is "
+                "still an assumption, not a confirmed fact — some bounces can take longer "
+                "to arrive; check again later if unsure.")
 
 
 def show_send_confirmation(main_window, channel, recipient_count, delay_seconds, preview_lines,
@@ -181,5 +271,7 @@ def show_send_confirmation(main_window, channel, recipient_count, delay_seconds,
                                    preview_lines, on_confirm, subject=subject)
 
 
-def show_send_report(main_window, channel, sent, failed, failed_details, on_retry_failed=None, on_export=None):
-    return SendReportDialog(main_window, channel, sent, failed, failed_details, on_retry_failed, on_export)
+def show_send_report(main_window, channel, sent, failed, failed_details, on_retry_failed=None,
+                      on_export=None, on_check_bounces=None, bounced: int = 0):
+    return SendReportDialog(main_window, channel, sent, failed, failed_details, on_retry_failed,
+                             on_export, on_check_bounces=on_check_bounces, bounced=bounced)
