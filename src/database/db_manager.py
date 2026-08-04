@@ -25,7 +25,8 @@ CREATE TABLE IF NOT EXISTS contacts (
     tags TEXT,
     custom_fields TEXT,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    opted_out INTEGER DEFAULT 0
+    opted_out INTEGER DEFAULT 0,
+    bounced INTEGER DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS campaigns (
@@ -57,6 +58,9 @@ CREATE TABLE IF NOT EXISTS message_logs (
     error_message TEXT,
     retry_count INTEGER DEFAULT 0,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    bounced INTEGER DEFAULT 0,
+    bounce_reason TEXT,
+    bounce_checked_at TIMESTAMP,
     FOREIGN KEY (campaign_id) REFERENCES campaigns(id)
 );
 
@@ -158,6 +162,13 @@ class DatabaseManager:
                         Logger.info("Added opted_out column to contacts table")
                     except Exception as e:
                         Logger.error(f"Migration error (contacts.opted_out): {e}")
+                if "bounced" not in cols:
+                    try:
+                        cursor.execute("ALTER TABLE contacts ADD COLUMN bounced INTEGER DEFAULT 0")
+                        conn.commit()
+                        Logger.info("Added bounced column to contacts table")
+                    except Exception as e:
+                        Logger.error(f"Migration error (contacts.bounced): {e}")
 
                 # Check message_logs columns
                 cursor.execute("PRAGMA table_info(message_logs)")
@@ -176,6 +187,27 @@ class DatabaseManager:
                         Logger.info("Added subject column to message_logs table")
                     except Exception as e:
                         Logger.error(f"Migration error (message_logs.subject): {e}")
+                if "bounced" not in cols:
+                    try:
+                        cursor.execute("ALTER TABLE message_logs ADD COLUMN bounced INTEGER DEFAULT 0")
+                        conn.commit()
+                        Logger.info("Added bounced column to message_logs table")
+                    except Exception as e:
+                        Logger.error(f"Migration error (message_logs.bounced): {e}")
+                if "bounce_reason" not in cols:
+                    try:
+                        cursor.execute("ALTER TABLE message_logs ADD COLUMN bounce_reason TEXT")
+                        conn.commit()
+                        Logger.info("Added bounce_reason column to message_logs table")
+                    except Exception as e:
+                        Logger.error(f"Migration error (message_logs.bounce_reason): {e}")
+                if "bounce_checked_at" not in cols:
+                    try:
+                        cursor.execute("ALTER TABLE message_logs ADD COLUMN bounce_checked_at TIMESTAMP")
+                        conn.commit()
+                        Logger.info("Added bounce_checked_at column to message_logs table")
+                    except Exception as e:
+                        Logger.error(f"Migration error (message_logs.bounce_checked_at): {e}")
 
             self._migrate_contacts_phone_nullable()
         except Exception as e:
@@ -227,6 +259,7 @@ class DatabaseManager:
                 cols = [r[1] for r in cursor.fetchall()]
                 has_email = "email" in cols
                 has_opted_out = "opted_out" in cols
+                has_bounced = "bounced" in cols
 
                 cursor.execute("ALTER TABLE contacts RENAME TO contacts_pre_phone_migration")
                 cursor.execute("""
@@ -238,14 +271,16 @@ class DatabaseManager:
                         tags TEXT,
                         custom_fields TEXT,
                         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                        opted_out INTEGER DEFAULT 0
+                        opted_out INTEGER DEFAULT 0,
+                        bounced INTEGER DEFAULT 0
                     )
                 """)
                 email_expr = "email" if has_email else "NULL"
                 opted_out_expr = "opted_out" if has_opted_out else "0"
+                bounced_expr = "bounced" if has_bounced else "0"
                 cursor.execute(f"""
-                    INSERT INTO contacts (id, phone, email, name, tags, custom_fields, created_at, opted_out)
-                    SELECT id, NULLIF(phone, ''), {email_expr}, name, tags, custom_fields, created_at, {opted_out_expr}
+                    INSERT INTO contacts (id, phone, email, name, tags, custom_fields, created_at, opted_out, bounced)
+                    SELECT id, NULLIF(phone, ''), {email_expr}, name, tags, custom_fields, created_at, {opted_out_expr}, {bounced_expr}
                     FROM contacts_pre_phone_migration
                 """)
                 cursor.execute("DROP TABLE contacts_pre_phone_migration")
@@ -498,6 +533,11 @@ class DatabaseManager:
                         opted_out_val = bool(row['opted_out'])
                     except (IndexError, sqlite3.OperationalError):
                         pass
+                    bounced_val = False
+                    try:
+                        bounced_val = bool(row['bounced'])
+                    except (IndexError, sqlite3.OperationalError):
+                        pass
 
                     contact = Contact(
                         id=row['id'],
@@ -508,6 +548,7 @@ class DatabaseManager:
                         custom_fields=json.loads(row['custom_fields']) if row['custom_fields'] else {},
                         created_at=datetime.fromisoformat(row['created_at']),
                         opted_out=opted_out_val,
+                        bounced=bounced_val,
                     )
                     contacts.append(contact)
 
@@ -608,6 +649,42 @@ class DatabaseManager:
                 return cursor.rowcount > 0
         except Exception as e:
             Logger.error(f"Error setting contact opted_out state: {e}")
+            return False
+
+    def set_contact_bounced(self, contact_id: int, bounced: bool) -> bool:
+        """Mark a contact as bounced (or clear the flag). Bounced contacts
+        must be excluded from future email sends, same enforcement pattern
+        as opted_out — enforced at the point contacts are selected for
+        sending, not here."""
+        try:
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "UPDATE contacts SET bounced = ? WHERE id = ?",
+                    (1 if bounced else 0, contact_id))
+                conn.commit()
+                return cursor.rowcount > 0
+        except Exception as e:
+            Logger.error(f"Error setting contact bounced state: {e}")
+            return False
+
+    def set_contact_bounced_by_email(self, email: str, bounced: bool = True) -> bool:
+        """Same as set_contact_bounced, but matched by email address
+        (case-insensitive) — the address a bounce reconciliation actually
+        has, not a contact id. Returns True only if a real contact row was
+        matched and updated."""
+        if not email:
+            return False
+        try:
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "UPDATE contacts SET bounced = ? WHERE email = ? COLLATE NOCASE",
+                    (1 if bounced else 0, email))
+                conn.commit()
+                return cursor.rowcount > 0
+        except Exception as e:
+            Logger.error(f"Error setting contact bounced state by email {email}: {e}")
             return False
 
     def delete_all_contacts(self) -> int:
@@ -862,6 +939,11 @@ class DatabaseManager:
                         contact_email_val = row['contact_email'] or ''
                     if "subject" in cols:
                         subject_val = row['subject'] or ''
+                    bounced_val = bool(row['bounced']) if "bounced" in cols else False
+                    bounce_reason_val = row['bounce_reason'] if "bounce_reason" in cols else None
+                    bounce_checked_val = None
+                    if "bounce_checked_at" in cols and row['bounce_checked_at']:
+                        bounce_checked_val = datetime.fromisoformat(row['bounce_checked_at'])
 
                     log = MessageLog(
                         id=row['id'],
@@ -874,14 +956,98 @@ class DatabaseManager:
                         status=MessageStatus(row['status']),
                         sent_at=datetime.fromisoformat(row['sent_at']) if row['sent_at'] else None,
                         error_message=row['error_message'],
-                        retry_count=row['retry_count']
+                        retry_count=row['retry_count'],
+                        bounced=bounced_val,
+                        bounce_reason=bounce_reason_val,
+                        bounce_checked_at=bounce_checked_val,
                     )
                     logs.append(log)
-                
+
                 return logs
         except Exception as e:
             Logger.error(f"Error getting message logs: {e}")
             return []
+
+    def get_sent_email_logs_for_bounce_check(self, campaign_id: int) -> List[MessageLog]:
+        """Real, already-sent (SMTP-accepted) email rows for one campaign
+        that haven't been reconciled against a bounce yet — the candidate
+        set a bounce check cross-references real inbox NDRs against.
+        Deliberately scoped to status='sent' (never 'failed' — those are
+        already known failures, not something bounce-checking should
+        touch) and bounced=0 (a row already confirmed bounced doesn't need
+        re-checking, though re-running is harmless either way)."""
+        try:
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "SELECT * FROM message_logs "
+                    "WHERE campaign_id = ? AND status = 'sent' AND bounced = 0 "
+                    "AND contact_email IS NOT NULL AND contact_email != ''",
+                    (campaign_id,)
+                )
+                logs = []
+                for row in cursor.fetchall():
+                    logs.append(MessageLog(
+                        id=row['id'],
+                        campaign_id=row['campaign_id'],
+                        contact_phone=row['contact_phone'] or '',
+                        contact_email=row['contact_email'] or '',
+                        contact_name=row['contact_name'] or '',
+                        subject=row['subject'] or '',
+                        message_text=row['message_text'],
+                        status=MessageStatus(row['status']),
+                        sent_at=datetime.fromisoformat(row['sent_at']) if row['sent_at'] else None,
+                        error_message=row['error_message'],
+                        retry_count=row['retry_count'],
+                        bounced=bool(row['bounced']),
+                        bounce_reason=row['bounce_reason'],
+                        bounce_checked_at=datetime.fromisoformat(row['bounce_checked_at']) if row['bounce_checked_at'] else None,
+                    ))
+                return logs
+        except Exception as e:
+            Logger.error(f"Error getting sent email logs for bounce check (campaign {campaign_id}): {e}")
+            return []
+
+    def mark_message_log_bounced(self, log_id: int, reason: str) -> bool:
+        """Reconcile one message_logs row as a confirmed bounce, found by a
+        real IMAP bounce check. status is intentionally left as 'sent'
+        (SMTP genuinely accepted it — that fact doesn't change) — bounced
+        is a separate, later-confirmed flag layered on top, so the existing
+        warm-up/daily-limit counters that count status='sent' rows aren't
+        retroactively corrupted by a bounce discovered days later."""
+        try:
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "UPDATE message_logs SET bounced = 1, bounce_reason = ?, "
+                    "bounce_checked_at = CURRENT_TIMESTAMP WHERE id = ?",
+                    (reason, log_id))
+                conn.commit()
+                return cursor.rowcount > 0
+        except Exception as e:
+            Logger.error(f"Error marking message log {log_id} bounced: {e}")
+            return False
+
+    def get_campaign_bounce_stats(self, campaign_id: int) -> dict:
+        """Real bounced count + list of (email, reason) for one campaign —
+        used by the report UI to show a genuine, reconciled Bounced count
+        instead of assuming every SMTP-accepted send was delivered."""
+        try:
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "SELECT contact_name, contact_email, bounce_reason FROM message_logs "
+                    "WHERE campaign_id = ? AND bounced = 1",
+                    (campaign_id,)
+                )
+                rows = cursor.fetchall()
+                return {
+                    "bounced_count": len(rows),
+                    "bounced": [(r["contact_name"] or r["contact_email"], r["contact_email"], r["bounce_reason"]) for r in rows],
+                }
+        except Exception as e:
+            Logger.error(f"Error getting bounce stats for campaign {campaign_id}: {e}")
+            return {"bounced_count": 0, "bounced": []}
 
     def get_email_stats_since(self, since_date_iso: str) -> dict:
         """Sent/failed counts of message_logs rows (the email path) created
@@ -1117,15 +1283,21 @@ class DatabaseManager:
             return {"sent_count": 0, "read_count": 0, "failed_count": 0, "total_count": 0, "success_rate": 0.0}
 
     def get_recent_campaigns_summary(self, limit: int = 5) -> List[Dict[str, Any]]:
-        """Return recent campaigns with name, date, sent count, and message template."""
+        """Return recent campaigns with name, date, sent count, message
+        template, and a real reconciled bounced_count — a campaign row with
+        bounced=0 for every message just means "no bounce confirmed (yet)",
+        not "confirmed zero bounces"; the UI is responsible for wording that
+        honestly, not this query."""
         try:
             with self.get_connection() as conn:
                 cursor = conn.cursor()
                 cursor.execute(
                     """
-                    SELECT id, name, sent_count, failed_count, created_at, message_template
-                    FROM campaigns
-                    ORDER BY created_at DESC
+                    SELECT c.id, c.name, c.sent_count, c.failed_count, c.created_at, c.message_template,
+                           (SELECT COUNT(*) FROM message_logs ml
+                            WHERE ml.campaign_id = c.id AND ml.bounced = 1) AS bounced_count
+                    FROM campaigns c
+                    ORDER BY c.created_at DESC
                     LIMIT ?
                     """,
                     (limit,),

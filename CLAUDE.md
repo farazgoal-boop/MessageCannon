@@ -4696,3 +4696,139 @@ Full regression check: **122/122** plain `tests/` (was 119, +3 new) — no UI co
 fix, so the UI suite wasn't re-run for this specific change.
 
 **Shipped as `v1.3.5`.**
+
+## Real bounce/delivery tracking — the report only ever measured send-attempt, not delivery (2026-08-05)
+
+User's ask, with an explicit safety process attached (tag backup, branch, implement bounce-
+detection separately from the UI report changes, checkpoint each with a real send-and-check test,
+commit, rollback available): the campaign report marks a message "sent" (and counts it toward
+"0 failed, 100% delivery rate") the instant SMTP accepts it — a bounce (bad address, blocked
+message) comes back afterward as a *separate* message to the sending inbox, and nothing in the
+existing flow ever read those back or corrected the report. Read the real send-and-report code path
+first, per the ask's own first instruction, before writing anything: confirmed the exact line
+(`_send_email_campaign`, `main_window.py`) where `status=MessageStatus.SENT` gets written the
+moment `conn.sendmail()` returns without raising — SMTP acceptance, not delivery — and that
+`send_dialogs.py`'s `SendReportDialog` computed its "Delivery rate" stat purely from that same
+sent/failed split, with the literal word "Delivery" attached to a number that had never actually
+measured delivery.
+
+**Safety process followed exactly as asked**: tagged `pre-bounce-detection-backup` on `main`'s HEAD
+before touching anything, branched to `feature/bounce-detection`, built DB schema → bounce engine →
+send-flow wiring → UI in that order, each with its own real tests before moving to the next.
+
+**Schema** (`db_manager.py` + `schema.sql`, kept in sync — this codebase has drifted between the two
+before and caused a real bug in Phase 2, per this file's own record, so both were edited together
+again here): `message_logs` gained `bounced`/`bounce_reason`/`bounce_checked_at`; `contacts` gained
+`bounced` (parallel to the existing `opted_out`). A real runtime migration
+(`ALTER TABLE ... ADD COLUMN`, same PRAGMA-check pattern already used for every other column this
+app has added incrementally) covers existing installs. **Deliberate design choice**: a confirmed
+bounce does *not* change `status` away from `'sent'` — SMTP genuinely did accept the message, and
+that fact stays true regardless of what happens later; `bounced` is a separate, later-confirmed flag
+layered on top, so the existing warm-up-ramp/daily-limit counters (which count `status='sent'` rows
+to know how many were sent *today*) can't be silently corrupted by a bounce discovered days after
+the fact. Found and fixed one real, latent risk while editing: `_migrate_contacts_phone_nullable()`
+(the historical NOT-NULL-phone rebuild) rebuilds `contacts` from a hardcoded `CREATE TABLE` — its
+literal column list didn't include the new `bounced` column, which would have silently dropped it
+for any install old enough to still need that migration. Fixed and verified against a real
+constructed legacy (NOT NULL phone) database: `opted_out` and the new `bounced` both survive the
+rebuild correctly.
+
+**Bounce detection engine**, new `src/core/bounce_checker.py`: real, read-only IMAP (never
+marks/moves/deletes anything — `select("INBOX", readonly=True)`), never raises (same defensive
+contract as `update_checker.check_for_update` — any connect/login/search failure returns
+`ok=False`/`.error`, never an exception, so a flaky IMAP connection can't crash a background
+thread). `guess_imap_host()` derives IMAP host/port from the same "Provider" preset Settings' own
+SMTP dropdown already offers (Gmail/Outlook/Yahoo), with a generic `smtp.→imap.` prefix fallback for
+an unrecognized custom host and an honest `None` (not a guess) when nothing sensible can be derived.
+`parse_bounce_message()` is pure — given a real `email.message.Message`, prefers the structured RFC
+3464 `message/delivery-status` part when present, falls back to a sender/subject heuristic + body
+address-scan otherwise.
+
+**A real bug found by my own test, not by reading Python's docs and assuming they were right**:
+Python's `email` package parses a real `message/delivery-status` part as a *list of sub-`Message`
+objects* (one per RFC-3464 field block), not as flat text — confirmed directly by inspecting a real
+constructed DSN part (`part.is_multipart()` was `True`, `get_payload()` returned `[Message, Message]`).
+My first version called `get_payload(decode=True)` on it (correct for an ordinary text part), which
+silently returned nothing, so `Final-Recipient`/`Diagnostic-Code` were never actually extracted —
+caught immediately by a test asserting the real reason string, not a vague "is_bounce" check. Fixed
+by reading each sub-message's own headers via `.get()`, with a flat-text fallback for any provider
+that doesn't structure it this way. Re-ran the test suite after the fix and confirmed it now passes
+against a real, realistic Gmail-style bounce MIME message built for this test file.
+
+**Wiring into the send flow + contacts enforcement** (`main_window.py`): new
+`_check_campaign_for_bounces(campaign_id, silent, on_done)` — reads
+`db.get_sent_email_logs_for_bounce_check()` (real `status='sent' AND bounced=0` candidates for one
+campaign), derives the real IMAP target from the real stored SMTP settings, runs the real check in a
+background thread, and on a real confirmed bounce calls `db.mark_message_log_bounced()` +
+`db.set_contact_bounced_by_email()` — the same real reconciliation methods proven in the live test
+below. Two real triggers: automatic (`BOUNCE_AUTO_CHECK_DELAY_MS` = 3 minutes after a real send
+completes with at least one message sent — new `utils/constants.py` constant, not a guessed magic
+number scattered inline) and manual ("🔍 Check for Bounces" in the report dialog and per-row in
+History, for anything slower or a later re-check). **Enforcement**: every one of the 4 call sites
+in `main_window.py` that filter contacts eligible for email (`_start_email_from_compose`'s actual
+send-recipient list, the live rich-text preview, the visual-card-mode preview, and the "View
+recipient list →" dialog) now excludes `c.bounced` the same way they already excluded
+`c.opted_out`, so a confirmed-dead address can't be re-mailed by a future campaign and every preview
+honestly agrees with what will really send.
+
+**UI** — `send_dialogs.py`'s `SendReportDialog` gained a real three-state picture for email reports
+specifically (WhatsApp's call site is untouched — it already has its own real delivery-status
+tracking via `delivery_tracker.py`, a different, already-confirmed signal this dialog didn't need to
+touch): **Sent** (attempted — unchanged meaning), **Bounced** (confirmed via a real IMAP check,
+never guessed — shows the real reconciled count, refreshed live if a check completes while the
+dialog is still open), and **Delivered (assumed)** — sent minus confirmed bounces, with an explicit
+note that this is an assumption, not a fact, since email gives no positive delivery confirmation the
+way WhatsApp/SMS can. History rows show a real `🚫 N bounced` count (from a new subquery in
+`get_recent_campaigns_summary`) plus a per-row "🔍 Check Bounces" button. Contacts directory gained
+a "Bounced" badge (priority over Unsubscribed/Active — a confirmed delivery failure is a more
+specific, more actionable signal than a preference) plus a "Clear Bounced Flag" action for the
+false-positive/since-corrected-address case, mirroring the existing Unsubscribe/Resubscribe pattern.
+
+**Real, live end-to-end proof — exactly as the ask required, not simulated**: a script drove a real
+`MainWindow` (WhatsApp session-bootstrap + GitHub update-check mocked first, same established
+pattern as `tests/ui/conftest.py`) through the real `_send_email_campaign()` to two in-memory-only
+`Contact` objects (never written to the real `contacts` table) — `farazgoal@gmail.com` (real,
+deliverable) and `bogus-bounce-detect-test-9f8a7b3c@gmail.com` (deliberately invalid, at a real
+domain so Gmail's own bounce is fast and clean). Both were SMTP-accepted (`sent=2`). Polling the
+real inbox via the real, live `bounce_checker.check_for_bounces()` found Gmail's real bounce in 4
+seconds (`550 5.1.1 The email account that you tried to reach does not exist...`), correctly scoped
+to only the fake address — the real one was never reported as bounced. Reconciled via the real
+`db.mark_message_log_bounced`/`set_contact_bounced_by_email`: `get_campaign_bounce_stats` correctly
+showed `bounced_count=1`, and the two `message_logs` rows were confirmed correctly separated
+(`bogus-...@gmail.com`: `status=sent, bounced=True`; `farazgoal@gmail.com`: `status=sent,
+bounced=False`) — proving the "Sent (attempted) / Bounced (confirmed) / Delivered (assumed)" model
+end to end against real data, not a mock. Cleanup deleted only this test's own `campaigns`/
+`message_logs` rows by exact `campaign_id`; the real production database was confirmed back at its
+exact real baseline both before and after (**34 contacts, 3 campaigns** — noting this baseline has
+drifted from the "9 contacts, 0 campaigns" figure recorded earlier in this file, from real usage
+since then, not from anything this pass touched).
+
+**Verified with automated tests too, not just the one live run**: `tests/test_bounce_checker.py`
+(12 tests — the DSN-parsing bug above, a plain-text-bounce fallback, a normal message never
+misdetected as a bounce, IMAP host guessing, and `check_for_bounces`' own connect/login/search
+failure handling against a mocked IMAP server); `tests/test_bounce_detection_db.py` (9 tests — every
+new schema column and DB method, including the phone-nullable-migration column-preservation fix);
+`tests/ui/test_bounce_detection_ui.py` (9 tests, dedicated module-scoped fresh-DB `MainWindow`, same
+pattern as `test_contact_delete.py` — real reconciliation via a mocked `check_for_bounces` at the
+network boundary, History/Contacts rendering, the manual clear-flag action, and the actual
+email-recipient-filter enforcement). All 30 new tests pass.
+
+**Full regression check per this file's own standing discipline**: **253/253** functional UI tests
+(`-n 40 --dist loadfile`, worker count bumped 39→40 in `tests/ui/README.md` for the new file),
+**7/7** navigation-timing alone, **1/1** close-button alone, **2/2** nav-accent-timing alone,
+**143/143** plain `tests/` (was 122, +21 new) — **406/406**, no regressions.
+
+**Not done / explicit scope note**: only Gmail/Outlook/Yahoo (the same three providers Settings'
+own SMTP preset dropdown already supports) have a known-good IMAP mapping; a genuinely unrecognized
+custom SMTP host falls back to a `smtp.→imap.` guess and, if that's wrong, bounce checking simply
+reports "can't auto-detect IMAP settings" rather than guessing further — no UI was added to let a
+user manually override the IMAP host/port for a custom provider, flagged here as a real, deliberate
+scope limit rather than silently unsupported. Soft/spam bounces and out-of-office-style auto-replies
+are not specifically distinguished from hard bounces — `parse_bounce_message` treats anything that
+looks like a real NDR (sender/subject/DSN-part) as a bounce; a provider that mislabels a soft bounce
+the same way a hard one is labeled would be treated identically, consistent with the honest
+"assumed" framing already built into the Delivered stat.
+
+**Git state**: all of the above is committed on `feature/bounce-detection`, branched from `main` at
+tag `pre-bounce-detection-backup` (the rollback point, per the ask's own safety process) — not
+merged into `main` and not pushed, pending the user's own review/merge decision.

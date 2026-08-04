@@ -16,6 +16,13 @@ MAX_MESSAGES_PER_SESSION = 50
 MAX_RETRY_ATTEMPTS = 1
 RETRY_DELAY = 60  # seconds
 
+# Real bounce/NDR reconciliation: how long after a campaign completes to
+# automatically run one real IMAP bounce check, in milliseconds. Real hard
+# bounces from major providers (Gmail, Outlook) typically arrive within
+# seconds to a couple of minutes; a manual "Check for Bounces" action is
+# always available too, for slower providers or a later re-check.
+BOUNCE_AUTO_CHECK_DELAY_MS = 180_000  # 3 minutes
+
 # UI Configuration
 WINDOW_WIDTH = 1100
 WINDOW_HEIGHT = 750
