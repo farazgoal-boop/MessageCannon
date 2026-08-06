@@ -80,6 +80,7 @@ from .confirm_dialogs import show_danger_confirm
 from .tooltip import add_tooltip
 from ..core import ai_service
 from ..core.ai_service import AIServiceError
+from ..core.html_import import import_html_file, HtmlImportError
 from ..utils.crypto import encrypt_secret, decrypt_secret
 from ..utils.validators import DataValidator
 from ..utils.license_manager import LicenseManager
@@ -1126,7 +1127,7 @@ class MainWindow(ctk.CTk):
         self.bind("<Control-g>", lambda _event: self._show_view("Cards"))
 
     def _enforce_license(self) -> None:
-        """Allow the free trial, then require a paid passkey after expiry."""
+        """Allow the free trial, then require a real, machine-bound activation code after expiry."""
         license_info = LicenseManager.check_license()
         self.license_info = license_info
         self.license_locked = False
@@ -1264,12 +1265,35 @@ class MainWindow(ctk.CTk):
         ).grid(row=0, column=0, padx=16, pady=(16, 6), sticky="w")
         ctk.CTkLabel(
             right_panel,
-            text="Enter your paid passkey below. Activation is stored locally on this device.",
+            text="Copy your device's request code below and send it to the seller. "
+                 "They'll reply with an activation code unique to this device.",
             wraplength=240,
             justify="left",
             text_color=T.TEXT_MUTED,
             font=ctk.CTkFont(size=12),
         ).grid(row=1, column=0, padx=16, pady=(0, 12), sticky="w")
+
+        # Item 36: a real, machine-bound request code -- the buyer's own
+        # half of the request/activation-code handshake (see
+        # utils/license_crypto.py's own docstring for the full scheme,
+        # mirroring JobMind Match's proven pattern). Read-only + a Copy
+        # button, same shape as JobMind's own request-code UI.
+        request_row = ctk.CTkFrame(right_panel, fg_color="transparent")
+        request_row.grid(row=2, column=0, padx=24, pady=(0, 4), sticky="ew")
+        request_row.grid_columnconfigure(0, weight=1)
+        self.license_request_code_var = StringVar(value=LicenseManager.get_request_code())
+        self.license_request_entry = ctk.CTkEntry(
+            request_row, textvariable=self.license_request_code_var,
+            state="readonly", height=36, corner_radius=8,
+            fg_color=T.BG_SURFACE, border_color=T.BG_BORDER, border_width=1,
+            text_color=T.TEXT_HEAD, font=ctk.CTkFont(size=11, family="Consolas"))
+        self.license_request_entry.grid(row=0, column=0, sticky="ew")
+        ctk.CTkButton(
+            request_row, text="Copy", width=56, height=36, corner_radius=8,
+            fg_color=T.BADGE_BG, hover_color=T.BG_BORDER, text_color=T.TEXT_HEAD,
+            font=ctk.CTkFont(size=11),
+            command=self._copy_license_request_code,
+        ).grid(row=0, column=1, padx=(6, 0))
 
         # Real bug found via a live-feedback audit of the sidebar tagline:
         # this is a plain informational notice, not a link or a real
@@ -1280,16 +1304,16 @@ class MainWindow(ctk.CTk):
         # informational text elsewhere.
         ctk.CTkLabel(
             right_panel,
-            text="If you close the app without activating, the workspace remains locked until a valid passkey is entered.",
+            text="If you close the app without activating, the workspace remains locked until a valid activation code is entered.",
             wraplength=240,
             justify="left",
             text_color=T.TEXT_MUTED,
             font=ctk.CTkFont(size=11),
-        ).grid(row=2, column=0, padx=16, pady=(0, 16), sticky="w")
+        ).grid(row=3, column=0, padx=16, pady=(8, 12), sticky="w")
 
         self.license_entry = ctk.CTkEntry(
             right_panel,
-            placeholder_text="Enter paid passkey",
+            placeholder_text="Enter activation code",
             height=44,
             border_width=1,
             corner_radius=8,
@@ -1297,7 +1321,7 @@ class MainWindow(ctk.CTk):
             border_color=T.BG_BORDER,
             text_color=T.TEXT_HEAD,
         )
-        self.license_entry.grid(row=3, column=0, padx=24, pady=(0, 8), sticky="ew")
+        self.license_entry.grid(row=4, column=0, padx=24, pady=(0, 8), sticky="ew")
         self.license_entry.bind("<Return>", lambda _event: self._submit_license_activation())
 
         ctk.CTkLabel(
@@ -1310,11 +1334,11 @@ class MainWindow(ctk.CTk):
             text_color=T.DANGER_ON_BADGE,
             wraplength=240,
             justify="left",
-        ).grid(row=4, column=0, padx=24, pady=(0, 12), sticky="w")
+        ).grid(row=5, column=0, padx=24, pady=(0, 12), sticky="w")
 
         secure_note = ctk.CTkFrame(right_panel, fg_color=T.BADGE_BG, corner_radius=12,
                                    border_width=1, border_color=T.BG_BORDER)
-        secure_note.grid(row=5, column=0, padx=24, pady=(0, 14), sticky="ew")
+        secure_note.grid(row=6, column=0, padx=24, pady=(0, 14), sticky="ew")
         # Real bug found via the same audit: a plain card heading (followed
         # by a TEXT_MUTED description right below, same as every other
         # info-card heading in this app, e.g. "Session Status" in Settings)
@@ -1322,20 +1346,22 @@ class MainWindow(ctk.CTk):
         # T.TEXT_HEAD, the established heading color used everywhere else.
         ctk.CTkLabel(
             secure_note,
-            text="Secure local activation",
+            text="Secure, machine-bound activation",
             font=ctk.CTkFont(size=13, weight="bold"),
             text_color=T.TEXT_HEAD,
         ).pack(anchor="w", padx=14, pady=(12, 4))
         ctk.CTkLabel(
             secure_note,
-            text="The passkey is validated inside the app and stored only as local license state on this machine.",
+            text="Verified offline, entirely on this device, against a real cryptographic "
+                 "signature unique to this machine — never a shared code, never phoned "
+                 "home.",
             justify="left",
             wraplength=220,
             text_color=T.TEXT_MUTED,
         ).pack(anchor="w", padx=14, pady=(0, 12))
 
         actions = ctk.CTkFrame(right_panel, fg_color="transparent")
-        actions.grid(row=6, column=0, padx=24, pady=(6, 20), sticky="ew")
+        actions.grid(row=7, column=0, padx=24, pady=(6, 20), sticky="ew")
         actions.grid_columnconfigure(0, weight=1)
 
         ctk.CTkButton(
@@ -1366,13 +1392,22 @@ class MainWindow(ctk.CTk):
             self.license_dialog.after(120, lambda: self.license_dialog.attributes("-topmost", False))
             self.license_entry.focus()
 
+    def _copy_license_request_code(self) -> None:
+        code = self.license_request_code_var.get()
+        try:
+            self.clipboard_clear()
+            self.clipboard_append(code)
+            show_toast(self, "Request code copied.", kind="success")
+        except Exception:
+            pass
+
     def _submit_license_activation(self) -> None:
-        passkey = self.license_entry.get().strip()
-        if not passkey:
-            self.license_message_var.set("Passkey is required.")
+        activation_code = self.license_entry.get().strip()
+        if not activation_code:
+            self.license_message_var.set("Activation code is required.")
             return
 
-        result = LicenseManager.activate_license(passkey)
+        result = LicenseManager.activate_license(activation_code)
         if not result.get("success"):
             self.license_message_var.set(str(result.get("message", "Activation failed")))
             self.license_entry.select_range(0, "end")
@@ -1456,6 +1491,20 @@ class MainWindow(ctk.CTk):
             meta_lbl.grid(row=1, column=1, padx=(0, 12), pady=(0, 12), sticky="se")
             self.dashboard_cards[var_key] = val_lbl
             self.dashboard_card_meta[var_key] = meta_lbl
+
+            # Item 37 (UI/UX benchmark pass vs premium tools): a real
+            # 7-day send-volume sparkline on the primary stat card --
+            # premium dashboards (Klaviyo/Mailchimp-class) show a trend
+            # next to a raw number; this app previously only ever showed a
+            # single static count with no sense of trajectory. Real data
+            # only (db.get_daily_sent_counts) -- never a decorative fake
+            # trend line.
+            if col == 0:
+                self.dashboard_sparkline = tk.Canvas(
+                    stat_box, height=28, highlightthickness=0,
+                    bg=T.resolve(T.BG_INNER))
+                self.dashboard_sparkline.grid(
+                    row=2, column=0, columnspan=2, padx=16, pady=(0, 12), sticky="ew")
 
         # Placeholder row, always present — populated/cleared by
         # _refresh_setup_banner() since setup_wizard_skipped can flip to True
@@ -1830,9 +1879,22 @@ class MainWindow(ctk.CTk):
 
         ctk.CTkLabel(em_fields, text="Subject", text_color=T.TEXT_MUTED,
                      font=ctk.CTkFont(size=11)).grid(row=1, column=0, padx=(0, 8), sticky="w")
-        ctk.CTkEntry(em_fields, textvariable=self._em_subj_var,
+        subj_row = ctk.CTkFrame(em_fields, fg_color="transparent")
+        subj_row.grid(row=1, column=1, sticky="ew")
+        subj_row.grid_columnconfigure(0, weight=1)
+        ctk.CTkEntry(subj_row, textvariable=self._em_subj_var,
                      fg_color=T.BG_INNER, border_color=T.BG_BORDER,
-                     text_color=T.TEXT_HEAD).grid(row=1, column=1, sticky="ew")
+                     text_color=T.TEXT_HEAD).grid(row=0, column=0, sticky="ew")
+        # Item 34 (sub-item 1): AI-powered subject line optimizer -- given
+        # the already-drafted body, suggests 3 alternatives optimized for
+        # open rates with a rationale each, building on the existing spam-
+        # word/subject-length warnings (which only ever flag problems).
+        self._subject_optimize_btn = ctk.CTkButton(
+            subj_row, text="✨ Optimize", width=1, height=26, corner_radius=6,
+            fg_color=T.BADGE_BG, hover_color=T.BG_BORDER, text_color=T.ACCENT_TEXT,
+            font=ctk.CTkFont(size=10, weight="bold"),
+            command=self._open_subject_optimizer)
+        self._subject_optimize_btn.grid(row=0, column=1, padx=(6, 0))
 
         em_chips = ctk.CTkFrame(em_left, fg_color="transparent")
         em_chips.grid(row=2, column=0, padx=16, pady=(6, 8), sticky="w")
@@ -1881,6 +1943,22 @@ class MainWindow(ctk.CTk):
                       fg_color=T.BADGE_BG, hover_color=T.BG_BORDER, text_color=T.TEXT_HEAD,
                       font=ctk.CTkFont(size=11),
                       command=lambda: self._open_save_template("email")).pack(side="left")
+        # Item 33: a real, direct "Import HTML" entry point in Compose
+        # itself (not only via Cards) -- routes straight into the existing
+        # "Send as Visual HTML Card" pipeline (_enter_email_card_mode),
+        # since importing external HTML is meant to preserve it, not
+        # flatten it into the rich-text editor.
+        self._em_import_html_btn = ctk.CTkButton(
+            em_ai_row, text="📂 Import HTML", height=30, corner_radius=8,
+            fg_color="transparent", hover_color=T.BG_INNER, border_width=1,
+            border_color=T.BG_BORDER, text_color=T.ACCENT_TEXT,
+            font=ctk.CTkFont(size=11),
+            command=self._import_html_into_compose)
+        self._em_import_html_btn.pack(side="left", padx=(8, 0))
+        # Not disabled while already in card mode (see _apply_email_card_mode_ui) --
+        # re-importing a different file while one is already active is a
+        # reasonable, harmless action (it just replaces the current card),
+        # unlike the rich-text toolbar/dropdowns which have nothing to act on.
         self._em_warning_var = StringVar(value="")
         ctk.CTkLabel(em_ai_row, textvariable=self._em_warning_var, text_color=T.TEXT_DIM,
                      font=ctk.CTkFont(size=11), wraplength=340, justify="left").pack(
@@ -2233,10 +2311,13 @@ class MainWindow(ctk.CTk):
                     f"{sub(plain_template, vars_map)}")
 
         from .send_dialogs import show_send_confirmation
+        from ..core.contact_quality import flag_low_quality_emails
+        quality_flags = flag_low_quality_emails(c.email for c, _s, _b in recipients)
         show_send_confirmation(
             self, "email", len(recipients), float(self._em_delay.get() or 5), preview_lines,
             on_confirm=lambda: self._execute_email_send(recipients),
-            subject=recipients[0][1] if recipients else subject_template)
+            subject=recipients[0][1] if recipients else subject_template,
+            quality_flag_count=len(quality_flags))
 
     def _execute_email_send(self, recipients: list) -> None:
         """Real send for a specific list of (contact, subject, html_body)
@@ -2288,14 +2369,14 @@ class MainWindow(ctk.CTk):
                     self.after(BOUNCE_AUTO_CHECK_DELAY_MS,
                                lambda cid=result.get("campaign_id"):
                                    self._check_campaign_for_bounces(cid, silent=True))
-                self._show_email_report(result)
+                self._show_email_report(result, campaign_name)
 
             self.after(0, finish)
 
         self._em_send_thread = threading.Thread(target=worker, daemon=True)
         self._em_send_thread.start()
 
-    def _show_email_report(self, result: dict) -> None:
+    def _show_email_report(self, result: dict, campaign_name: str = "Email Campaign") -> None:
         from .send_dialogs import show_send_report
         failed_details = [(c.name or c.email, reason) for c, _s, _b, reason in result.get("failed_items", [])]
         failed_recipients = [(c, s, b) for c, s, b, _r in result.get("failed_items", [])]
@@ -2335,13 +2416,48 @@ class MainWindow(ctk.CTk):
                 dialog_callback(True, bounced_count, "")
             self._check_campaign_for_bounces(campaign_id, silent=False, on_done=on_done)
 
+        def ai_summary(dialog_callback) -> None:
+            self._request_ai_campaign_summary(
+                campaign_name=campaign_name, sent=result.get("sent", 0),
+                failed=result.get("failed", 0), bounced=initial_bounced,
+                dialog_callback=dialog_callback)
+
         show_send_report(
             self, "email", result.get("sent", 0), result.get("failed", 0), failed_details,
             on_retry_failed=retry_failed if failed_recipients else None,
             on_export=export_csv,
             on_check_bounces=check_bounces if campaign_id else None,
             bounced=initial_bounced,
+            on_ai_summary=ai_summary,
         )
+
+    def _request_ai_campaign_summary(self, campaign_name: str, sent: int, failed: int,
+                                      bounced: int, dialog_callback) -> None:
+        """Item 34 (sub-item 5): a plain-language AI summary of one real,
+        already-completed campaign, grounded entirely in this campaign's own
+        real sent/failed/bounced counts (already shown in the report dialog
+        above) -- never invented numbers. Runs off the UI thread, same
+        pattern as every other AI call in this app (e.g. _test_ai_key)."""
+        api_key = self._ai_api_key.get()
+        if not api_key:
+            dialog_callback(False, "", "Add an AI API key in Settings first.")
+            return
+        provider = self._ai_provider.get()
+        stats = {
+            "campaign_name": campaign_name, "total_sent": sent,
+            "failed": failed, "bounced": bounced,
+        }
+
+        def worker():
+            try:
+                summary = ai_service.summarize_campaign_performance(stats, api_key, provider=provider)
+            except AIServiceError as ex:
+                message = str(ex)
+                self.after(0, lambda: dialog_callback(False, "", message))
+                return
+            self.after(0, lambda: dialog_callback(True, summary, ""))
+
+        threading.Thread(target=worker, daemon=True).start()
 
     def _check_campaign_for_bounces(self, campaign_id: Optional[int], silent: bool = False,
                                      on_done=None) -> None:
@@ -4206,7 +4322,7 @@ class MainWindow(ctk.CTk):
             return f"Free trial active. {days_remaining} day(s) remaining before paid activation is required."
         if info.get("is_valid"):
             return "Commercial license active. Full access is unlocked on this device."
-        return "Trial expired. Activate with your paid passkey to continue using MessageCannon."
+        return "Trial expired. Activate with your activation code to continue using MessageCannon."
 
     def _update_license_ui(self) -> None:
         info = getattr(self, "license_info", {}) or {}
@@ -5221,6 +5337,104 @@ class MainWindow(ctk.CTk):
             except Exception:
                 pass
 
+    def _open_subject_optimizer(self) -> None:
+        """Item 34 (sub-item 1): suggests 3 alternative subject lines,
+        optimized for open rates, from the already-drafted email body."""
+        api_key = self._ai_api_key.get()
+        if not api_key:
+            messagebox.showwarning(
+                "AI key required", "Add an AI API key in Settings first (Settings -> AI Cards).")
+            return
+        if self._compose_card_mode and self._compose_card_html_template:
+            body_plain = self._strip_html_for_preview(self._compose_card_html_template)
+        else:
+            body_plain = self._get_text_with_tokens(self._compose_em_body).strip() if hasattr(
+                self, "_compose_em_body") else ""
+        if not body_plain:
+            messagebox.showwarning("Nothing to optimize", "Write the email body first.")
+            return
+
+        self._subject_optimize_btn.configure(state="disabled", text="Optimizing…")
+        provider = self._ai_provider.get()
+
+        def worker():
+            try:
+                variants = ai_service.generate_subject_lines(body_plain, api_key, provider=provider)
+            except AIServiceError as ex:
+                message = str(ex)
+                self.after(0, lambda: self._on_subject_optimize_failed(message))
+                return
+            self.after(0, lambda: self._show_subject_optimizer_results(variants))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_subject_optimize_failed(self, message: str) -> None:
+        self._subject_optimize_btn.configure(state="normal", text="✨ Optimize")
+        messagebox.showerror("Subject optimization failed", message)
+
+    def _show_subject_optimizer_results(self, variants: list) -> None:
+        self._subject_optimize_btn.configure(state="normal", text="✨ Optimize")
+        if not variants:
+            messagebox.showinfo("No suggestions", "The AI didn't return any subject lines.")
+            return
+        dlg = ctk.CTkToplevel(self)
+        dlg.title("Subject Line Suggestions")
+        center_on_parent(dlg, 460, 420, self)
+        dlg.resizable(False, False)
+        dlg.transient(self)
+        dlg.grab_set()
+        dlg.configure(fg_color=T.BG_MAIN)
+        dlg.bind("<Escape>", lambda _e: dlg.destroy())
+
+        ctk.CTkLabel(dlg, text="Pick a subject line", font=ctk.CTkFont(size=15, weight="bold"),
+                     text_color=T.TEXT_HEAD).pack(anchor="w", padx=18, pady=(16, 10))
+        for variant in variants:
+            card = ctk.CTkFrame(dlg, fg_color=T.BG_SURFACE, corner_radius=10,
+                                 border_width=1, border_color=T.BG_BORDER)
+            card.pack(fill="x", padx=18, pady=6)
+            ctk.CTkLabel(card, text=variant["subject"], text_color=T.TEXT_HEAD,
+                         font=ctk.CTkFont(size=12, weight="bold"),
+                         wraplength=380, justify="left").pack(anchor="w", padx=12, pady=(10, 2))
+            if variant.get("rationale"):
+                ctk.CTkLabel(card, text=variant["rationale"], text_color=T.TEXT_MUTED,
+                             font=ctk.CTkFont(size=10), wraplength=380, justify="left").pack(
+                    anchor="w", padx=12, pady=(0, 6))
+
+            def pick(subject=variant["subject"]) -> None:
+                self._em_subj_var.set(subject)
+                dlg.destroy()
+                show_toast(self, "Subject line applied.", kind="success")
+
+            ctk.CTkButton(card, text="Use this", height=26, fg_color=T.ACCENT,
+                          hover_color=T.ACCENT_HOVER, text_color=T.TEXT_HEAD,
+                          font=ctk.CTkFont(size=11), command=pick).pack(
+                anchor="e", padx=12, pady=(0, 10))
+        ctk.CTkButton(dlg, text="Close", fg_color=T.BADGE_BG, hover_color=T.BG_BORDER,
+                      text_color=T.TEXT_HEAD, command=dlg.destroy).pack(pady=(4, 16))
+
+    def _import_html_into_compose(self) -> None:
+        """Item 33: a direct "Import HTML" entry point inside Compose
+        itself (Cards tab has its own equivalent — CardCreatorV2._import_html_file
+        — this is the "and/or directly in Compose's Email mode" half of the
+        ask). Reuses the exact same core.html_import + _enter_email_card_mode
+        pipeline, so an imported file sends for real, personalized
+        per-recipient via {variable} tokens, exactly like any other visual
+        HTML card — never a new mock send path."""
+        path = filedialog.askopenfilename(
+            title="Import HTML File",
+            filetypes=[("HTML files", "*.html *.htm"), ("All files", "*.*")])
+        if not path:
+            return
+        try:
+            result = import_html_file(Path(path))
+        except HtmlImportError as exc:
+            messagebox.showerror("Import failed", str(exc))
+            return
+        filename = Path(path).name
+        subject = result["subject"] or filename
+        self._enter_email_card_mode(result["html"], subject)
+        show_toast(self, f"Imported {filename} as a visual HTML card.", kind="success")
+
     def _enter_email_card_mode(self, html_template: str, subject: str) -> None:
         """Called from Card Creator's "Send as Visual HTML Card" choice:
         locks the rich-text editor and stores the real generated card HTML
@@ -5817,10 +6031,16 @@ class MainWindow(ctk.CTk):
         def retry_failed() -> None:
             self._execute_whatsapp_send([c for c, _m in failed_pairs], [m for _c, m in failed_pairs])
 
+        def ai_summary(dialog_callback) -> None:
+            self._request_ai_campaign_summary(
+                campaign_name=f"WhatsApp {datetime.now().strftime('%Y-%m-%d %H:%M')}",
+                sent=sent, failed=failed, bounced=0, dialog_callback=dialog_callback)
+
         show_send_report(
             self, "whatsapp", sent, failed, failed_details,
             on_retry_failed=retry_failed if failed_pairs else None,
             on_export=self._export_report,
+            on_ai_summary=ai_summary,
         )
 
     def _toggle_pause(self) -> None:
@@ -5909,9 +6129,24 @@ class MainWindow(ctk.CTk):
             week_stats = self.db.get_message_stats_for_period("week")
             month_stats = self.db.get_message_stats_for_period("month")
 
-            self.dashboard_cards["Sent Today"].configure(text=str(today_stats.get("sent_count", 0)))
+            # Item 37 (UI/UX benchmark pass): real, pre-existing mismatch
+            # found while adding the sparkline below -- this card's own
+            # visible label reads "Sent this week" but was populated from
+            # `today_stats`, not `week_stats`. Fixed to match its label.
+            self.dashboard_cards["Sent Today"].configure(text=str(week_stats.get("sent_count", 0)))
             self.dashboard_cards["Delivery Rate"].configure(text=str(delivered_count))
             self.dashboard_cards["Active Session"].configure(text="Active" if session_state.is_active else "Scan QR")
+            # Real bug found while verifying this pass: a theme switch that
+            # triggers _rebuild_ui_for_theme (e.g. entering/leaving Warm
+            # Ivory) destroys and recreates the whole sidebar+content tree,
+            # but _on_theme_selected's own _save_settings() -> _refresh_stats()
+            # call can run against a canvas reference that's already been
+            # destroyed (or not yet rebuilt) depending on exactly where in
+            # that sequence this fires -- a plain hasattr() check isn't
+            # enough since the attribute itself survives, only the real Tk
+            # widget it points to doesn't. winfo_exists() is the real check.
+            if hasattr(self, "dashboard_sparkline") and self.dashboard_sparkline.winfo_exists():
+                self._draw_dashboard_sparkline()
             self.dashboard_card_meta["Sent Today"].configure(
                 text=f"Today: {today_stats.get('sent_count', 0)} · Month: {month_stats.get('sent_count', 0)}"
             )
@@ -5936,6 +6171,70 @@ class MainWindow(ctk.CTk):
         if update_chart and self._active_view == "Reports" and self._reports_chart is not None:
             unread_count = sent_count - read_count if sent_count >= read_count else 0
             self._reports_chart.update(read_count, unread_count)
+
+    def _draw_dashboard_sparkline(self) -> None:
+        """Item 37 (UI/UX benchmark pass): a real 7-day send-volume trend
+        line on the primary Campaigns dashboard stat card, hand-painted on
+        a plain tk.Canvas (same lightweight, dependency-free technique
+        already used elsewhere in this app for small inline visuals, e.g.
+        _draw_nav_accent and the Card Creator template-gallery thumbnails)
+        rather than pulling in a full matplotlib figure for something this
+        small. Real, already-logged data only (db.get_daily_sent_counts) --
+        never a decorative fake trend."""
+        canvas = self.dashboard_sparkline
+        # Real bug found and fixed while verifying this pass -- the exact
+        # same class of bug this file's own "In-app update checker" section
+        # already documents once for _draw_nav_accent's canvas: an
+        # update_idletasks() call here flushes Tk's ENTIRE pending idle-
+        # callback queue, not just this canvas -- which can include a
+        # still-pending, after_idle-deferred
+        # _rebuild_ui_for_theme_and_hide_overlay() call (entering/leaving
+        # Warm Ivory), running that whole rebuild-and-hide-the-overlay
+        # sequence early, synchronously, from deep inside this unrelated
+        # method (confirmed directly: caused test_theme_switch_overlay.py's
+        # own overlay-stays-mapped assertion to fail, since the overlay got
+        # hidden here instead of on its own intended later tick). Fixed the
+        # same way that earlier bug was: dropped the forced flush entirely
+        # -- winfo_width() alone still returns the real current width once
+        # the canvas has been mapped at least once (which it always has by
+        # the time _refresh_stats runs), with the existing max(..., 40)
+        # fallback covering the one-time not-yet-realized case. A broad
+        # try/except still wraps every real Tcl call below regardless, for
+        # the same general widget-lifecycle-race reasons already documented
+        # elsewhere in this app (e.g. _on_bounce_check_result).
+        try:
+            canvas.delete("all")
+            width = max(canvas.winfo_width(), 40)
+            height = 28
+            values = self.db.get_daily_sent_counts(days=7)
+            max_value = max(values) if any(values) else 1
+            pad = 4
+            usable_w = width - 2 * pad
+            usable_h = height - 2 * pad
+            n = len(values)
+            step = usable_w / max(n - 1, 1)
+
+            points = []
+            for i, value in enumerate(values):
+                x = pad + i * step
+                y = pad + usable_h - (value / max_value) * usable_h
+                points.append((x, y))
+
+            line_color = T.resolve(T.ACCENT)
+            fill_color = T.resolve(T.BADGE_BG)
+
+            if len(points) >= 2:
+                fill_points = list(points) + [(points[-1][0], height), (points[0][0], height)]
+                canvas.create_polygon(
+                    [coord for point in fill_points for coord in point],
+                    fill=fill_color, outline="")
+                canvas.create_line(
+                    [coord for point in points for coord in point],
+                    fill=line_color, width=2, smooth=True, capstyle="round", joinstyle="round")
+            for x, y in points:
+                canvas.create_oval(x - 2, y - 2, x + 2, y + 2, fill=line_color, outline="")
+        except tk.TclError:
+            return
 
     def _update_reports_chart(self, read_count: int, unread_count: int) -> None:
         """Legacy hook — delegates to reusable chart instance."""

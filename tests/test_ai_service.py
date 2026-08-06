@@ -178,3 +178,105 @@ def test_default_provider_is_anthropic_for_backward_compatibility(monkeypatch):
     monkeypatch.setattr(ai_service, "_call_ai", fake_call_ai)
     ai_service.validate_api_key("key")  # no provider arg
     assert captured["provider"] == "anthropic"
+
+
+# ── Item 34: subject-line optimizer, A/B variant generation, campaign
+# performance summary ──────────────────────────────────────────────────────
+
+def test_generate_subject_lines_requires_a_body():
+    with pytest.raises(AIServiceError, match="Write the email body"):
+        ai_service.generate_subject_lines("   ", "key")
+
+
+def test_generate_subject_lines_returns_subject_and_rationale(monkeypatch):
+    def fake_call_ai(provider, api_key, system, user, max_tokens=1024):
+        return (
+            '[{"subject": "Last chance: 50% off ends tonight", "rationale": "urgency"}, '
+            '{"subject": "{name}, this one is for you", "rationale": "personalization"}, '
+            '{"subject": "Curious what everyone is talking about?", "rationale": "curiosity"}]'
+        )
+
+    monkeypatch.setattr(ai_service, "_call_ai", fake_call_ai)
+    result = ai_service.generate_subject_lines("Body about a sale.", "key", count=3)
+    assert len(result) == 3
+    assert result[0]["subject"] == "Last chance: 50% off ends tonight"
+    assert result[0]["rationale"] == "urgency"
+    assert "{name}" in result[1]["subject"]
+
+
+def test_generate_subject_lines_rejects_a_non_array_response(monkeypatch):
+    monkeypatch.setattr(ai_service, "_call_ai", lambda *a, **k: '{"subject": "not an array"}')
+    with pytest.raises(AIServiceError, match="JSON array"):
+        ai_service.generate_subject_lines("Body.", "key")
+
+
+def test_generate_ab_variants_requires_a_brief():
+    with pytest.raises(AIServiceError, match="Describe what you want to say"):
+        ai_service.generate_ab_variants("", "email", "key")
+
+
+def test_generate_ab_variants_returns_two_distinct_angles(monkeypatch):
+    def fake_call_ai(provider, api_key, system, user, max_tokens=1024):
+        assert "benefit-focused" in system
+        assert "urgency-focused" in system
+        return (
+            '[{"angle": "benefit-focused", "text": "You get X, Y, Z with {name}.", '
+            '"subject": "Here is what you get"}, '
+            '{"angle": "urgency-focused", "text": "Only 3 spots left, {name}!", '
+            '"subject": "Almost gone"}]'
+        )
+
+    monkeypatch.setattr(ai_service, "_call_ai", fake_call_ai)
+    result = ai_service.generate_ab_variants("A product brief.", "email", "key")
+    assert len(result) == 2
+    assert result[0]["angle"] == "benefit-focused"
+    assert result[1]["angle"] == "urgency-focused"
+    assert result[0]["text"] != result[1]["text"]
+
+
+def test_generate_ab_variants_accepts_custom_angles(monkeypatch):
+    captured = {}
+
+    def fake_call_ai(provider, api_key, system, user, max_tokens=1024):
+        captured["system"] = system
+        return '[{"angle": "social proof", "text": "a"}, {"angle": "scarcity", "text": "b"}]'
+
+    monkeypatch.setattr(ai_service, "_call_ai", fake_call_ai)
+    ai_service.generate_ab_variants(
+        "brief", "whatsapp", "key", angle_a="social proof", angle_b="scarcity")
+    assert "social proof" in captured["system"]
+    assert "scarcity" in captured["system"]
+
+
+def test_generate_ab_variants_rejects_empty_array(monkeypatch):
+    monkeypatch.setattr(ai_service, "_call_ai", lambda *a, **k: "[]")
+    with pytest.raises(AIServiceError, match="JSON array"):
+        ai_service.generate_ab_variants("brief", "email", "key")
+
+
+def test_summarize_campaign_performance_requires_real_stats():
+    with pytest.raises(AIServiceError, match="Missing real campaign stats"):
+        ai_service.summarize_campaign_performance({"campaign_name": "X"}, "key")
+
+
+def test_summarize_campaign_performance_grounds_in_real_numbers(monkeypatch):
+    captured = {}
+
+    def fake_call_ai(provider, api_key, system, user, max_tokens=1024):
+        captured["user"] = user
+        captured["system"] = system
+        return "Your campaign reached 100 people with a 2% bounce rate — solid delivery."
+
+    monkeypatch.setattr(ai_service, "_call_ai", fake_call_ai)
+    stats = {"campaign_name": "Summer Sale", "total_sent": 100, "failed": 0, "bounced": 2}
+    summary = ai_service.summarize_campaign_performance(stats, "key")
+    assert "100 people" in summary
+    assert "do not invent" in captured["system"].lower() or "not invent" in captured["system"].lower()
+    assert '"total_sent": 100' in captured["user"]
+
+
+def test_summarize_campaign_performance_rejects_empty_response(monkeypatch):
+    monkeypatch.setattr(ai_service, "_call_ai", lambda *a, **k: "   ")
+    stats = {"campaign_name": "X", "total_sent": 1, "failed": 0, "bounced": 0}
+    with pytest.raises(AIServiceError, match="empty summary"):
+        ai_service.summarize_campaign_performance(stats, "key")

@@ -369,3 +369,122 @@ def generate_message_variations(
         }
         for i, item in enumerate(data) if item.get("text")
     ]
+
+
+# ── Item 34 of the multi-product generalization pass: push the AI features
+# further -- subject-line optimizer, A/B variant generation, and a real,
+# data-grounded campaign performance summary. (Item 34's other two asks --
+# send-time recommendation and contact-list quality checks -- are pure
+# heuristics with no AI call involved; see core/send_time_advisor.py and
+# core/contact_quality.py respectively.) ──────────────────────────────────
+
+def generate_subject_lines(
+    email_body: str, api_key: str, count: int = 3, provider: str = "anthropic",
+) -> List[Dict[str, str]]:
+    """Given an already-drafted email body, suggest `count` alternative
+    subject lines optimized for open rates, each with a short rationale
+    (e.g. urgency, curiosity, personalization) -- building on the existing
+    spam-word/subject-length warnings, which only ever flag problems, never
+    suggest a better line. Returns [{"subject": str, "rationale": str}, ...].
+    """
+    if not email_body.strip():
+        raise AIServiceError("Write the email body before optimizing the subject line.")
+
+    system = (
+        f"You are an email marketing copywriter. Given an email body, suggest exactly "
+        f"{count} alternative SUBJECT LINES optimized for open rates -- each using a "
+        "genuinely different psychological angle (e.g. urgency, curiosity, "
+        "personalization, benefit-led, social proof) -- not minor rewordings of the "
+        "same angle. Keep each subject line under 60 characters. If the body contains "
+        "{variable} tokens (e.g. {name}), you may reuse them in a subject line exactly "
+        "as written. Respond with ONLY a JSON array, no markdown fences, shaped exactly "
+        'like: [{"subject": "<subject line>", "rationale": "<one short sentence on why '
+        'this angle might perform well>"}, ...]'
+    )
+    raw = _call_ai(provider, api_key, system=system, user=email_body.strip(), max_tokens=500)
+    data = _parse_json_response(raw)
+    if not isinstance(data, list) or not data:
+        raise AIServiceError("AI response wasn't a JSON array of subject lines.")
+    return [
+        {"subject": str(item.get("subject", "")), "rationale": str(item.get("rationale", ""))}
+        for item in data if item.get("subject")
+    ]
+
+
+def generate_ab_variants(
+    brief: str, channel: str, api_key: str,
+    angle_a: str = "benefit-focused", angle_b: str = "urgency-focused",
+    sample_variables: Optional[List[str]] = None, provider: str = "anthropic",
+) -> List[Dict[str, str]]:
+    """Generates exactly 2 messages from the SAME brief, deliberately
+    written from 2 different, explicitly-named persuasion angles -- for a
+    genuine A/B test of messaging strategy, not just a cosmetic reword of
+    one idea (which is what generate_message_variations' generic "3
+    different variations" can end up producing if left unconstrained).
+    Returns [{"angle": angle_a, "text": ..., "subject": ...},
+             {"angle": angle_b, "text": ..., "subject": ...}].
+    """
+    if not brief.strip():
+        raise AIServiceError("Describe what you want to say before generating.")
+
+    available_vars = ", ".join(f"{{{v}}}" for v in (sample_variables or ["name"]))
+    channel_guidance = (
+        "WhatsApp message: short (under ~300 characters), casual, plain text, no markdown."
+        if channel == "whatsapp" else
+        "Email: a short subject line plus a 2-4 paragraph plain-text body, no markdown, no HTML."
+    )
+    system = (
+        "You write outgoing marketing/notification messages for a small business "
+        "messaging app, for a real A/B test of MESSAGING STRATEGY (not tone or wording). "
+        f"Write exactly 2 messages for the SAME brief: one written from a "
+        f"\"{angle_a}\" angle, and one written from a \"{angle_b}\" angle -- the two must "
+        "differ in actual persuasion strategy (what's emphasized, what's led with), not "
+        f"just phrasing. {channel_guidance} Personalize using ONLY these variables, "
+        f"exactly as written (do not invent others): {available_vars}. "
+        "Respond with ONLY a JSON array of exactly 2 items, no markdown fences, shaped "
+        f'exactly like: [{{"angle": "{angle_a}", "text": "<message, {{variables}} inline>", '
+        f'"subject": "<email subject or empty string if not email>"}}, '
+        f'{{"angle": "{angle_b}", "text": "...", "subject": "..."}}]'
+    )
+    raw = _call_ai(provider, api_key, system=system, user=brief.strip(), max_tokens=1200)
+    data = _parse_json_response(raw)
+    if not isinstance(data, list) or not data:
+        raise AIServiceError("AI response wasn't a JSON array of A/B variants.")
+    return [
+        {
+            "angle": str(item.get("angle", angle_a if i == 0 else angle_b)),
+            "text": str(item.get("text", "")),
+            "subject": str(item.get("subject", "")),
+        }
+        for i, item in enumerate(data) if item.get("text")
+    ]
+
+
+def summarize_campaign_performance(
+    stats: Dict[str, Any], api_key: str, provider: str = "anthropic",
+) -> str:
+    """A plain-language summary + 1-2 concrete suggestions for the NEXT
+    campaign, grounded entirely in this app's own real, already-logged
+    send/bounce data for the campaign that just finished -- `stats` must
+    come from the real DB (e.g. db_manager.get_campaign_bounce_stats plus
+    the campaign row itself), never invented numbers. Callers are
+    responsible for only calling this with real data."""
+    required = {"campaign_name", "total_sent", "failed", "bounced"}
+    missing = required - stats.keys()
+    if missing:
+        raise AIServiceError(f"Missing real campaign stats: {', '.join(sorted(missing))}")
+
+    system = (
+        "You are a plain-spoken marketing analyst reviewing ONE real completed email/"
+        "WhatsApp campaign for a small business owner. You are given real, already-"
+        "measured numbers for this campaign -- do not invent, estimate, or assume any "
+        "number not given to you. Write a short (3-5 sentence) plain-language summary of "
+        "how the campaign went, followed by exactly 1-2 concrete, specific suggestions "
+        "for the next campaign based on these real numbers. No markdown, no headers, "
+        "plain text only."
+    )
+    raw = _call_ai(provider, api_key, system=system, user=json.dumps(stats), max_tokens=500)
+    text = raw.strip()
+    if not text:
+        raise AIServiceError("AI returned an empty summary.")
+    return text

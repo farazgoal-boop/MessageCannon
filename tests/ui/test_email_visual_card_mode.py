@@ -133,7 +133,7 @@ def test_start_email_from_compose_sends_real_card_html_with_substitution(window,
     captured = {}
 
     def fake_confirmation(main_window, channel, count, delay, preview_lines,
-                           on_confirm=None, subject=None):
+                           on_confirm=None, subject=None, quality_flag_count=0):
         captured["preview_lines"] = preview_lines
         captured["subject"] = subject
         if on_confirm:

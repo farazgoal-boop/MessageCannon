@@ -74,7 +74,7 @@ def test_card_creator_reorder_icon_is_not_styled_as_a_fake_drag_handle(app):
 def test_card_creator_video_caption_is_not_styled_as_a_fake_link(app):
     tab = app.card_creator_tab
     # Ensure at least one youtube-type section exists to find the caption in.
-    tab._load_preset("MessageCannon Pro")
+    tab._load_preset("SaaS Product")
     try:
         found_any_youtube_caption = False
         for sec in tab._sections:
@@ -99,7 +99,7 @@ def test_card_creator_video_caption_is_not_styled_as_a_fake_link(app):
             assert caption is not None
             assert caption.cget("text_color") == T.TEXT_MUTED
     finally:
-        tab._load_preset("MessageCannon Pro")
+        tab._load_preset("SaaS Product")
 
 
 def test_card_creator_contact_footer_caption_is_not_styled_as_a_fake_link(app):
@@ -119,7 +119,7 @@ def test_card_creator_contact_footer_caption_is_not_styled_as_a_fake_link(app):
         assert caption.cget("text_color") == T.TEXT_MUTED
         assert caption.cget("text_color") != T.ACCENT_TEXT
     finally:
-        tab._load_preset("MessageCannon Pro")
+        tab._load_preset("SaaS Product")
 
 
 def test_license_dialog_notice_and_heading_are_not_styled_as_fake_links(app):
@@ -133,12 +133,12 @@ def test_license_dialog_notice_and_heading_are_not_styled_as_fake_links(app):
         notice = _find_label_by_text(
             dialog,
             "If you close the app without activating, the workspace "
-            "remains locked until a valid passkey is entered.")
+            "remains locked until a valid activation code is entered.")
         assert notice is not None
         assert notice.cget("text_color") == T.TEXT_MUTED
         assert notice.cget("text_color") != T.ACCENT_TEXT
 
-        heading = _find_label_by_text(dialog, "Secure local activation")
+        heading = _find_label_by_text(dialog, "Secure, machine-bound activation")
         assert heading is not None
         assert heading.cget("text_color") == T.TEXT_HEAD
         assert heading.cget("text_color") != T.ACCENT_TEXT

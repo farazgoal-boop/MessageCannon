@@ -101,7 +101,7 @@ def test_ai_card_copy_drafts_feature_bullets_not_just_body_copy(app):
         assert "Offline mode" in text
         assert "Team collaboration" in text
     finally:
-        tab._load_preset("MessageCannon Pro")
+        tab._load_preset("SaaS Product")
 
 
 def _price_section(tab):
@@ -505,11 +505,29 @@ def test_build_whatsapp_card_text_includes_headline_price_discount_and_link(app)
             sec["data"][key].set(value)
 
 
-def test_insert_into_compose_email_loads_html_into_rich_editor(app):
+def test_insert_into_compose_email_loads_html_into_rich_editor(app, monkeypatch):
     """Proof required by Item 11: end-to-end insert into the real Compose
     Email editor, reusing Item 10's HTML importer so the card lands as
-    genuine editable/sendable content."""
+    genuine editable/sendable content.
+
+    Real, pre-existing bug found while working on Item 33 of the multi-
+    product generalization pass: this test called the real
+    _insert_into_compose() for the Email channel with no mock for
+    _ask_email_insert_mode() -- that method opens a REAL CTkToplevel and
+    blocks on `dlg.wait_window()` until something destroys it. Nothing in
+    this synchronous test ever does, so this test genuinely hung forever
+    (confirmed directly: reproduced on a clean, unmodified checkout via
+    `git stash`, not something this session's own changes introduced).
+    Under `-n <file-count> --dist loadfile` (this suite's own documented
+    running pattern), a hung worker never returns, so the whole parallel
+    session never completes either -- a real, previously-undetected
+    availability bug in the suite itself. Fixed by mocking the choice
+    dialog to return "rich_text" directly, since that's exactly the path
+    this specific test exists to verify (the OTHER choice, "visual_card",
+    already has its own dedicated, non-blocking coverage in
+    tests/ui/test_email_visual_card_mode.py)."""
     tab = app.card_creator_tab
+    monkeypatch.setattr(tab, "_ask_email_insert_mode", lambda: "rich_text")
     original_channel = app._compose_channel_var.get()
     original_subject = app._em_subj_var.get()
     original_body = app._compose_em_body.get("1.0", "end")
@@ -647,17 +665,17 @@ def test_card_is_clean_right_after_loading_a_preset(app):
     always look dirty and nag on every single click."""
     tab = app.card_creator_tab
     try:
-        tab._load_preset("Copilot Premium")
+        tab._load_preset("Service Business")
         app.update()
         assert tab._card_dirty is False
     finally:
-        tab._load_preset("MessageCannon Pro")
+        tab._load_preset("SaaS Product")
 
 
 def test_editing_content_after_a_preset_load_marks_the_card_dirty(app):
     tab = app.card_creator_tab
     try:
-        tab._load_preset("MessageCannon Pro")
+        tab._load_preset("SaaS Product")
         app.update()
         assert tab._card_dirty is False
 
@@ -666,7 +684,7 @@ def test_editing_content_after_a_preset_load_marks_the_card_dirty(app):
         app.update()
         assert tab._card_dirty is True
     finally:
-        tab._load_preset("MessageCannon Pro")
+        tab._load_preset("SaaS Product")
 
 
 def test_switching_preset_with_no_unsaved_content_skips_the_confirmation(app, monkeypatch):
@@ -678,17 +696,17 @@ def test_switching_preset_with_no_unsaved_content_skips_the_confirmation(app, mo
         "src.ui.card_creator_tab.messagebox.askyesno",
         lambda *a, **k: asked.append(1) or True)
     try:
-        tab._load_preset("MessageCannon Pro")
+        tab._load_preset("SaaS Product")
         app.update()
         assert tab._card_dirty is False
 
-        tab._confirm_and_load_preset("Copilot Premium")
+        tab._confirm_and_load_preset("Service Business")
         app.update()
 
         assert not asked, "should not have asked for confirmation when nothing was dirty"
-        assert tab._mname.get() == "Copilot Premium"
+        assert tab._mname.get() == "Service Business"
     finally:
-        tab._load_preset("MessageCannon Pro")
+        tab._load_preset("SaaS Product")
 
 
 def test_switching_preset_with_unsaved_content_asks_and_respects_cancel(app, monkeypatch):
@@ -701,42 +719,42 @@ def test_switching_preset_with_unsaved_content_asks_and_respects_cancel(app, mon
         "src.ui.card_creator_tab.messagebox.askyesno",
         lambda *a, **k: asked.append(1) or False)  # simulate the user clicking "No"
     try:
-        tab._load_preset("MessageCannon Pro")
+        tab._load_preset("SaaS Product")
         app.update()
         sec = _price_section(tab)
         sec["data"]["_price"].set("$999")  # a real edit -- this is what must not be lost
         app.update()
         assert tab._card_dirty is True
 
-        tab._confirm_and_load_preset("Copilot Premium")
+        tab._confirm_and_load_preset("Service Business")
         app.update()
 
         assert asked, "expected a real confirmation dialog when content was dirty"
-        assert tab._mname.get() == "MessageCannon Pro", (
+        assert tab._mname.get() == "SaaS Product", (
             "declining the confirmation must leave the current card untouched")
         assert sec["data"]["_price"].get() == "$999"
     finally:
-        tab._load_preset("MessageCannon Pro")
+        tab._load_preset("SaaS Product")
 
 
 def test_switching_preset_with_unsaved_content_proceeds_on_confirm(app, monkeypatch):
     tab = app.card_creator_tab
     monkeypatch.setattr("src.ui.card_creator_tab.messagebox.askyesno", lambda *a, **k: True)
     try:
-        tab._load_preset("MessageCannon Pro")
+        tab._load_preset("SaaS Product")
         app.update()
         sec = _price_section(tab)
         sec["data"]["_price"].set("$999")
         app.update()
         assert tab._card_dirty is True
 
-        tab._confirm_and_load_preset("Copilot Premium")
+        tab._confirm_and_load_preset("Service Business")
         app.update()
 
-        assert tab._mname.get() == "Copilot Premium", (
+        assert tab._mname.get() == "Service Business", (
             "confirming the dialog should actually proceed with the preset switch")
     finally:
-        tab._load_preset("MessageCannon Pro")
+        tab._load_preset("SaaS Product")
 
 
 def test_ai_generation_still_applies_directly_without_a_confirmation_prompt(app, monkeypatch):
@@ -750,7 +768,7 @@ def test_ai_generation_still_applies_directly_without_a_confirmation_prompt(app,
         "src.ui.card_creator_tab.messagebox.askyesno",
         lambda *a, **k: asked.append(1) or True)
     try:
-        tab._load_preset("MessageCannon Pro")
+        tab._load_preset("SaaS Product")
         app.update()
         sec = _price_section(tab)
         sec["data"]["_price"].set("$999")
@@ -767,7 +785,7 @@ def test_ai_generation_still_applies_directly_without_a_confirmation_prompt(app,
         assert not asked, "AI generation must apply directly, not go through the preset-switch confirmation"
         assert tab._mtag.get() == "AI Tagline"
     finally:
-        tab._load_preset("MessageCannon Pro")
+        tab._load_preset("SaaS Product")
 
 
 def test_new_section_inserts_at_its_canonical_position_not_appended_at_the_end(app):
@@ -779,7 +797,7 @@ def test_new_section_inserts_at_its_canonical_position_not_appended_at_the_end(a
     back between Text/Features and Links/Contact, not after Contact."""
     tab = app.card_creator_tab
     try:
-        tab._load_preset("MessageCannon Pro")
+        tab._load_preset("SaaS Product")
         app.update()
         price_sec = _price_section(tab)
         tab._remove_section(price_sec["frame"])
@@ -801,7 +819,7 @@ def test_new_section_inserts_at_its_canonical_position_not_appended_at_the_end(a
         assert price_index > features_index, (
             f"Price landed before Features (index {features_index}) -- full order was {types_after}")
     finally:
-        tab._load_preset("MessageCannon Pro")
+        tab._load_preset("SaaS Product")
 
 
 def test_adding_a_second_section_of_the_same_type_appends_after_the_first(app):
@@ -809,7 +827,7 @@ def test_adding_a_second_section_of_the_same_type_appends_after_the_first(app):
     (new ones after existing ones of the same type), not get shuffled."""
     tab = app.card_creator_tab
     try:
-        tab._load_preset("MessageCannon Pro")
+        tab._load_preset("SaaS Product")
         app.update()
         tab._add_section("text")
         app.update()
@@ -821,7 +839,7 @@ def test_adding_a_second_section_of_the_same_type_appends_after_the_first(app):
         assert types.index("contact") > text_indices[-1], (
             "the new Text section must still land before Contact")
     finally:
-        tab._load_preset("MessageCannon Pro")
+        tab._load_preset("SaaS Product")
 
 
 def test_advanced_sections_are_collapsed_by_default(app):
@@ -884,7 +902,7 @@ def test_card_with_many_sections_stays_scrollable_and_reachable(app):
     Item 18 scroll fix already applied to the Card Identity panel above."""
     tab = app.card_creator_tab
     try:
-        tab._load_preset("MessageCannon Pro")  # 7 sections
+        tab._load_preset("SaaS Product")  # 7 sections
         app.update()
         if not tab._sections_advanced_expanded:
             tab._toggle_advanced_sections()  # must be expanded to be reachable at all
@@ -903,7 +921,7 @@ def test_card_with_many_sections_stays_scrollable_and_reachable(app):
     finally:
         if tab._sections_advanced_expanded:
             tab._toggle_advanced_sections()
-        tab._load_preset("MessageCannon Pro")
+        tab._load_preset("SaaS Product")
 
 
 # ─── Live bug report: "Crop stays disabled after a successful-looking
@@ -1049,4 +1067,132 @@ def test_failed_upload_shows_a_persistent_error_message_not_just_a_toast(app, tm
         assert not tab._icon_upload_error_label.winfo_ismapped()
     finally:
         tab._clear_icon_image()
+
+
+# ── Item 32 (multi-product generalization pass): generic category presets
+# + user-saved templates, replacing the old hardcoded per-app button list ──
+
+from src.ui.card_creator_tab import CATEGORY_PRESETS  # noqa: E402
+
+_OLD_HARDCODED_PRODUCT_NAMES = {
+    "MessageCannon Pro", "Copilot Premium", "JobMind Match", "Shaz Residency",
+}
+
+
+def test_no_hardcoded_product_names_in_default_presets(app):
+    """Item 32's own core requirement: a real customer using this app to
+    market THEIR OWN business must never see someone else's product names
+    as template options."""
+    assert not (set(CATEGORY_PRESETS.keys()) & _OLD_HARDCODED_PRODUCT_NAMES)
+    tab = app.card_creator_tab
+    try:
+        for name in CATEGORY_PRESETS:
+            btn = tab._app_btns.get(name)
+            assert btn is not None, f"expected a real button for preset {name!r}"
+            assert btn.cget("text") not in _OLD_HARDCODED_PRODUCT_NAMES
+    finally:
+        tab._load_preset("SaaS Product")
+
+
+def test_default_startup_preset_is_generic_not_a_specific_product(app):
+    """The card that greets a brand-new user on first open of the Cards tab
+    must be a generic example, not any one specific product's real
+    branding."""
+    tab = app.card_creator_tab
+    assert tab._mname.get() not in _OLD_HARDCODED_PRODUCT_NAMES
+
+
+def test_save_as_my_template_persists_across_a_real_reload(app, isolated_db):
+    """The real save->reload round trip, proven against an isolated DB
+    (never the real production settings table) by temporarily pointing this
+    real, live card_creator_tab at it for the duration of the test only."""
+    tab = app.card_creator_tab
+    real_db = tab.main_window.db
+    original_templates = list(tab._user_templates)
+    tab.main_window.db = isolated_db
+    try:
+        tab._load_preset("Custom")
+        app.update()
+        tab._mname.set("My Startup")
+        tab._mtag.set("Ship faster")
+        tab._micon.set("🚀")
+        for sec in tab._sections:
+            if sec["type"] == "text":
+                tb = sec["data"]["_text_box"]
+                tb.delete("1.0", "end")
+                tb.insert("1.0", "A real description of my real product.")
+            elif sec["type"] == "features":
+                tb = sec["data"]["_box"]
+                tb.delete("1.0", "end")
+                tb.insert("1.0", "✅ Real feature")
+            elif sec["type"] == "price":
+                sec["data"]["_price"].set("$19")
+                sec["data"]["_old"].set("$29")
+
+        error = tab.save_current_as_user_template("My Startup Template")
+        assert error == "", f"expected a clean save, got error: {error!r}"
+
+        # Round-trips through the real isolated DB, not just an in-memory
+        # list -- reload from a fresh read exactly like a real app restart.
+        reloaded = tab._load_user_templates()
+        saved = next((t for t in reloaded if t["name"] == "My Startup Template"), None)
+        assert saved is not None
+        assert saved["tagline"] == "Ship faster"
+        assert saved["icon"] == "🚀"
+        assert "real description" in saved["description"]
+        assert saved["price"] == "$19"
+
+        # And it's real content pulled back into the actual card when
+        # picked again, not just stored inert data.
+        tab._load_preset("Custom")
+        app.update()
+        tab._load_preset("My Startup Template")
+        app.update()
+        assert tab._mname.get() == "My Startup Template"
+        assert tab._mtag.get() == "Ship faster"
+        assert tab._micon.get() == "🚀"
+    finally:
+        tab.main_window.db = real_db
+        tab._user_templates = original_templates
+        tab._rebuild_preset_buttons()
+        tab._load_preset("SaaS Product")
+
+
+def test_saving_under_a_reserved_builtin_name_is_rejected(app, isolated_db):
+    tab = app.card_creator_tab
+    real_db = tab.main_window.db
+    original_templates = list(tab._user_templates)
+    tab.main_window.db = isolated_db
+    try:
+        error = tab.save_current_as_user_template("SaaS Product")
+        assert error != ""
+        assert "reserved" in error.lower()
+        # Rejected saves must not mutate state at all.
+        assert tab._user_templates == original_templates
+    finally:
+        tab.main_window.db = real_db
+        tab._user_templates = original_templates
+        tab._rebuild_preset_buttons()
+        tab._load_preset("SaaS Product")
+
+
+def test_saving_under_an_existing_name_updates_in_place_not_duplicated(app, isolated_db):
+    tab = app.card_creator_tab
+    real_db = tab.main_window.db
+    original_templates = list(tab._user_templates)
+    tab.main_window.db = isolated_db
+    try:
+        tab._load_preset("Custom")
+        tab._mtag.set("v1")
+        assert tab.save_current_as_user_template("Versioned") == ""
+        tab._mtag.set("v2")
+        assert tab.save_current_as_user_template("Versioned") == ""
+        matches = [t for t in tab._user_templates if t["name"] == "Versioned"]
+        assert len(matches) == 1, "expected an update in place, not a duplicate entry"
+        assert matches[0]["tagline"] == "v2"
+    finally:
+        tab.main_window.db = real_db
+        tab._user_templates = original_templates
+        tab._rebuild_preset_buttons()
+        tab._load_preset("SaaS Product")
 

@@ -1105,6 +1105,48 @@ class DatabaseManager:
             Logger.error(f"Error counting today's sent emails: {e}")
             return 0
 
+    def get_daily_sent_counts(self, days: int = 7) -> List[int]:
+        """Item 37 (UI/UX benchmark pass): real per-day send-volume counts
+        for the last `days` calendar days (oldest first, today last) —
+        combines both real send paths (email `message_logs`, status='sent';
+        WhatsApp `messages`, status in sent/delivered/read), grouped by the
+        `sent_at` column's own stored local date (both paths write
+        `sent_at` via Python's local `datetime.now()`, not SQLite's UTC
+        `CURRENT_TIMESTAMP` default -- confirmed directly in the code that
+        writes each, so no timezone-conversion is needed here, unlike the
+        `created_at`-based UTC/local bug already found and fixed elsewhere
+        in this file for `get_email_stats_since`). Powers a real sparkline
+        trend on the Campaigns dashboard instead of a single static number
+        -- always real, already-logged data, never invented."""
+        from datetime import date as _date, timedelta as _timedelta
+        today = _date.today()
+        day_keys = [(today - _timedelta(days=offset)).isoformat() for offset in range(days - 1, -1, -1)]
+        counts = {key: 0 for key in day_keys}
+        try:
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "SELECT substr(sent_at, 1, 10) AS day, COUNT(*) AS n FROM message_logs "
+                    "WHERE status = 'sent' AND substr(sent_at, 1, 10) >= ? GROUP BY day",
+                    (day_keys[0],)
+                )
+                for row in cursor.fetchall():
+                    if row["day"] in counts:
+                        counts[row["day"]] += int(row["n"] or 0)
+
+                cursor.execute(
+                    "SELECT substr(sent_at, 1, 10) AS day, COUNT(*) AS n FROM messages "
+                    "WHERE status IN ('sent', 'delivered', 'read') AND substr(sent_at, 1, 10) >= ? "
+                    "GROUP BY day",
+                    (day_keys[0],)
+                )
+                for row in cursor.fetchall():
+                    if row["day"] in counts:
+                        counts[row["day"]] += int(row["n"] or 0)
+        except Exception as e:
+            Logger.error(f"Error getting daily sent counts: {e}")
+        return [counts[key] for key in day_keys]
+
     # Delivery Tracking Operations
     def create_tracked_message(
         self,

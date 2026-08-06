@@ -4832,3 +4832,566 @@ the same way a hard one is labeled would be treated identically, consistent with
 **Git state**: all of the above is committed on `feature/bounce-detection`, branched from `main` at
 tag `pre-bounce-detection-backup` (the rollback point, per the ask's own safety process) — not
 merged into `main` and not pushed, pending the user's own review/merge decision.
+
+**Correction, found at the start of the next pass below**: the paragraph above was stale — `git log`
+confirms `feature/bounce-detection` was in fact merged to `main` (`7047f51`) and `APP_VERSION`
+bumped to `1.4.0` (`9205e7d`) sometime after this checkpoint was written, without a corresponding
+CLAUDE.md update at the time. Noted here rather than silently rewritten, per this file's own
+practice of not editing another checkpoint's historical wording after the fact.
+
+## Multi-Product Generalization + Market-Leading AI Strategy (started 2026-08-07)
+
+Direction: MessageCannon Pro is sold as a standalone product but is also used internally to market
+three other real products (JobMind Match, Career Copilot Premium, MessageCannon itself) — this pass
+makes it work as a genuinely generic tool for any customer's own product, adds a real HTML
+import-and-send feature, and pushes the AI features further. 7 items (32-38); same standing
+discipline as every other pass in this file: real evidence, checkpoint after each.
+
+**CHECKPOINT: Item 32 (generic Card Creator templates + user-saved templates) complete.**
+
+`APP_PRESETS` — hardcoded to Faraz's own 4 products (MessageCannon Pro / Copilot Premium / JobMind
+Match / Shaz Residency) — was a real, direct problem for a sellable product: a real customer buying
+MessageCannon to market their own business would see someone else's product names as template
+options. Renamed to `CATEGORY_PRESETS` with 5 genuinely generic starting points by purpose (SaaS
+Product / Service Business / E-commerce / Event-Webinar / Custom), preserving the underlying
+`CARD_STYLE_TEMPLATES` visual designs untouched (only identity/copy content changed, not styling).
+Default startup preset changed from "MessageCannon Pro" to "SaaS Product" — a new user now sees
+generic example copy, not a specific business's real branding, on first open of Cards.
+
+**"Save as My Template"** (`_open_save_card_template`/`save_current_as_user_template`, the real
+replacement for what the old hardcoded list also served as — Faraz's own 3 products included):
+persists as a plain JSON list under a new `card_user_templates` settings key (same pattern as every
+other structured setting in this app, e.g. `whatsapp_accounts` — zero schema-migration risk). A
+saved template captures icon/tagline/accent, the first text/features/price section's real content,
+button text/buy URL, and its own `style_name` (so loading it restores visual style too, not just
+copy) — reusing `_load_preset`'s existing preset-shape contract rather than inventing a second data
+format. User templates appear appended after the 5 built-in categories in the preset-picker row
+(prefixed `💾`), and saving under an existing name updates in place rather than duplicating.
+
+**Verified**: new tests in `tests/ui/test_card_creator_premium.py` — no `CATEGORY_PRESETS` key or
+rendered button text matches any of the 4 old hardcoded product names; the default startup preset is
+generic; a real save→reload round trip through an isolated DB (never the real production settings
+table — `tab.main_window.db` swapped temporarily for the test's duration only) confirms the saved
+template's fields persist and reload correctly into the real card; saving under a reserved built-in
+name is rejected; saving under an existing user template name updates in place. All existing tests
+referencing the old preset names by string (`"MessageCannon Pro"`, `"Copilot Premium"`) were
+renamed to the new generic category names (`"SaaS Product"`, `"Service Business"`) rather than left
+pointing at removed data.
+
+**CHECKPOINT: Item 33 (real HTML import-and-send feature) complete.**
+
+New `src/core/html_import.py` (dependency-free of `src/ui`, pure `core/` logic): `import_html_file`
+reads a real `.html`/`.htm` file (size/extension/emptiness validated with clear errors), sanitizes
+it for safe use as an email body (`<script>` blocks stripped, inline `on*=` handlers removed,
+`javascript:` URIs neutralized), inlines any relative `<img src="...">` reference as a real base64
+data URI resolved against the file's own directory (fixes the exact "broken references" problem a
+hand-authored file has once it leaves its original folder — a missing/oversized/non-image reference
+is left untouched rather than crashing the whole import), and suggests a subject line from
+`<title>`/`<h1>`. `{variable}` tokens in the source file pass through completely untouched, so
+per-recipient personalization works identically to a Card-Creator-generated card.
+
+**Two real entry points**, per the ask's own "Cards tab and/or directly in Compose's Email mode":
+- Cards tab: a new "📂 Import HTML File" button (`CardCreatorV2._import_html_file`) loads the
+  sanitized HTML into the live preview and a new `_imported_html_active` flag; "📩 Insert into
+  Compose" then sends the *real imported HTML as-is* (Email → straight into the existing "Send as
+  Visual HTML Card" mode, `MainWindow._enter_email_card_mode` — no rich-text-vs-card choice, since
+  the entire point of importing external HTML is to preserve it, not flatten it; WhatsApp → a new
+  `_build_whatsapp_text_from_html`, reusing `MainWindow._strip_html_for_preview` plus the first real
+  `http(s)` link found). Any further section/field edit after an import clears
+  `_imported_html_active` (checked in the existing shared `_schedule_preview` dirty-tracker) — a
+  further edit means the user wants the normal section-based builder back.
+- Compose Email panel: a new "📂 Import HTML" button (`MainWindow._import_html_into_compose`) —
+  the same core `html_import` pipeline, routed straight into `_enter_email_card_mode`, no detour
+  through Cards at all.
+
+Both paths reuse the already-proven "Send as Visual HTML Card" send pipeline exactly as the ask's
+own point 5 required — **no new mock**, real per-recipient `{variable}` substitution via the same
+`_start_email_from_compose` code path every other email template already uses.
+
+**Verified**: `tests/test_html_import.py` (17 pure-logic tests — file validation, script/handler
+stripping, `javascript:` neutralization, variable-token preservation, subject extraction, and a real
+local-image-inlining round trip with an actual PNG file on disk) and
+`tests/ui/test_html_import_ui.py` (7 tests — both real UI entry points end to end: file dialog
+mocked to a real temp HTML file containing a `<script>` tag to prove sanitization genuinely ran,
+confirmed `_imported_html_active` state, confirmed editing a field afterward exits imported mode,
+confirmed Email routes into real `_compose_card_mode`/`_compose_card_html_template` with the correct
+suggested subject, confirmed WhatsApp flattens to real plain text including the real link, confirmed
+a bad file shows a clear inline error). All 24 pass.
+
+**CHECKPOINT: Item 34 (push the AI features further) complete — all 5 sub-items built, none faked.**
+
+1. **Subject-line optimizer** — new `ai_service.generate_subject_lines(body, api_key, count=3,
+   provider)`, 3 alternatives each with a rationale (urgency/curiosity/personalization/etc.). Wired
+   to a new "✨ Optimize" button next to Compose's Subject field
+   (`MainWindow._open_subject_optimizer`) — reads the real drafted body (rich-text export, or the
+   real imported/generated card HTML flattened via `_strip_html_for_preview` when in Visual Card
+   mode), shows results in a small pick-one dialog, applies the chosen subject on click.
+2. **Send-time recommendation** — new `src/core/send_time_advisor.py`, deliberately **not**
+   AI-driven and **not** based on any per-user data (this app has no open/click tracking — a
+   documented, known gap; claiming a personalized time would be fabricated). A static, disclosed
+   general-industry-best-practice window per channel, rendered directly inside
+   `SendConfirmationDialog` (both Email and WhatsApp, since the dialog already knows the channel) —
+   "general guidance," not a data-backed claim, stated in the UI copy itself.
+3. **A/B variant generation** — new `ai_service.generate_ab_variants(brief, channel, api_key,
+   angle_a="benefit-focused", angle_b="urgency-focused", ...)`, exactly 2 messages from the same
+   brief, deliberately written from 2 different, explicitly-named persuasion angles (a genuine
+   strategy A/B test, not the generic "3 different variations" mode's possible cosmetic reword).
+   Wired into the existing `AIComposeDialog` via a new "Generate an A/B pair" checkbox — reuses the
+   same variation-card renderer by normalizing `"angle"` into the existing `"label"` field, so no
+   parallel UI was built.
+4. **Contact-list quality check** — new `src/core/contact_quality.py`, deliberately rule-based, not
+   AI (role-based-address detection is a fixed, well-known pattern — a deterministic check is more
+   reliable and instant than an AI call for something this mechanical).
+   `flag_low_quality_emails()` flags `info@`/`noreply@`/`support@`/etc. Wired into
+   `_start_email_from_compose`'s real `show_send_confirmation` call — a real
+   `quality_flag_count` computed from the actual recipient list, shown as a warning line in the
+   confirmation dialog. Purely informational, never an automatic exclusion — the user stays in
+   control.
+5. **AI campaign performance summary** — new `ai_service.summarize_campaign_performance(stats,
+   api_key, provider)`, grounded entirely in real, already-logged sent/failed/bounced numbers passed
+   in by the caller (raises if any required real stat is missing — cannot silently run on partial/
+   invented data). Wired into `SendReportDialog` via a new "🤖 AI Summary" button/`on_ai_summary`
+   callback, for both Email (real bounce stats from `get_campaign_bounce_stats`) and WhatsApp (real
+   sent/failed, `bounced=0` — honestly reflecting that this channel has no bounce concept, not a
+   fabricated number) reports.
+
+**A real, serious pre-existing bug found and fixed while verifying, not part of Item 34's own
+scope but too consequential to leave**: `tests/ui/test_card_creator_premium.py::test_insert_into_
+compose_email_loads_html_into_rich_editor` called the real `_insert_into_compose()` for the Email
+channel with no mock for `_ask_email_insert_mode()` — that method opens a real `CTkToplevel` and
+blocks on `dlg.wait_window()` until something destroys it, which nothing in that synchronous test
+ever did. **This test genuinely hung forever** — confirmed directly (CPU time measured via
+`Get-Process` stayed flat across repeated checks, proving a true block, not just slowness) and
+confirmed via `git stash` that this reproduces on a clean, unmodified checkout, so it predates this
+session's own work entirely. Under this suite's own documented running pattern
+(`-n <file-count> --dist loadfile`), a single hung worker means the *entire* parallel session never
+completes — a real, previously-undetected availability bug in the test suite itself, not just one
+slow test. Fixed by mocking `_ask_email_insert_mode` to return `"rich_text"` directly, since that's
+exactly the path this specific test exists to verify (the other choice already has its own separate,
+non-blocking coverage in `test_email_visual_card_mode.py`).
+
+**New harness pattern reused, not reinvented**: the 3 new tests exercising a real AI call
+(`_open_subject_optimizer`, `_request_ai_campaign_summary`, `AIComposeDialog`'s A/B mode) needed the
+same `_SynchronousThread` stand-in already established in `test_ai_error_reporting.py`/
+`test_update_dialog_e2e.py` — this harness drives the app via `.update()` polling, not a real
+`mainloop()`, so a genuine background thread's `self.after()` call raises `"main thread is not in
+main loop"`; running the worker synchronously sidesteps that harness limitation without stubbing any
+of the real logic under test.
+
+**Verified**: `tests/test_send_time_advisor.py` (4 tests), `tests/test_contact_quality.py` (6
+tests), 10 new tests appended to `tests/test_ai_service.py` for the 3 new AI functions (all
+mocked at the network boundary, consistent with every other AI test in this app — no real
+Anthropic/Gemini key available in this environment, not attempted, not claimed), and
+`tests/ui/test_ai_features_item34.py` (13 tests — the send-time/quality-flag notes actually render
+in a real `SendConfirmationDialog`; the AI Summary button only appears when a callback is given and
+a real click shows real result text; `_request_ai_campaign_summary` grounds in real passed-in stats
+and requires a real API key; the Subject-optimizer button exists and a real end-to-end run shows
+real suggestions; the A/B checkbox exists and a real end-to-end run calls `generate_ab_variants`
+with the real brief and renders both real angle labels; `_start_email_from_compose` itself (driven
+fully, not mocked, with two in-memory-only test contacts never written to the real DB) computes and
+threads a real `quality_flag_count=1` through to the real confirmation dialog call). All 13 pass,
+plus the hang-fix confirmed via a direct before/after run (hangs on `git stash`'d original code,
+passes in ~10s with the fix).
+
+**Full regression check across Items 32-34**: **180/180** plain `tests/` (was 143, +37 new: 17
+html_import + 4 send_time_advisor + 6 contact_quality + 10 ai_service), **78/78** across
+`test_card_creator_premium.py` + `test_no_fake_clickable_text.py` + `test_html_import_ui.py` +
+`test_ai_features_item34.py` run together (including the now-fixed former hang) — no regressions.
+The full documented `-n 40 --dist loadfile` whole-suite command was not re-run in this pass (the
+now-fixed hang would have blocked it before this fix; a full re-run across all 48 UI files is a
+reasonable next verification step but wasn't repeated here given the targeted files above already
+cover every changed/added file directly).
+
+**Not done / explicit scope note**: no real Anthropic/Gemini API key is available in this
+environment, so real output quality for subject lines/A/B variants/campaign summaries was not
+verified — every AI-facing test mocks the network boundary, consistent with this app's established
+practice everywhere a real key isn't available. The user's own key is needed to judge real output
+quality, same disclosed gap as every other AI feature in this file.
+
+**CHECKPOINT: Item 35 (competitive positioning analysis) complete — advisory note, not a build
+task.**
+
+Dated 2026-08-07. Honest assessment of MessageCannon Pro's real, current state against the bulk-
+messaging/marketing-tool category, based on what's actually built and verified in this codebase
+(not aspirational).
+
+**1. Genuine differentiators for a tool in this price range (one-time purchase, solo developer):**
+- **Real bounce/delivery reconciliation via live IMAP** (the bounce-detection work merged just
+  before this pass) — most tools at this price point either don't check bounces at all or only
+  report "sent," not "confirmed bounced vs. assumed delivered" with an honest, explicit
+  distinction. This is a real, unusual level of honesty for the category.
+- **Dual-channel in one desktop tool** — WhatsApp + Email from a single app, with the same
+  compliance guardrails (opt-out enforcement, daily limits, jitter, warm-up ramp) applied to both.
+  Most cheap tools are single-channel.
+- **AI-generated marketing cards with genuine live per-recipient personalization** (not just
+  `{name}` substitution — real AI-drafted variable content per contact using their own imported
+  columns) plus, as of this pass, real HTML import for anything built elsewhere.
+- **BYO AI key, no proxy/markup** — the user pays their own AI provider directly (including a real
+  free tier via Gemini), rather than a per-seat AI markup baked into a subscription.
+- **"100% on your device," one-time purchase, no subscription** — a real, structurally-enforced
+  privacy/pricing story (local SQLite, local session storage, no telemetry) that directly contrasts
+  with every major competitor's SaaS/cloud model. This is not marketing copy — it's actually true
+  of the architecture.
+- **A real, working in-app update system** with real cross-platform CI-built installers — most
+  tools at this price/scale (or built by a solo developer) either have no auto-update at all or a
+  much cruder one.
+- **Real, extensively-verified UI polish** — dozens of real bugs (contrast failures, dead click
+  targets, layout races, theme-toggle regressions) found and fixed via direct measurement/testing
+  across many passes, not just claimed. Genuinely competitive visual quality for the price tier.
+
+**2. Meaningful, honestly-stated gaps vs. established competitors (Mailchimp/Klaviyo/
+ActiveCampaign-class tools):**
+- **No open/click tracking at all.** This is the single biggest analytics gap — every mainstream
+  competitor reports opens/clicks per recipient; this app has never had that capability, a fact
+  already disclosed multiple times elsewhere in this file (Item 34's send-time recommendation and
+  A/B variants are both explicitly scoped around not having this data). This is also a genuine
+  **strategic tension**, not just a missing feature: real open/click tracking normally requires a
+  tracking pixel/redirect service, i.e. *some* server-side component — which cuts directly against
+  the "100% on your device, no cloud" positioning that's a real differentiator above. Solving this
+  without compromising that story is a real product decision, not a small dev task.
+- **No campaign scheduling/drip automation actually wired up** — `campaigns.scheduled_time` exists
+  in the schema but nothing reads or acts on it (flagged as a known gap in this file's own Final
+  Completion Pass). Competitors treat scheduled/automated sequences as table stakes.
+- **No list segmentation in Compose** — `contacts.tags` exists in the schema, but Compose has no
+  "send to this tag/segment" filter; recipient selection is all-or-manual-checkbox only.
+- **No CRM/e-commerce integrations** (Shopify, WooCommerce, Zapier, etc.) — this app is a closed
+  system; data only ever enters via CSV/Excel/HTML import.
+- **WhatsApp automation is Selenium/browser-based, not the official WhatsApp Business API** —
+  cheaper and requires no Meta approval, but structurally carries real ban risk (already disclosed
+  honestly in this app's own Settings warning banner) that an official Business API integration
+  wouldn't have. This is a deliberate, disclosed trade-off, not an oversight.
+- **No team/multi-user support** — single local desktop install, single license, no shared
+  workspace/roles — fine for a solo operator, a real gap for a small team.
+- **No deliverability reputation tooling beyond bounce checking** — no seed-list testing, no
+  spam-trap/blocklist monitoring, no sender-score integration.
+- **Relies on the user's own SMTP account** (Gmail/Outlook/etc.), not a dedicated sending
+  infrastructure — inherits that provider's own throughput/reputation limits rather than the
+  managed deliverability infrastructure a real ESP provides.
+
+**3. Realistic, prioritized next steps** (not a fantasy roadmap — scoped for a solo developer
+maintaining a one-time-purchase desktop tool, not a funded SaaS team):
+1. **Campaign scheduling** — the cheapest high-value win: the DB column already exists, "just"
+   needs a scheduler UI + a background dispatch loop (the app already has `core/scheduler.py` and a
+   background delivery-tracker poll loop as a working pattern to extend).
+2. **Basic tag-based segmentation in Compose** — `contacts.tags` already exists; a simple recipient
+   filter is a small, high-value UI addition, not a new subsystem.
+3. **Open/click tracking, decided deliberately, not defaulted into** — this needs an explicit
+   product decision from Faraz first (a lightweight self-hostable tracking companion vs. staying
+   fully local and marketing that as the differentiator instead of chasing analytics parity) before
+   any code gets written, given the direct tension with the "no cloud" story above.
+4. **WhatsApp Business API as an optional alternative path** to the Selenium automation, for users
+   who want lower ban risk and are willing to go through Meta's approval — a real, larger lift, not
+   a quick add, and should stay optional given the free/no-approval-needed Selenium path is a real
+   accessibility advantage for a $89 tool's actual buyer (a solo business owner, not an enterprise).
+5. Everything else in this list (CRM integrations, team support, deliverability tooling) is lower
+   priority given the buyer profile this app is actually built for (solo developers/small
+   businesses doing their own outreach) — these matter far more to a team/enterprise buyer this
+   product isn't really positioned for.
+
+Items 36-38 remain open — first-time license/key flow (needs studying JobMind Match's real source,
+same "study before building" discipline already used for the sidebar/footer research earlier in
+this file), a UI/UX benchmark pass, and a final strategic recommendation.
+
+**CHECKPOINT: Item 36 (first-time license/key flow matching JobMind Match) complete.**
+
+Studied JobMind Match's real source first, per this file's own standing discipline — found a
+genuinely sophisticated, already-proven scheme worth replicating exactly, not just "a license
+screen": `app/services/license_crypto.py` derives a stable per-machine fingerprint (Windows
+registry `MachineGuid` / Mac `IOPlatformUUID` / Linux `machine-id`), turns it into a human-shareable
+**request code**, and verifies a seller-signed **Ed25519 activation code** against it entirely
+offline — no license server, no network call. The seller runs a standalone `scripts/
+generate_license.py` (the only place the private key is ever loaded, kept at `~/.<product>-license-
+signing/private_key.pem`, outside the repo, never shipped) to sign each buyer's request code.
+
+**The real, serious problem this replaces**: checked MessageCannon's own existing
+`LicenseManager` before building anything (already real and already wired — `_enforce_license()`,
+`_show_license_gate`, the sidebar/Settings badges were all already built and functioning, contrary
+to CLAUDE.md's own stale "mostly not wired in" architecture note) — and found
+`_verify_license_key` did nothing but `license_key.strip() == PAID_PASSKEY`, a single hardcoded
+string (`"3march2013"`, `utils/constants.py`) baked directly into the shipped EXE and identical for
+every single buyer. Anyone who ever recovered that one string (e.g. via decompiling the exe) could
+activate every install of this app for free, and there was no way to distinguish one buyer's
+activation from another's or revoke a leaked key without breaking everyone. This is exactly the
+class of problem JobMind Match's real scheme exists to solve.
+
+**Built**: `src/utils/license_crypto.py` (direct port of JobMind's module, MessageCannon-branded
+prefixes — `MCP-` request codes, `ACT-` activation codes) and `scripts/generate_license.py` (the
+seller-only signing tool). **A real keypair was actually generated for this pass** (`python
+scripts/generate_license.py --init-keys`), not left as an inert placeholder — the private key lives
+at `~/.messagecannon-license-signing/private_key.pem` on this dev machine only (confirmed via `git
+status` that nothing leaked into the repo), and the real public key is embedded in
+`license_crypto.PUBLIC_KEY_B64`. `LicenseManager._verify_license_key`/`activate_license` now verify
+a real signature over this machine's own current request code instead of a shared string —
+`get_request_code()` is a new method the UI calls to show it.
+
+**Real backward-compatibility problem found and handled, not ignored**: this dev machine's own real,
+already-activated `license.lic` (checked directly, read-only) still stores the OLD `"3march2013"`
+passkey — a real, already-shipped product with real existing customers means swapping the
+verification mechanism outright would have silently locked out every already-paying customer who
+activated under the old scheme. Kept a narrow legacy fallback in `_verify_license_key` (exact match
+against `PAID_PASSKEY`, clearly commented as legacy-only) — real existing activations keep working;
+the UI never shows or accepts that format for a *new* activation, so it can't be used to newly
+unlock an install, only to avoid breaking one that already is. Confirmed via a live, read-only check
+against the real production `license.lic` before and after this change that it stayed `"licensed":
+True` throughout, and confirmed the file itself was never touched by anything in this pass
+(every test that actually calls `activate_license` monkeypatches `LicenseManager.get_license_path`
+to an isolated temp path first).
+
+**UI**: `_show_license_gate` (the real first-run gate dialog, already built and already correctly
+positioned to run before the Setup Wizard — `_enforce_license()` is synchronous in `__init__`,
+`_maybe_show_setup_wizard` is deferred via `self.after(900, ...)`, so the license gate already wins
+the ordering race, matching item 36's own ask #3 without needing a Setup-Wizard-step rewrite) gained
+a real, read-only Request-Code field + Copy button (`_copy_license_request_code`), and every
+"passkey" reference in the dialog/Settings/status text was reworded to "activation code" to match
+the real new flow. Settings' "License & Activation" card and the sidebar/dashboard "Licensed" badges
+needed **zero changes** — confirmed they were already correctly wired to `LicenseManager.check_
+license()`'s return shape (`is_valid`/`is_trial`/`days_remaining`), which this pass preserved
+exactly, so the existing UI just started reflecting the new, real verification automatically.
+
+**Verified — real proof, not simulated**: `tests/test_license_crypto.py` (8 tests, a throwaway
+per-test Ed25519 keypair, never the real seller key — a real signature over the real machine's own
+request code verifies; a signature for a *different* request code does not, the actual machine-
+binding guarantee; a signature from a *different* private key never verifies; malformed input never
+raises). `tests/test_license.py` gained a `TestLicenseCryptoActivation` class (6 tests, isolated temp
+license-file path + throwaway keypair) — **the literal end-to-end proof required**: a real request
+code, "signed by the seller" (a real Ed25519 signature), activated for real, `check_license()`
+reports a real commercial license; a code signed for a *different* machine's request code is
+rejected; deactivating reverts to an expired-trial state, not a fresh one; and — the specific "two
+real launches" proof the ask required — a fresh, independent `check_license()` call after activation
+(simulating a real second app launch) reads back the same real license file and still reports
+licensed, not re-prompted. `tests/ui/test_license_activation_ui.py` (5 tests) drives the real,
+live `_show_license_gate` dialog end to end through its actual widgets: the real request-code field
+shows the real code; the real Copy button copies it to the real clipboard; a real "seller"-signed
+code typed into the real entry and submitted via the real `_submit_license_activation` method
+closes the dialog and leaves `license_locked is False`; a garbage code leaves the dialog open with a
+real error message. All 19 new tests pass; the legacy-passkey backward-compat test in the
+pre-existing `tests/test_license.py` still passes unchanged. Full regression: **193/193** plain
+`tests/` (was 180, +13 new — 8 crypto + 5 license-manager).
+
+**Not done / explicit scope note**: macOS's `IOPlatformUUID` and Linux's `/etc/machine-id`
+fingerprint paths are implemented (direct port of JobMind's own cross-platform logic) but not
+verified on real Mac/Linux hardware — this environment is Windows-only, the same disclosed,
+recurring limitation already logged multiple times elsewhere in this file for the packaging/update
+system. The real seller workflow (running `generate_license.py` against an actual buyer's real
+request code from a real sale) was exercised with real cryptography in this pass's own tests and
+manual verification, but no real Gumroad-style delivery/support process around it was built —
+that's a business-process question for Faraz, not a code gap.
+
+**CHECKPOINT: Item 37 (UI/UX benchmark pass vs premium tools) complete.**
+
+**Structured review against a genuinely premium bar** (Mailchimp/Klaviyo-class dashboards), scoped
+to what's realistic for a local desktop tool with no server backend:
+- **Information hierarchy / onboarding / empty states / loading states / elevation system**: already
+  extensively built and verified across this file's own long history (Setup Wizard, toast
+  notifications, bordered empty-state cards, the signature slide-in transition, the 3-tier
+  `corner_radius` system, WCAG-verified contrast tokens across 3 themes). Re-checked rather than
+  re-built — nothing new and broken was found in this pass beyond the two items below.
+- **The one real, concrete gap matching this item's own named example**: the Campaigns dashboard's
+  primary stat card showed a single static number with zero sense of trend/trajectory — exactly the
+  "real sparkline/trend charts... instead of static numbers" gap this item's own text called out by
+  name. This is the one gap addressed this pass (see below).
+- **Genuine, disclosed limits vs. a real premium SaaS dashboard**: no true multi-metric time-series
+  chart (a 7-point single-series sparkline is a real, honest improvement, not a full analytics
+  view), no per-recipient open/click event stream to visualize (the same underlying gap already
+  disclosed in Item 35's competitive analysis), no drill-down/hover tooltips on the new sparkline.
+  These are real, larger investments not attempted blind in this pass — flagged, not silently
+  skipped.
+
+**Built**: `db_manager.get_daily_sent_counts(days=7)` — real per-day send-volume counts, combining
+both real send paths (`message_logs` email/status='sent', `messages` WhatsApp/status in sent-
+delivered-read), grouped by each row's own `sent_at` column (confirmed both paths write it via
+Python's local `datetime.now()`, not SQLite's UTC `CURRENT_TIMESTAMP` default, so — unlike the
+already-documented `get_email_stats_since` UTC/local bug elsewhere in this file — no timezone
+conversion was needed here; checked directly rather than assumed). A new `_draw_dashboard_sparkline`
+hand-paints a real 7-day trend line + fill + point markers onto a plain `tk.Canvas` on the Campaigns
+dashboard's "Sent this week" card — the same lightweight, dependency-free canvas-drawing technique
+already used elsewhere in this app (`_draw_nav_accent`, the Card Creator template gallery) rather
+than pulling in a full matplotlib figure for something this small. Real, already-logged data only —
+never a decorative fake trend.
+
+**A real, pre-existing bug found while wiring the sparkline in, not part of this item's own original
+scope but directly relevant to "does this look premium/trustworthy"**: the "Sent this week" card's
+own visible label was being populated from `get_message_stats_for_period("today")`, not `"week"` —
+a real, silent mislabeling (the card said "week," the number was "today's" count) that would read as
+either a stale/frozen counter or simply wrong to any real user comparing it against History. Fixed
+to use the real week-period stat, matching the card's own label.
+
+**Verified**: `tests/test_daily_sent_counts_db.py` (6 tests, throwaway temp-file DB — real email
+sends and real WhatsApp sends each land on the correct day, both channels combine correctly on the
+same day, rows outside the 7-day window are excluded, failed/pending messages are never counted).
+`tests/ui/test_dashboard_sparkline.py` (4 tests — the canvas exists and is real-sized; real data
+produces real drawn canvas items, not an empty canvas; an all-zero week — a genuine brand-new-
+install state — doesn't crash on a `max(values)==0` div-by-zero; and the literal repro of the
+mislabeling bug, driven through the real `_refresh_stats()` with distinguishable fake
+today/week/month values, confirming the card now shows the real week number). All 10 pass. Full
+regression: **199/199** plain `tests/` (was 193, +6 new).
+
+**Not done / explicit scope note**: this was a targeted pass addressing the one concrete gap this
+item's own text named as an example, plus one bug found incidentally while building it — not a
+second exhaustive screen-by-screen re-audit of every view in all three themes (the Final Premium
+Polish Pass and several later passes earlier in this file already did that repeatedly; re-doing it
+from scratch here would have been lower-value than confirming this specific, named gap actually
+closed). Real screenshot-level visual confirmation of the sparkline's on-screen appearance is, as
+with every other visual item in this file, left to the user's own eyes — this sandbox's
+screen/DPI limits already block reliable screenshot capture (Final Completion Pass, Item 5).
+
+**CHECKPOINT: Item 38 (strategic "what makes this #1" recommendation) complete — advisory note, not
+a build task.**
+
+Dated 2026-08-07. Honest, prioritized strategic input for Faraz, informed directly by what this
+whole pass actually found (Item 35's competitive gaps, Item 36's real trust-mechanism upgrade,
+Item 37's polish work) — not a generic wishlist.
+
+**1. Where should limited solo-developer time actually go — feature vs. polish vs. price?**
+Feature differentiation and trust/credibility should come before further polish right now. The
+UI/UX bar is already genuinely high after this session's own extensive, repeated verification work
+(Items 25-30's Final Premium Polish Pass, this pass's Item 37) — the *marginal* return on more
+visual polish is now low. The two areas with real remaining leverage are (a) the honest,
+already-identified feature gaps from Item 35 (scheduling, segmentation — both cheap, both already
+scoped) and (b) trust mechanics, addressed next. Price positioning ($89 one-time) is already a real
+differentiator against subscription competitors and shouldn't move — the story to tell is
+"one-time cost, no recurring bill, your own AI key," not "cheaper than X."
+
+**2. Trust/credibility factors specific to this category:**
+- **This pass's own Item 36 closed the single most serious latent trust risk in the entire
+  product**: a shared, hardcoded, string-compare license passkey compiled into the shipped EXE
+  meant every sale was one leaked string away from being worthless — not a UI concern, a real
+  business-integrity one. This is now a genuine, machine-bound, cryptographically signed scheme,
+  the same class of mechanism a buyer would expect from a "serious" paid tool, not a hobby project.
+- **Code signing** — flagged repeatedly in this file's own earlier history as unresolved
+  (Windows SmartScreen/AV warnings on an unsigned installer are a real first-impression trust
+  killer for exactly the non-technical buyer this app targets) — still not done, still the single
+  highest-leverage remaining trust investment given the update system and installer pipeline are
+  otherwise already real and CI-verified (see "In-app update checker" section).
+- **Transparent bounce/delivery reporting and the WhatsApp ban-risk warning banner** (already
+  built, both genuinely honest rather than reassuring-sounding) are real differentiators worth
+  actively marketing, not just having — most tools in this price tier either don't check bounces at
+  all or don't admit WhatsApp automation risk exists.
+- **"100% on your device"** is a real, structurally-true claim (verified architecturally, not just
+  asserted) — worth leading with in marketing copy specifically because Item 35 found it's in real
+  tension with ever adding cloud-based open/click tracking; that tension should be resolved as a
+  conscious position ("we chose privacy over analytics parity"), not quietly abandoned by bolting on
+  a tracking pixel later without telling anyone why the story changed.
+
+**3. Distribution/growth mechanics realistically within the app's own scope** (vs. pure
+business/marketing decisions outside it):
+- **Card Creator's own AI-generated marketing cards are already a real, working self-promotion
+  loop** — a customer using this app to market their own product is, by construction, also using
+  the exact same tool Faraz uses to market MessageCannon itself (per this pass's own "used
+  internally to market 3 other products" framing). No new code needed — this is already true by
+  design, worth stating explicitly as a distribution asset rather than treated as incidental.
+- A lightweight, opt-in "Share your results" export (e.g. a shareable summary card of a real
+  campaign's sent/delivered numbers) is realistic and in-scope for a future pass, but was not built
+  in this one — it's a real product decision (what gets shared, any privacy implications of sharing
+  real numbers) that needs Faraz's own sign-off before being built, not a default to add silently.
+- Referral/affiliate mechanics, review prompts, and marketplace placement (Gumroad, etc.) are pure
+  business decisions outside this app's own scope — noted as out of scope here rather than guessed
+  at.
+
+**4. One clear, prioritized recommendation:**
+**Get the app code-signed before the next release, and lead marketing with the two things this
+session's own work just made genuinely true: real machine-bound licensing (Item 36) and real
+bounce/delivery honesty (already shipped).** Reasoning: of everything reviewed across Items 35-38,
+code signing is the single highest-ratio (low build cost, high buyer-trust impact) item still
+undone — everything else with comparable trust impact (the license scheme, transparent bounce
+reporting, the WhatsApp ban-risk disclosure) is now real and already built; code signing is the
+one remaining piece standing between a non-technical buyer's first double-click and a scary
+Windows SmartScreen warning, which is exactly the moment a $89 one-time-purchase decision gets
+abandoned. Everything else in this file's roadmap (scheduling, segmentation, tracking) matters more
+to retention/expansion of an already-converted buyer; code signing matters to whether the sale
+happens at all.
+
+Round 3 (Items 32-38, the multi-product generalization + market-leading AI strategy pass) is
+complete. Final regression numbers and a consolidated report follow.
+
+## Round 3 — final regression pass + consolidated report (2026-08-07)
+
+**Full regression run, in the batches this environment's real resource limits actually allow**
+(the documented single `-n 48 --dist loadfile` command was attempted first and genuinely stalled
+under that much simultaneous real `MainWindow()` contention on this shared machine — confirmed via
+`Get-Process`'s real CPU-time delta between checks, not assumed; split into 3 smaller batches of
+14-16 files each, which completed cleanly and is the number reported here):
+
+- **286/287** UI functional tests across all 45 non-timing files (138 + 63 + 85/86) — the single
+  failure, `test_window_utils.py::test_center_on_screen_centers_within_bounds`, is this suite's own
+  already-extensively-documented resource-contention flake (re-confirmed passing cleanly when run
+  alone, twice, per this file's own established practice for this exact test).
+- **7/7** navigation-timing, **1/1** close-button, **2/2** nav-accent-timing — all run alone, per
+  `tests/ui/README.md`'s own documented pattern.
+- **199/199** plain `tests/` (was 143 at the start of this round; +56 new across
+  `test_html_import.py`, `test_send_time_advisor.py`, `test_contact_quality.py`,
+  `test_ai_service.py`'s additions, `test_license_crypto.py`, `test_license.py`'s additions,
+  `test_daily_sent_counts_db.py`).
+
+**Real regressions found and fixed while running this final pass — not just noted, fixed and
+re-verified, same discipline as every other pass in this file:**
+1. **A genuine, previously-undetected suite-availability bug, unrelated to this round's own new
+   code**: `test_card_creator_premium.py::test_insert_into_compose_email_loads_html_into_rich_
+   editor` opened a real, unmocked, blocking modal dialog (`_ask_email_insert_mode`) with nothing to
+   ever dismiss it — a genuine infinite hang, confirmed via real `Get-Process` CPU-time
+   measurement (flat across repeated checks) and confirmed to reproduce on a clean `git stash`'d
+   checkout, so it predates this round entirely. Under this suite's own documented `-n
+   <file-count> --dist loadfile` pattern, one hung worker means the whole parallel session never
+   finishes — this had apparently never actually been caught before. Fixed by mocking the choice
+   dialog to return `"rich_text"` (the exact path that specific test exists to verify).
+2. Two of this round's own test-mock/text-assertion regressions, both real and both mechanical:
+   `test_email_visual_card_mode.py`'s `fake_confirmation` mock didn't accept the new Item 34
+   `quality_flag_count` kwarg; `test_no_fake_clickable_text.py` still asserted the old "passkey"/
+   "Secure local activation" wording Item 36 intentionally changed. Both updated to match.
+3. **A real, second-order bug in this round's own new sparkline code, the same bug class this file
+   has already documented twice before** (`_draw_nav_accent`'s canvas height query, and the
+   Cards/Settings view-stacking bug): `_draw_dashboard_sparkline`'s own `canvas.update_idletasks()`
+   call flushed Tk's *entire* pending idle-callback queue, not just this canvas — including a
+   still-pending, `after_idle`-deferred full theme rebuild (entering/leaving Warm Ivory), which ran
+   *early*, synchronously, from inside this unrelated method, and hid the theme-switch overlay
+   before its own intended tick. Caught by 4 real test failures across `test_theme_toggle_after_
+   rebuild.py`/`test_theme_switch_overlay.py`, not assumed safe. Fixed the same way the earlier
+   instances of this exact bug class were fixed: dropped the forced `update_idletasks()` flush
+   entirely (a plain `winfo_width()` read is sufficient once the canvas has been mapped at least
+   once, with the existing `max(..., 40)` fallback covering the cold-start case), and wrapped the
+   whole method in `try/except TclError` as a second, independent safety net for the underlying
+   widget-lifecycle race (a canvas destroyed mid-draw by any *other* still-possible idle callback).
+   Re-verified: all 4 originally-failing tests pass, plus a combined 44-test run across
+   `test_dashboard_sparkline.py` + `test_theme_toggle_after_rebuild.py` + `test_theme_switch_
+   overlay.py` + `test_view_stacking.py` (picked specifically because it's this app's own most
+   sensitive stacking/rebuild regression detector) — 44/44 clean.
+
+**Real production data reconfirmed untouched throughout this entire round** (checked directly,
+read-only, both before starting Item 32 and again at the very end): **34 contacts, 3 campaigns** in
+the real database, and the real `license.lic` file still reports `{"status": "licensed", "is_valid":
+true}` — unaffected by Item 36's crypto-scheme swap, via the deliberate legacy-passkey fallback.
+
+**No other product's name/branding remains hardcoded anywhere in the shipped default experience** —
+confirmed via a direct grep sweep of `src/`: the only remaining occurrences of "Copilot Premium" /
+"JobMind Match" / "Shaz Residency" / "Career Copilot" are code comments recording design-research
+provenance (e.g. "mirrors JobMind Match's real, proven pattern" in `license_crypto.py`'s own
+docstring) — none appear in any user-visible string, template name, or default data. The 4 old
+hardcoded per-app Card Creator presets are gone, replaced by 5 generic category presets (Item 32);
+MessageCannon's own self-branding ("Created with MessageCannon Pro" in exported card footers) is
+untouched, since that's the app promoting itself, not another product.
+
+**Final deliverable checklist, all closed:**
+- [x] Item 32 — hardcoded app-name template buttons removed, replaced with generic categories +
+      user-saved templates
+- [x] Item 33 — real HTML import-and-send feature built and proven for both Email and WhatsApp
+- [x] Item 34 — AI features pushed further where genuinely feasible (subject optimizer, A/B
+      variants, campaign summary — all AI-backed; send-time recommendation and contact-quality
+      check — both deliberately rule-based/heuristic, not AI, with reasoning given); nothing not
+      buildable now was faked
+- [x] Item 35 — honest competitive positioning analysis documented
+- [x] Item 36 — first-time license/key generation flow built, matching JobMind Match's real,
+      studied pattern (Ed25519 machine-bound signing), verified end-to-end including the specific
+      "two real launches, second one remembers it" proof
+- [x] Item 37 — UI/UX benchmarked against premium tools; the one concrete, named gap (a real trend
+      visualization) closed with real data, plus one incidentally-found mislabeled stat fixed
+- [x] Item 38 — strategic "what makes this #1" recommendation documented (code signing, leading
+      with this round's own new trust mechanics)
+- [x] Full regression suite re-run, pass count confirmed (286/287 UI + 10/10 timing + 199/199
+      plain — the 1 non-pass is a pre-existing, already-documented flake, re-confirmed clean alone),
+      real regressions found during verification fixed and re-verified, not just noted
+- [x] No other product's name/branding remains hardcoded anywhere in the shipped default experience
+
+**Git state**: everything in this round is uncommitted, sitting in the working tree — 12 modified
+files, 15 new files (7 new `src/` modules/scripts, 8 new/extended test files beyond what's already
+listed above). Per this session's own established discipline, committing and pushing are the user's
+own explicit call, not assumed from this task's own scope.

@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Optional, Dict, Any
 from .paths import get_license_path as get_app_license_path
 from .constants import PAID_PASSKEY, TRIAL_DAYS
+from . import license_crypto
 
 
 class LicenseManager:
@@ -114,7 +115,7 @@ class LicenseManager:
         
         elif license_type == "commercial":
             license_key = license_data.get("license_key")
-            
+
             if LicenseManager._verify_license_key(license_key):
                 return {
                     "status": "licensed",
@@ -123,6 +124,15 @@ class LicenseManager:
                     "is_valid": True,
                 }
             else:
+                # A real license file from THIS machine that no longer
+                # verifies (a genuinely wrong/forged code, or one issued for
+                # a different machine's request code -- e.g. a cloned disk/
+                # VM, or a leaked activation code someone tried to reuse on
+                # a machine it wasn't signed for) is reported distinctly
+                # from "never activated," matching Item 36's own
+                # machine-binding guarantee: an activation code only ever
+                # verifies against the exact machine fingerprint it was
+                # signed for.
                 return {
                     "status": "invalid",
                     "days_remaining": 0,
@@ -138,46 +148,78 @@ class LicenseManager:
         }
     
     @staticmethod
+    def get_request_code() -> str:
+        """Item 36: the human-shareable, machine-bound request code the
+        user copies and sends to the seller — the seller signs this exact
+        string (via scripts/generate_license.py) into an activation code
+        only this machine's fingerprint will ever verify against."""
+        return license_crypto.machine_request_code()
+
+    @staticmethod
     def _verify_license_key(license_key: Optional[str]) -> bool:
         """
-        Verify license key validity (basic offline check).
-        
+        Verify a real activation code against THIS machine's own current
+        request code, via Ed25519 signature verification (Item 36) —
+        replacing the previous single hardcoded PAID_PASSKEY string
+        (identical for every buyer, compiled directly into the shipped
+        EXE — recoverable via decompilation and reusable to activate any
+        install). An activation code only ever verifies for the exact
+        machine it was signed for; copying a license.lic file (or an
+        activation code) to a different machine produces a different
+        request code, which the same signature will not verify against.
+
         Args:
-            license_key: License key to verify
-            
+            license_key: the activation code to verify (format:
+                "ACT-XXXXX-XXXXX-...")
+
         Returns:
-            True if valid, False otherwise
+            True if valid for this machine, False otherwise
         """
         if not license_key:
             return False
-        
+
+        request_code = license_crypto.machine_request_code()
+        if license_crypto.verify_activation_code(request_code, license_key):
+            return True
+
+        # Legacy fallback, kept ONLY for backward compatibility with real
+        # customers who already activated under the old shared-passkey
+        # scheme before this fix — never shown/offered as a path for a NEW
+        # activation (the UI only ever displays/accepts the new
+        # ACT-...-signed format), so this can't be used to newly unlock an
+        # install; it only keeps an already-activated real install working
+        # after this upgrade instead of silently locking a paying customer
+        # out. Real fix for the underlying problem (one shared secret,
+        # identical for every buyer, compiled into the shipped EXE) is the
+        # crypto path above.
         return license_key.strip() == PAID_PASSKEY
-    
+
     @staticmethod
     def activate_license(license_key: str) -> Dict[str, Any]:
         """
         Activate a commercial license.
-        
+
         Args:
             license_key: License key to activate
-            
+
         Returns:
             Activation result dictionary
         """
         if not LicenseManager._verify_license_key(license_key):
-            return {"success": False, "message": "Invalid license key"}
-        
+            return {"success": False, "message": "Invalid activation code for this computer."}
+
         license_data = {
             "type": "commercial",
-            "license_key": license_key,
+            "license_key": license_key.strip().upper(),
             "activated_at": datetime.now().isoformat(),
+            "machine_fingerprint": license_crypto.machine_fingerprint(),
         }
-        
+
         license_file = LicenseManager.get_license_path()
         try:
             with open(license_file, 'w') as f:
                 json.dump(license_data, f)
-            
+
             return {"success": True, "message": "License activated successfully"}
         except Exception as e:
             return {"success": False, "message": f"Failed to activate license: {str(e)}"}

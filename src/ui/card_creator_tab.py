@@ -26,6 +26,7 @@ from PIL import Image, ImageTk
 
 from ..core import ai_service
 from ..core.ai_service import AIServiceError
+from ..core.html_import import import_html_file, HtmlImportError
 from ..models import Contact
 from ..modules.data_importer import UniversalDataImporter
 from ..utils.validators import DataValidator, PhoneValidator
@@ -69,36 +70,60 @@ SECTION_TYPES = [
 # get something coherent.
 _SECTION_ORDER = [stype for _label, stype in SECTION_TYPES]
 
-APP_PRESETS = {
-    "MessageCannon Pro": {
-        "icon": "📨", "tagline": "Bulk Messaging Tool", "accent": "#6c63ff",
-        "description": "Pakistan's most advanced bulk messaging platform.",
-        "features": "✅ WhatsApp bulk messaging\n✅ HTML email campaigns\n✅ CSV/Excel/HTML import\n✅ Variable substitution\n✅ Campaign analytics",
-        "price": "$89", "old_price": "$129", "price_note": "One-time · Lifetime",
+# Item 32 of the Round-3 (multi-product generalization) pass: these used to
+# be hardcoded to Faraz's own 4 products (MessageCannon Pro / Copilot
+# Premium / JobMind Match / Shaz Residency) -- fine for internal use, wrong
+# for a sellable product, since a real customer buying MessageCannon to
+# market THEIR OWN business shouldn't see someone else's product names as
+# template options. Replaced with genuinely generic starting points grouped
+# by category/purpose instead of by app name. The visual *styling* these
+# produce is unchanged (still driven by CARD_STYLE_TEMPLATES/accent, which
+# this doesn't touch) -- only the identity/copy content is now generic.
+# User-authored templates (see USER_TEMPLATE_SETTING_KEY / _user_templates
+# below) are the replacement for "my own saved presets" that the old
+# hardcoded list also served as, for Faraz's own 3 products included.
+CATEGORY_PRESETS = {
+    "SaaS Product": {
+        "icon": "💻", "tagline": "Software, Simplified", "accent": "#4f46e5",
+        "description": "A short, powerful description of what your software does and who it's for.",
+        "features": "✅ Key feature one\n✅ Key feature two\n✅ Key feature three",
+        "price": "$29/mo", "old_price": "$49/mo", "price_note": "Cancel anytime",
     },
-    "Copilot Premium": {
-        "icon": "🤖", "tagline": "AI Productivity", "accent": "#0078d4",
-        "description": "Your AI-powered productivity assistant.",
-        "features": "✅ AI content generation\n✅ Smart automation\n✅ Multi-language\n✅ Cloud sync",
-        "price": "$49", "old_price": "$99", "price_note": "Annual subscription",
+    "Service Business": {
+        "icon": "🛠️", "tagline": "Professional Services", "accent": "#0891b2",
+        "description": "Describe the service you offer, and the outcome your customers get.",
+        "features": "✅ Fast turnaround\n✅ Verified professionals\n✅ Satisfaction guaranteed",
+        "price": "Get a Quote", "old_price": "", "price_note": "Free consultation",
     },
-    "JobMind Match": {
-        "icon": "💼", "tagline": "Job Matching AI", "accent": "#00b894",
-        "description": "AI-driven job matching platform.",
-        "features": "✅ AI resume analysis\n✅ Smart job matching\n✅ Interview scheduler",
-        "price": "$29/mo", "old_price": "$59/mo", "price_note": "Cancel anytime",
+    "E-commerce": {
+        "icon": "🛍️", "tagline": "Shop the Collection", "accent": "#e11d48",
+        "description": "Showcase your product with a compelling headline and description.",
+        "features": "✅ Free shipping\n✅ 30-day returns\n✅ Secure checkout",
+        "price": "$49", "old_price": "$79", "price_note": "Limited time offer",
     },
-    "Shaz Residency": {
-        "icon": "🏢", "tagline": "Real Estate", "accent": "#e17055",
-        "description": "Premium real estate platform across Pakistan.",
-        "features": "✅ Verified listings\n✅ 3D virtual tours\n✅ Price analytics",
-        "price": "Free", "old_price": "", "price_note": "Premium listings available",
+    "Event / Webinar": {
+        "icon": "🎟️", "tagline": "Join Us Live", "accent": "#7c3aed",
+        "description": "Tell people what your event is about and why they should attend.",
+        "features": "✅ Live Q&A\n✅ Expert speakers\n✅ Certificate of attendance",
+        "price": "Free", "old_price": "", "price_note": "Registration required",
     },
     "Custom": {
         "icon": "⭐", "tagline": "", "accent": "#6c63ff",
         "description": "", "features": "", "price": "", "old_price": "", "price_note": "",
     },
 }
+
+# Backward-compat alias -- historically named APP_PRESETS; several older
+# comments/AI-generation code paths still reference "Custom" by that name.
+APP_PRESETS = CATEGORY_PRESETS
+
+# User-saved templates (Item 32's "Save as My Template"): persisted as a
+# plain JSON list under this settings key, same pattern as every other
+# structured setting in this app (e.g. whatsapp_accounts) -- zero schema-
+# migration risk. Each entry has the same shape as a CATEGORY_PRESETS value
+# plus "name" and "style_name" (so a saved template also restores its own
+# visual style, not just copy).
+USER_TEMPLATE_SETTING_KEY = "card_user_templates"
 
 ACCENT_COLORS = [
     "#4f46e5",  # indigo
@@ -654,9 +679,23 @@ class CardCreatorV2(ctk.CTkFrame):
         # building calls) -- so only genuine edits made *after* a preset
         # finishes loading count as "unsaved," not the load's own setup.
         self._card_dirty = False
+        # Item 33: set by _import_html_file when a real external HTML file
+        # has been imported -- while active, _get_export_html-based
+        # regeneration is bypassed in favor of the imported HTML verbatim.
+        # Any subsequent section/field edit (via _schedule_preview) clears
+        # it again, since further edits mean the user wants the normal
+        # section-based builder back.
+        self._imported_html_active = False
+        self._imported_html_subject = ""
+        # Item 32: user-saved templates, loaded from the real settings DB so
+        # they persist across restarts. main_window may be None in a couple
+        # of lightweight test constructions, so this degrades to an empty
+        # list rather than crashing.
+        self._user_templates: List[dict] = self._load_user_templates()
         self._build_ui()
-        # Load default sections
-        self._load_preset("MessageCannon Pro")
+        # Load default sections -- a generic example, not any specific
+        # product's real branding (see CATEGORY_PRESETS' own comment above).
+        self._load_preset("SaaS Product")
         self.after(800, self._schedule_preview)
 
     # ─── Main layout ──────────────────────────────────────────────────────────
@@ -745,23 +784,30 @@ class CardCreatorV2(ctk.CTkFrame):
                      text_color=T.TEXT_MUTED, font=ctk.CTkFont(size=11)).pack(
             side="left", padx=(10, 0))
 
-        ctk.CTkLabel(top, text="OR START FROM A TEMPLATE",
+        tpl_hdr = ctk.CTkFrame(top, fg_color="transparent")
+        tpl_hdr.grid(row=2, column=0, padx=16, pady=(0, 4), sticky="ew")
+        tpl_hdr.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(tpl_hdr, text="OR START FROM A TEMPLATE",
                      text_color=T.TEXT_DIM, font=ctk.CTkFont(size=10, weight="bold")).grid(
-            row=2, column=0, padx=16, pady=(0, 4), sticky="w")
+            row=0, column=0, sticky="w")
+        # Item 32: lets a user (including Faraz, for his own 3 products) save
+        # whatever they've currently filled in as a personal, reusable
+        # template -- the real replacement for the old hardcoded per-app
+        # button list, now user-driven and growing with actual use instead
+        # of shipping someone else's branding to every customer.
+        ctk.CTkButton(tpl_hdr, text="💾 Save as My Template", width=1, height=22,
+                      fg_color="transparent", hover_color=T.BG_INNER,
+                      border_width=1, border_color=T.BG_BORDER,
+                      text_color=T.ACCENT_TEXT, font=ctk.CTkFont(size=10),
+                      command=self._open_save_card_template).grid(
+            row=0, column=1, sticky="e")
 
-        # App buttons — segmented preset picker
-        bf = ctk.CTkFrame(top, fg_color="transparent")
-        bf.grid(row=3, column=0, padx=16, pady=(0, 8), sticky="ew")
+        # App buttons — segmented preset picker (built-in categories, then
+        # any of the user's own saved templates appended after them).
+        self._preset_btn_row = ctk.CTkFrame(top, fg_color="transparent")
+        self._preset_btn_row.grid(row=3, column=0, padx=16, pady=(0, 8), sticky="ew")
         self._app_btns = {}
-        for i, (name, _) in enumerate(APP_PRESETS.items()):
-            b = ctk.CTkButton(bf, text=name, width=1,
-                              font=ctk.CTkFont(size=11),
-                              fg_color=T.BADGE_BG, hover_color=T.BG_BORDER,
-                              text_color=T.TEXT_HEAD,
-                              command=lambda n=name: self._confirm_and_load_preset(n))
-            b.grid(row=i//3, column=i%3, padx=3, pady=3, sticky="ew")
-            bf.grid_columnconfigure(i%3, weight=1)
-            self._app_btns[name] = b
+        self._rebuild_preset_buttons()
 
         # Task #8 (Round 2 item 4): light visual grouping pass -- with the
         # AI box, presets, identity fields, style controls, and contact info
@@ -779,9 +825,13 @@ class CardCreatorV2(ctk.CTkFrame):
         mf.grid(row=5, column=0, padx=16, pady=(0, 8), sticky="ew")
         mf.grid_columnconfigure((0,1,2,3), weight=1)
 
-        self._mname = ctk.StringVar(value="MessageCannon Pro")
-        self._micon = ctk.StringVar(value="📨")
-        self._mtag  = ctk.StringVar(value="Bulk Messaging Tool")
+        # These starting values are immediately overwritten by the
+        # _load_preset("SaaS Product") call at the end of __init__ -- kept
+        # generic here anyway (never any real product's own name) since a
+        # widget could theoretically be inspected before that runs.
+        self._mname = ctk.StringVar(value="My App")
+        self._micon = ctk.StringVar(value="⭐")
+        self._mtag  = ctk.StringVar(value="Short tagline")
         # Item 11.1 of the Live Testing Findings pass (Round 2): a real
         # drag-and-drop logo upload, replacing the plain emoji text field as
         # the primary path -- self._micon_image_uri holds the uploaded/
@@ -1021,6 +1071,21 @@ class CardCreatorV2(ctk.CTkFrame):
                       fg_color=T.DANGER, hover_color=T.DANGER_HOVER,
                       text_color=T.TEXT_HEAD,
                       command=self._show_bulk_send).grid(row=0,column=2,padx=(4,0),sticky="ew")
+
+        # Item 33: import an existing HTML file (a card built elsewhere,
+        # hand-coded, or previously exported) instead of rebuilding it in
+        # this tab's own section-based editor. Real state, wired through the
+        # same "Insert into Compose" hand-off below -- see _import_html_file.
+        ctk.CTkButton(bot, text="📂 Import HTML File", height=32,
+                      fg_color="transparent", hover_color=T.BG_INNER,
+                      border_width=1, border_color=T.BG_BORDER,
+                      text_color=T.ACCENT_TEXT, font=ctk.CTkFont(size=11),
+                      command=self._import_html_file).grid(
+            row=4, column=0, sticky="ew", pady=(6, 0))
+        self._imported_html_status = ctk.StringVar(value="")
+        ctk.CTkLabel(bot, textvariable=self._imported_html_status,
+                     text_color=T.TEXT_MUTED, font=ctk.CTkFont(size=10),
+                     wraplength=320).grid(row=5, column=0, pady=(4, 0))
 
         # Item 11.6 of the Live Testing Findings pass (Round 2): one-click
         # hand-off into the real Compose send pipelines, instead of the
@@ -1681,6 +1746,14 @@ class CardCreatorV2(ctk.CTkFrame):
         doubles as the "content is dirty" tracker for Item 17's preset-
         switch confirmation."""
         self._card_dirty = True
+        # Item 33: any real edit after an HTML import means the user wants
+        # the normal section-based builder back -- _import_html_file itself
+        # never calls this method, so a fresh import is never immediately
+        # undone by its own setup.
+        if self._imported_html_active:
+            self._imported_html_active = False
+            if hasattr(self, "_imported_html_status"):
+                self._imported_html_status.set("")
         if self._preview_job is not None:
             self.after_cancel(self._preview_job)
         self._preview_job = self.after(500, self._update_live_preview)
@@ -1833,16 +1906,40 @@ class CardCreatorV2(ctk.CTkFrame):
         where the real generated card HTML sends exactly as designed,
         substituted per-recipient by MainWindow._start_email_from_compose
         exactly like any other email template — see
-        MainWindow._enter_email_card_mode."""
+        MainWindow._enter_email_card_mode.
+
+        Item 33: when a real external HTML file is currently imported
+        (self._imported_html_active), that real HTML is sent as-is instead
+        of being regenerated from the section builder -- Email always goes
+        straight to Visual HTML Card mode (no rich-text-vs-card choice; the
+        entire point of importing external HTML is to preserve it, not
+        flatten it), WhatsApp gets a plain-text flattening of the real
+        imported HTML rather than the section-based _build_whatsapp_card_text."""
         if self.main_window is None:
             messagebox.showwarning(
                 "Unavailable", "Insert into Compose requires the main app window.")
             return
 
-        self._html = self._get_export_html()
-        meta = self._collect_meta()
         mw = self.main_window
         channel = mw._compose_channel_var.get()
+
+        if self._imported_html_active:
+            html = self._html
+            subject = self._imported_html_subject or "Imported Card"
+            if channel == "Email":
+                mw._show_view("Compose")
+                mw._enter_email_card_mode(html, subject)
+            else:
+                mw._show_view("Compose")
+                mw.message_textbox.delete("1.0", "end")
+                mw.message_textbox.insert("1.0", self._build_whatsapp_text_from_html(html))
+                mw._on_wa_message_changed()
+            show_toast(mw, "Imported card inserted into Compose.", kind="success")
+            self._status.set("✅ Imported card inserted into Compose.")
+            return
+
+        self._html = self._get_export_html()
+        meta = self._collect_meta()
         subject = (f"{meta['app_name']} — {meta['tagline']}"
                    if meta.get("tagline") else meta["app_name"])
 
@@ -1867,6 +1964,46 @@ class CardCreatorV2(ctk.CTkFrame):
 
         show_toast(mw, "Card inserted into Compose.", kind="success")
         self._status.set("✅ Inserted into Compose.")
+
+    def _build_whatsapp_text_from_html(self, html: str) -> str:
+        """Item 33's WhatsApp path for an imported HTML file: flattens to
+        real plain text (reusing MainWindow's own _strip_html_for_preview,
+        which already has the correct block/inline-tag spacing rules) and
+        appends the first real http(s) link found, if any, since WhatsApp
+        can't render a clickable button the way the email path can."""
+        text = self.main_window._strip_html_for_preview(html) if self.main_window else html
+        links = re.findall(r'''(?i)href\s*=\s*["'](https?://[^"']+)["']''', html)
+        if links and links[0] not in text:
+            text = f"{text}\n\n👉 {links[0]}"
+        return text.strip()
+
+    def _import_html_file(self) -> None:
+        """Item 33: a real file picker for an existing .html file (a card
+        built elsewhere, hand-coded, or previously exported), sanitized and
+        previewed exactly like a Card-Creator-generated card, ready to hand
+        off to Compose via the same _insert_into_compose above."""
+        path = filedialog.askopenfilename(
+            title="Import HTML File",
+            filetypes=[("HTML files", "*.html *.htm"), ("All files", "*.*")])
+        if not path:
+            return
+        try:
+            result = import_html_file(Path(path))
+        except HtmlImportError as exc:
+            messagebox.showerror("Import failed", str(exc))
+            return
+
+        self._html = result["html"]
+        self._imported_html_subject = result["subject"]
+        self._imported_html_active = True
+        filename = Path(path).name
+        self._imported_html_status.set(
+            f"📂 Imported: {filename} — click \"📩 Insert into Compose\" to send it "
+            "(editing any field/section below will exit imported mode).")
+        self._status.set(f"✅ Imported {filename} — preview updating…")
+        if self._ensure_html_frame():
+            self._html_frame.load_html(self._html)
+        show_toast(self, f"Imported {filename}", kind="success")
 
     # ─── Bulk Send dialog ─────────────────────────────────────────────────────
 
@@ -2700,8 +2837,21 @@ class CardCreatorV2(ctk.CTkFrame):
             self._template_var.set(style_name)
             self._apply_card_template(style_name)
 
+    def _find_user_template(self, name: str) -> Optional[dict]:
+        return next((t for t in self._user_templates if t.get("name") == name), None)
+
+    def _get_preset_by_name(self, name: str) -> dict:
+        """Item 32: presets now come from two sources -- the built-in
+        generic CATEGORY_PRESETS and the user's own saved templates. Both
+        share the same field shape, so _load_preset doesn't need to care
+        which one it got."""
+        user_tpl = self._find_user_template(name)
+        if user_tpl is not None:
+            return user_tpl
+        return CATEGORY_PRESETS.get(name, {})
+
     def _load_preset(self, name: str):
-        preset = APP_PRESETS.get(name, {})
+        preset = self._get_preset_by_name(name)
         self._mname.set(name)
         self._micon.set(preset.get("icon","⭐"))
         self._mtag.set(preset.get("tagline",""))
@@ -2742,6 +2892,16 @@ class CardCreatorV2(ctk.CTkFrame):
                 sec["data"].get("_price",ctk.StringVar()).set(preset.get("price",""))
                 sec["data"].get("_old",  ctk.StringVar()).set(preset.get("old_price",""))
                 sec["data"].get("_note", ctk.StringVar()).set(preset.get("price_note",""))
+                if preset.get("button_text"):
+                    sec["data"].get("_btn_text", ctk.StringVar()).set(preset["button_text"])
+                if preset.get("buy_url"):
+                    sec["data"].get("_buy_url", ctk.StringVar()).set(preset["buy_url"])
+        # A saved user template also remembers its own visual style, so
+        # loading it restores look AND copy together, not just copy.
+        style_name = preset.get("style_name")
+        if style_name and (style_name in CARD_STYLE_TEMPLATES or style_name == "Custom"):
+            self._template_var.set(style_name)
+            self._apply_card_template(style_name)
         self._status.set(f"Loaded: {name} — preview updating…")
         self._schedule_preview()
         # See _card_dirty's own comment in __init__: reset here, after this
@@ -2769,6 +2929,146 @@ class CardCreatorV2(ctk.CTkFrame):
         ):
             return
         self._load_preset(name)
+
+    # ─── Item 32: user-saved templates ─────────────────────────────────────
+
+    def _load_user_templates(self) -> List[dict]:
+        if self.main_window is None or not hasattr(self.main_window, "db"):
+            return []
+        try:
+            data = self.main_window.db.get_setting_json(USER_TEMPLATE_SETTING_KEY, [])
+        except Exception:
+            logger.warning("Failed to load user card templates", exc_info=True)
+            return []
+        return data if isinstance(data, list) else []
+
+    def _save_user_templates(self) -> None:
+        if self.main_window is None or not hasattr(self.main_window, "db"):
+            return
+        self.main_window.db.set_setting_json(USER_TEMPLATE_SETTING_KEY, self._user_templates)
+
+    def _rebuild_preset_buttons(self) -> None:
+        """(Re)builds the preset-picker button row from CATEGORY_PRESETS
+        followed by any of the user's own saved templates. Called once at
+        startup and again every time a template is saved, so a newly-saved
+        one appears immediately without needing a full rebuild."""
+        for child in list(self._preset_btn_row.winfo_children()):
+            child.destroy()
+        self._app_btns = {}
+        names = list(CATEGORY_PRESETS.keys()) + [t["name"] for t in self._user_templates]
+        for i, name in enumerate(names):
+            is_user = name not in CATEGORY_PRESETS
+            b = ctk.CTkButton(
+                self._preset_btn_row,
+                text=(f"💾 {name}" if is_user else name), width=1,
+                font=ctk.CTkFont(size=11),
+                fg_color=T.BADGE_BG, hover_color=T.BG_BORDER,
+                text_color=T.TEXT_HEAD,
+                command=lambda n=name: self._confirm_and_load_preset(n))
+            b.grid(row=i//3, column=i%3, padx=3, pady=3, sticky="ew")
+            self._preset_btn_row.grid_columnconfigure(i%3, weight=1)
+            self._app_btns[name] = b
+
+    def _collect_current_as_preset_fields(self) -> dict:
+        """Reads the currently-built sections directly (NOT the visibility-
+        filtered _collect_sections(), since a saved template should capture
+        real content regardless of a section's current Show/Hide state) to
+        produce a preset-shaped dict: description from the first text
+        section, features from the first features section, price fields
+        from the first price section -- mirroring exactly what _load_preset
+        itself later re-hydrates from this same shape."""
+        description = features = price = old_price = price_note = ""
+        button_text = buy_url = ""
+        for sec in self._sections:
+            stype, data = sec["type"], sec["data"]
+            if stype == "text" and not description:
+                tb = data.get("_text_box")
+                description = tb.get("1.0", "end").strip() if tb else ""
+            elif stype == "features" and not features:
+                tb = data.get("_box")
+                features = tb.get("1.0", "end").strip() if tb else ""
+            elif stype == "price" and not price and not old_price:
+                price = data.get("_price", ctk.StringVar()).get()
+                old_price = data.get("_old", ctk.StringVar()).get()
+                price_note = data.get("_note", ctk.StringVar()).get()
+                button_text = data.get("_btn_text", ctk.StringVar()).get().strip()
+                buy_url = _clean_url(data.get("_buy_url", ctk.StringVar()).get())
+        return {
+            "icon": self._micon.get().strip() or "⭐",
+            "tagline": self._mtag.get().strip(),
+            "accent": self._accent,
+            "description": description,
+            "features": features,
+            "price": price,
+            "old_price": old_price,
+            "price_note": price_note,
+            "button_text": button_text,
+            "buy_url": buy_url,
+            "style_name": self._style_name,
+        }
+
+    def save_current_as_user_template(self, name: str) -> str:
+        """The real save logic behind "Save as My Template", split out from
+        the dialog's own do_save() closure so it's directly testable without
+        needing to drive the dialog's internal widgets. Returns an empty
+        string on success, or a human-readable error message on failure
+        (name blank / reserved) -- the dialog shows that message inline
+        instead of a separate messagebox."""
+        name = name.strip()
+        if not name:
+            return "Enter a template name."
+        if name in CATEGORY_PRESETS:
+            return "That name is reserved by a built-in template."
+        fields = self._collect_current_as_preset_fields()
+        fields["name"] = name
+        # Saving under an existing name updates it in place, rather than
+        # silently accumulating duplicates.
+        self._user_templates = [t for t in self._user_templates if t.get("name") != name]
+        self._user_templates.append(fields)
+        self._save_user_templates()
+        self._rebuild_preset_buttons()
+        return ""
+
+    def _open_save_card_template(self) -> None:
+        """Item 32: save the currently-filled-in card as a personal,
+        reusable template -- the real replacement for the old hardcoded
+        per-app button list. Same dialog shape as main_window's own
+        "Save as Template" for Compose (name entry, Escape to cancel,
+        Enter to save), for a consistent feel."""
+        dlg = ctk.CTkToplevel(self)
+        dlg.title("Save as My Template")
+        center_on_parent(dlg, 420, 200, self.main_window or self)
+        dlg.resizable(False, False)
+        dlg.transient(self.winfo_toplevel())
+        dlg.grab_set()
+        dlg.configure(fg_color=T.BG_MAIN)
+        dlg.bind("<Escape>", lambda _e: dlg.destroy())
+
+        ctk.CTkLabel(dlg, text="Template name", text_color=T.TEXT_HEAD).pack(
+            anchor="w", padx=20, pady=(20, 4))
+        name_var = ctk.StringVar(value=self._mname.get().strip())
+        name_entry = ctk.CTkEntry(dlg, textvariable=name_var, fg_color=T.BG_INNER,
+                                   border_color=T.BG_BORDER, text_color=T.TEXT_HEAD)
+        name_entry.pack(fill="x", padx=20)
+        name_entry.focus_set()
+
+        status_var = ctk.StringVar(value="")
+        ctk.CTkLabel(dlg, textvariable=status_var, text_color=T.DANGER_ON_BADGE,
+                     font=ctk.CTkFont(size=11)).pack(anchor="w", padx=20, pady=(6, 0))
+
+        def do_save() -> None:
+            name = name_var.get().strip()
+            error = self.save_current_as_user_template(name)
+            if error:
+                status_var.set(error)
+                return
+            dlg.destroy()
+            show_toast(self, f'Template "{name}" saved.', kind="success")
+
+        ctk.CTkButton(dlg, text="Save Template", fg_color=T.ACCENT, hover_color=T.ACCENT_HOVER,
+                      text_color=T.TEXT_HEAD, font=ctk.CTkFont(size=13, weight="bold"),
+                      command=do_save).pack(pady=(16, 0))
+        name_entry.bind("<Return>", lambda _e: do_save())
 
 
 # ── Integration helper ────────────────────────────────────────────────────────

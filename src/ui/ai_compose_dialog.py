@@ -68,10 +68,23 @@ class AIComposeDialog(ctk.CTkToplevel):
                      font=ctk.CTkFont(size=11), wraplength=560, justify="left").grid(
             row=3, column=0, sticky="w", pady=(8, 0))
 
+        # Item 34 (sub-item 3): a genuine A/B test of MESSAGING STRATEGY --
+        # exactly 2 variants, deliberately written from different named
+        # persuasion angles (benefit vs urgency), not just a cosmetic
+        # reword of one idea like the generic 3-variation mode can produce.
+        if not hasattr(self, "_ab_mode_var"):
+            self._ab_mode_var = ctk.BooleanVar(value=False)
+        ctk.CTkCheckBox(
+            self.content, text="Generate an A/B pair (2 distinct angles: benefit vs urgency) "
+                                "instead of 3 general variations",
+            variable=self._ab_mode_var, text_color=T.TEXT_MUTED, font=ctk.CTkFont(size=11),
+            fg_color=T.ACCENT, border_color=T.ACCENT, hover_color=T.ACCENT_HOVER,
+            checkmark_color=T.TEXT_HEAD).grid(row=4, column=0, sticky="w", pady=(10, 0))
+
         ctk.CTkButton(self.content, text="✨ Generate", height=40, width=160,
                       fg_color=T.ACCENT, hover_color=T.ACCENT_HOVER, text_color=T.TEXT_HEAD,
                       font=ctk.CTkFont(size=13, weight="bold"),
-                      command=self._generate).grid(row=4, column=0, sticky="w", pady=(14, 0))
+                      command=self._generate).grid(row=5, column=0, sticky="w", pady=(14, 0))
 
     def _generate(self) -> None:
         api_key = self.main_window._ai_api_key.get()
@@ -86,13 +99,25 @@ class AIComposeDialog(ctk.CTkToplevel):
             return
 
         sample_vars = self._sample_variables()
+        ab_mode = self._ab_mode_var.get()
         self._render_loading()
 
         def worker():
             try:
-                variations = ai_service.generate_message_variations(
-                    brief, self.channel, api_key, count=3, sample_variables=sample_vars,
-                    provider=self.main_window._ai_provider.get())
+                if ab_mode:
+                    raw_variants = ai_service.generate_ab_variants(
+                        brief, self.channel, api_key, sample_variables=sample_vars,
+                        provider=self.main_window._ai_provider.get())
+                    # Normalize "angle" -> "label" so the shared card
+                    # renderer below needs no A/B-specific branching.
+                    variations = [
+                        {**v, "label": v.get("angle", "").title() or f"Variant {i + 1}"}
+                        for i, v in enumerate(raw_variants)
+                    ]
+                else:
+                    variations = ai_service.generate_message_variations(
+                        brief, self.channel, api_key, count=3, sample_variables=sample_vars,
+                        provider=self.main_window._ai_provider.get())
             except AIServiceError as ex:
                 # Computed here, not inside the deferred lambda -- `ex` is
                 # auto-deleted by Python at except-block exit, before

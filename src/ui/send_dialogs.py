@@ -10,6 +10,7 @@ import customtkinter as ctk
 
 from . import theme as T
 from .window_utils import center_on_parent
+from ..core.send_time_advisor import recommend_send_window
 
 
 def format_eta(total_seconds: float) -> str:
@@ -28,7 +29,8 @@ class SendConfirmationDialog(ctk.CTkToplevel):
     rendered preview, and an explicit confirmation before anything sends."""
 
     def __init__(self, main_window, channel: str, recipient_count: int,
-                 delay_seconds: float, preview_lines: list, on_confirm, subject: str = ""):
+                 delay_seconds: float, preview_lines: list, on_confirm, subject: str = "",
+                 quality_flag_count: int = 0):
         super().__init__(main_window)
         self.on_confirm = on_confirm
         self.title("Confirm Send")
@@ -41,7 +43,6 @@ class SendConfirmationDialog(ctk.CTkToplevel):
         self.bind("<Return>", lambda _e: self._confirm())
 
         self.grid_columnconfigure(0, weight=1)
-        self.grid_rowconfigure(4 if subject else 3, weight=1)
 
         ctk.CTkLabel(self, text=f"📤 Send via {channel.capitalize()}?",
                      font=ctk.CTkFont(size=18, weight="bold"), text_color=T.TEXT_HEAD).grid(
@@ -64,10 +65,37 @@ class SendConfirmationDialog(ctk.CTkToplevel):
             ctk.CTkLabel(cell, text=value, text_color=T.TEXT_HEAD,
                          font=ctk.CTkFont(size=16, weight="bold")).pack(anchor="w")
 
+        next_row = 2
+
+        # Item 34 (sub-item 2): a general best-practice send-time window,
+        # computed purely from `channel` -- never claimed to be based on
+        # this user's own send history (this app has no open/click
+        # tracking), the note itself says so explicitly.
+        rec = recommend_send_window(channel)
+        ctk.CTkLabel(
+            self, text=f"🕒 Best time to send (general guidance): {rec.window_text}",
+            text_color=T.TEXT_MUTED, font=ctk.CTkFont(size=10),
+            wraplength=500, justify="left").grid(
+            row=next_row, column=0, padx=24, pady=(0, 6), sticky="w")
+        next_row += 1
+
+        # Item 34 (sub-item 4): a real, rule-based contact-quality flag --
+        # only rendered when the caller found role-based addresses (info@,
+        # noreply@, ...) among the real recipients about to be sent to.
+        if quality_flag_count:
+            ctk.CTkLabel(
+                self,
+                text=f"⚠ {quality_flag_count} recipient(s) look like role-based addresses "
+                     "(info@, noreply@, support@, ...) — these often have lower "
+                     "open/reply rates.",
+                text_color=T.DANGER_ON_BADGE, font=ctk.CTkFont(size=10),
+                wraplength=500, justify="left").grid(
+                row=next_row, column=0, padx=24, pady=(0, 8), sticky="w")
+            next_row += 1
+
         # Item 10 of the Live Testing Findings pass: an explicit subject-
         # line row for email sends (WhatsApp has no subject, so `subject`
         # is only ever passed non-empty from the email compose path).
-        next_row = 2
         if subject:
             subj_row = ctk.CTkFrame(self, fg_color="transparent")
             subj_row.grid(row=next_row, column=0, padx=24, pady=(0, 12), sticky="ew")
@@ -81,16 +109,18 @@ class SendConfirmationDialog(ctk.CTkToplevel):
         ctk.CTkLabel(self, text="Preview (real recipient data)",
                      text_color=T.TEXT_HEAD, font=ctk.CTkFont(size=12, weight="bold")).grid(
             row=next_row, column=0, padx=24, pady=(0, 4), sticky="nw")
+        preview_row = next_row + 1
+        self.grid_rowconfigure(preview_row, weight=1)
         preview_box = ctk.CTkTextbox(self, fg_color=T.BG_INNER, text_color=T.TEXT_HEAD,
                                       border_color=T.BG_BORDER, border_width=1,
                                       font=ctk.CTkFont(size=12))
-        preview_box.grid(row=next_row + 1, column=0, padx=24, pady=(0, 12), sticky="nsew")
+        preview_box.grid(row=preview_row, column=0, padx=24, pady=(0, 12), sticky="nsew")
         preview_box.insert("1.0", "\n\n---\n\n".join(preview_lines) if preview_lines
                             else "No recipients selected.")
         preview_box.configure(state="disabled")
 
         footer = ctk.CTkFrame(self, fg_color="transparent")
-        footer.grid(row=next_row + 2, column=0, padx=24, pady=(0, 20), sticky="ew")
+        footer.grid(row=preview_row + 1, column=0, padx=24, pady=(0, 20), sticky="ew")
         footer.grid_columnconfigure(0, weight=1)
         ctk.CTkButton(footer, text="Cancel", width=100, fg_color=T.BADGE_BG,
                       hover_color=T.BG_BORDER, text_color=T.TEXT_HEAD,
@@ -123,7 +153,7 @@ class SendReportDialog(ctk.CTkToplevel):
 
     def __init__(self, main_window, channel: str, sent: int, failed: int,
                  failed_details: list, on_retry_failed=None, on_export=None,
-                 on_check_bounces=None, bounced: int = 0):
+                 on_check_bounces=None, bounced: int = 0, on_ai_summary=None):
         super().__init__(main_window)
         self.title("Campaign Report")
         center_on_parent(self, 520, 600 if on_check_bounces else 560, main_window)
@@ -134,6 +164,7 @@ class SendReportDialog(ctk.CTkToplevel):
         self.bind("<Escape>", lambda _e: self.destroy())
 
         self.on_check_bounces = on_check_bounces
+        self.on_ai_summary = on_ai_summary
         self._sent = sent
         self._bounced = bounced
         self._bounce_checked = False
@@ -223,8 +254,52 @@ class SendReportDialog(ctk.CTkToplevel):
             ctk.CTkButton(footer, text="Export Report", fg_color=T.BADGE_BG,
                           hover_color=T.BG_BORDER, text_color=T.TEXT_HEAD,
                           command=on_export).pack(side="left", padx=(0, 10))
+        if on_ai_summary:
+            # Item 34 (sub-item 5): a plain-language, AI-generated summary
+            # of THIS real completed campaign, grounded in the real numbers
+            # already shown above -- never invented data.
+            self._ai_summary_btn = ctk.CTkButton(
+                footer, text="🤖 AI Summary", corner_radius=6,
+                fg_color=T.BG_INNER, hover_color=T.BG_BORDER,
+                border_width=1, border_color=T.ACCENT, text_color=T.ACCENT_TEXT,
+                font=ctk.CTkFont(size=11, weight="bold"),
+                command=self._run_ai_summary)
+            self._ai_summary_btn.pack(side="left", padx=(0, 10))
         ctk.CTkButton(footer, text="Close", fg_color=T.ACCENT, hover_color=T.ACCENT_HOVER,
                       text_color=T.TEXT_HEAD, command=self.destroy).pack(side="right")
+
+    def _run_ai_summary(self) -> None:
+        if not self.on_ai_summary:
+            return
+        self._ai_summary_btn.configure(state="disabled", text="Summarizing…")
+        self.on_ai_summary(self._on_ai_summary_result)
+
+    def _on_ai_summary_result(self, ok: bool, summary: str, error: str = "") -> None:
+        if not self.winfo_exists():
+            return
+        self._ai_summary_btn.configure(state="normal", text="🤖 AI Summary")
+        if not ok:
+            from tkinter import messagebox
+            messagebox.showerror("AI summary failed", error or "Unknown error.")
+            return
+        dlg = ctk.CTkToplevel(self)
+        dlg.title("Campaign Summary")
+        center_on_parent(dlg, 460, 320, self)
+        dlg.resizable(False, False)
+        dlg.transient(self)
+        dlg.grab_set()
+        dlg.configure(fg_color=T.BG_MAIN)
+        dlg.bind("<Escape>", lambda _e: dlg.destroy())
+        ctk.CTkLabel(dlg, text="🤖 AI Campaign Summary", font=ctk.CTkFont(size=16, weight="bold"),
+                     text_color=T.TEXT_HEAD).pack(anchor="w", padx=20, pady=(20, 10))
+        box = ctk.CTkTextbox(dlg, fg_color=T.BG_INNER, text_color=T.TEXT_HEAD,
+                              border_color=T.BG_BORDER, border_width=1,
+                              font=ctk.CTkFont(size=12), height=180)
+        box.pack(fill="both", expand=True, padx=20, pady=(0, 12))
+        box.insert("1.0", summary)
+        box.configure(state="disabled")
+        ctk.CTkButton(dlg, text="Close", fg_color=T.ACCENT, hover_color=T.ACCENT_HOVER,
+                      text_color=T.TEXT_HEAD, command=dlg.destroy).pack(pady=(0, 18))
 
     def _run_bounce_check(self) -> None:
         if not self.on_check_bounces:
@@ -266,12 +341,14 @@ class SendReportDialog(ctk.CTkToplevel):
 
 
 def show_send_confirmation(main_window, channel, recipient_count, delay_seconds, preview_lines,
-                            on_confirm, subject: str = ""):
+                            on_confirm, subject: str = "", quality_flag_count: int = 0):
     return SendConfirmationDialog(main_window, channel, recipient_count, delay_seconds,
-                                   preview_lines, on_confirm, subject=subject)
+                                   preview_lines, on_confirm, subject=subject,
+                                   quality_flag_count=quality_flag_count)
 
 
 def show_send_report(main_window, channel, sent, failed, failed_details, on_retry_failed=None,
-                      on_export=None, on_check_bounces=None, bounced: int = 0):
+                      on_export=None, on_check_bounces=None, bounced: int = 0, on_ai_summary=None):
     return SendReportDialog(main_window, channel, sent, failed, failed_details, on_retry_failed,
-                             on_export, on_check_bounces=on_check_bounces, bounced=bounced)
+                             on_export, on_check_bounces=on_check_bounces, bounced=bounced,
+                             on_ai_summary=on_ai_summary)
