@@ -1,0 +1,7 @@
+*.pdf -text binary
+*.exe -text binary
+*.dmg -text binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.ico binary

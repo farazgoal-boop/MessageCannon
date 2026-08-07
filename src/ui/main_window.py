@@ -28,6 +28,7 @@ from ..ui.card_creator_tab import build_card_creator_view, HAS_HTML_PREVIEW
 from ..ui.reports_chart import ReportsChart
 from ..ui.update_dialog import show_update_dialog
 from ..ui.accessibility import enable_keyboard_accessibility
+from ..ui.tour import start_guided_tour
 from ..core.update_checker import check_for_update, spawn_update_after_current_process_exits, UpdateInfo
 
 try:
@@ -1064,6 +1065,26 @@ class MainWindow(ctk.CTk):
             font=ctk.CTkFont(size=14),
             command=lambda: self._show_view("Settings"),
         ).pack(side="left", padx=3)
+
+        # Item 39 (Guided Tour): a permanent, always-available entry point —
+        # not just a first-run popup like the Setup Wizard — so a user can
+        # get a refresher walkthrough anytime. Re-triggerable: every click
+        # restarts the tour from step 1, since start_guided_tour() carries
+        # no "already seen" state at all.
+        self.header_tour_btn = ctk.CTkButton(
+            header_right,
+            text="?",
+            width=34,
+            height=34,
+            corner_radius=16,
+            fg_color=T.BADGE_BG,
+            hover_color=T.BG_BORDER,
+            text_color=T.ACCENT_TEXT,
+            font=ctk.CTkFont(size=14, weight="bold"),
+            command=lambda: start_guided_tour(self),
+        )
+        self.header_tour_btn.pack(side="left", padx=3)
+        add_tooltip(self.header_tour_btn, "Take a Tour — see how everything works, step by step.")
 
         self.header_pill = ctk.CTkLabel(
             header_right,
@@ -3176,11 +3197,22 @@ class MainWindow(ctk.CTk):
             text_color=T.TEXT_MUTED, font=ctk.CTkFont(size=11),
             wraplength=380, justify="left").pack(anchor="w", padx=12, pady=(0, 10))
 
-        ctk.CTkButton(system_card, text="Re-run Setup Wizard", corner_radius=8,
+        system_actions = ctk.CTkFrame(system_card, fg_color="transparent")
+        system_actions.grid(row=6, column=0, padx=16, pady=(0, 16), sticky="w")
+        ctk.CTkButton(system_actions, text="Re-run Setup Wizard", corner_radius=8,
                       fg_color=T.ACCENT, hover_color=T.ACCENT_HOVER,
                       text_color=T.TEXT_HEAD,
-                      command=self._reopen_setup_wizard).grid(
-            row=6, column=0, padx=16, pady=(0, 16), sticky="w")
+                      command=self._reopen_setup_wizard).pack(side="left", padx=(0, 8))
+        # Item 39: same on-demand-help tier as "Re-run Setup Wizard" right
+        # next to it — outline-secondary styling (matches History's
+        # "Duplicate" button / Compose's Pause-Resume, Item 27's own
+        # established secondary-action recipe) since this isn't the primary
+        # action on this card.
+        ctk.CTkButton(system_actions, text="🧭 Take a Tour", corner_radius=8,
+                      fg_color=T.BG_INNER, hover_color=T.BG_BORDER,
+                      border_width=1, border_color=T.BG_BORDER,
+                      text_color=T.ACCENT_TEXT,
+                      command=lambda: start_guided_tour(self)).pack(side="left")
 
         license_card = ctk.CTkFrame(frame, fg_color=T.BG_SURFACE, corner_radius=14,
                                     border_width=1, border_color=T.BG_BORDER)

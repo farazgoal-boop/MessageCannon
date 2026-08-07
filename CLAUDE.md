@@ -5395,3 +5395,181 @@ untouched, since that's the app promoting itself, not another product.
 files, 15 new files (7 new `src/` modules/scripts, 8 new/extended test files beyond what's already
 listed above). Per this session's own established discipline, committing and pushing are the user's
 own explicit call, not assumed from this task's own scope.
+
+## Guided Tour + User Manual (Items 39-40, raised 2026-08-07)
+
+**CHECKPOINT: Item 39 (reusable, re-triggerable guided tour) complete.**
+
+New `src/ui/tour.py`: `TOUR_STEPS` (9 steps — a welcome card, then one each
+for Campaigns, Contacts, Compose, Cards, History/bounce-tracking, Settings/
+license, the sidebar update badge, and a closing card), `GuidedTourDialog`
+(a `CTkToplevel`, same modal/Escape/center-on-parent pattern as every other
+dialog in this app), and a `_SpotlightRing` helper.
+
+Spotlight mechanic, chosen deliberately over a plain floating-card
+slideshow: CustomTkinter/Tk has no per-widget alpha or screen-dim
+capability — the same structural limitation already hit and documented for
+the signature view-transition animation and the sidebar's own gradient
+accent bar. A true dimmed-background spotlight would need screen-capture
+compositing, already ruled out elsewhere in this app as fragile/platform-
+specific. Instead, four thin, real, positioned `CTkToplevel` bars
+(`overrideredirect` + `-topmost`, the same technique already proven by
+`toast.py`/`tooltip.py`) are drawn to form a rectangular accent-colored ring
+directly around the real target widget's own on-screen bounding box — a
+step that navigates to a real view (e.g. "Contacts") really calls
+`main_window._show_view("Contacts")` first, so the ring wraps the real,
+live sidebar button, not an illustration.
+
+No embedded thumbnails/screenshots on the tour cards — each step instead
+shows a large glyph reusing the app's own existing icon language (the same
+⊞ ☰ ✉ ◈ ❏ ⚙ glyphs already used in the sidebar nav), for the same reason
+Item 40's manual carries no live screenshots either — see that item's own
+entry below for the full reasoning.
+
+**Two real, permanent entry points** (not a first-run-only popup like the
+Setup Wizard): a "?" button in the header, right next to the pre-existing
+Settings gear icon (`main_window.header_tour_btn`), and a "🧭 Take a Tour"
+button in Settings → System Experience, right next to "Re-run Setup
+Wizard" (both are on-demand, re-runnable help actions, so they share a
+row). Re-triggering always restarts at step 1 — `start_guided_tour()`
+carries no "already seen" persisted state at all, and if a tour is already
+open, it's torn down first rather than left running alongside a second
+copy (`GuidedTourDialog._finish()` called on the stale instance).
+`_finish()` also restores whichever view was active before the tour
+opened, so touring through Contacts/Compose/etc. for spotlighting doesn't
+strand the user on a screen they didn't ask to visit.
+
+**Verified**: new `tests/ui/test_guided_tour.py` (13 tests, against the
+shared `app` fixture) — every step's `view` (where set) names a real view
+this app actually builds; the header button and Settings button both
+exist and are wired; opening starts at step 1 with correct progress text
+and a disabled Back button; Next genuinely navigates the real underlying
+view (`app._active_view` actually changes, not just the card text); Back
+returns to the previous step and its view; the spotlight ring's real
+`winfo_rootx()`/`winfo_ismapped()` state is checked directly against a
+real sidebar button, not assumed from the positioning math alone; a
+throwaway ring correctly hides for a `None`/missing target; the last step
+shows "Finish" and clicking it destroys the dialog; `_finish()` restores
+the pre-tour view; Skip closes immediately; Escape closes; and
+re-triggering while a tour is already mid-way through restarts a fresh
+dialog at step 1 and tears down the stale one (confirmed via
+`winfo_exists()`). All 13 pass.
+
+Full regression check per this file's standing discipline, run in 3
+batches (a single `-n 49` invocation was avoided given this session's own
+real, observed machine load — same reasoning already documented elsewhere
+in this file for splitting large parallel runs): **299/300** functional UI
+tests across all 45 non-timing files, **7/7** navigation-timing alone,
+**1/1** close-button alone, **2/2** nav-accent-timing alone, **204/204**
+plain `tests/` (was 199, +5 new — see Item 40 below). The one non-pass,
+`test_card_creator_premium.py::test_icon_zone_hover_changes_border_and_
+background`, is a real, pre-existing failure **unrelated to this work** —
+confirmed via `git stash` that it fails identically on a clean checkout at
+this session's own starting commit (`85b073c`), before any of Item 39/40's
+changes; `card_creator_tab.py` was never touched by either item. Flagged
+here rather than silently left unmentioned, not fixed, since it's outside
+this pass's own scope.
+
+**CHECKPOINT: Item 40 (non-technical user manual) complete.**
+
+Found `docs/user_guide.md` (956 lines) already existed from earlier in this
+project's history, but checked it against the real, current app before
+reusing anything from it, per this file's own "study before building"
+discipline — and found it materially stale: a 7-item sidebar with a
+"Dashboard"/"Reports" split that doesn't exist (the real nav is
+Campaigns/Contacts/Compose/History/Cards/Settings), a "sun/moon icon"
+theme toggle that doesn't exist (the real control is a dropdown in
+Settings), and the pre-Item-36 shared-passkey license description instead
+of the real machine-bound Request-Code/Activation-Code scheme. Wrote a new
+manual from scratch instead, verifying every concrete claim (sidebar nav
+names, the real license-gate dialog's actual fields, `PhoneValidator`'s
+real normalization rules, the real default delay/jitter/daily-limit
+values, the real Compose/Cards/History features built across this whole
+session) directly against the current source rather than trusting the old
+document.
+
+**Structure**: `docs/user_manual_content.py` holds the manual as
+structured data (`CONTENT`, a list of typed blocks — heading/paragraph/
+list/table/screenshot-callout/tip/caution) rather than raw prose in two
+different formats, so the Markdown file and the PDF render from one single
+source instead of needing to be kept in sync by hand.
+`scripts/build_user_manual.py` renders `CONTENT` into both
+`docs/getting_started_guide.md` (plain Markdown) and
+`docs/MessageCannon_Pro_User_Manual.pdf` (a real PDF, via `reportlab` —
+already a project dependency, not a new one). Content covers, in the exact
+order requested: installation (Windows/macOS/Linux, the real installer
+filenames from this session's own verified releases), the first-run
+license activation + Setup Wizard (Request Code/Activation Code, Gmail App
+Password steps, the real WhatsApp QR-scan flow), importing contacts (file
+format, phone normalization rules, the real import-review screen),
+composing with AI (the real "Insert variable" pill dropdown from Item 9,
+`Generate with AI`, the Subject-line optimizer from Round 3's Item 34),
+creating a marketing card (the real template gallery, logo upload, price/
+discount/Buy-Now-button fields, Insert-into-Compose as the one real send
+path), sending safely (the real pre-send confirmation dialog, the real
+default delay/jitter/daily-limit/warm-up values, the WhatsApp ban-risk
+warning), checking delivery/bounce results (the real Sent/Bounced/
+Delivered-assumed model from the bounce-detection feature), the Item 39
+guided tour as a refresher, and a troubleshooting table covering the real
+error messages this session has actually produced/fixed (SMTP auth
+failures, WhatsApp QR issues, import rejections, license mismatches,
+update failures, the bounce-checker's IMAP-provider limitation).
+
+**No live screenshots were embedded — a deliberate, disclosed decision,
+not an oversight or a shortcut.** This exact sandbox already had a real
+incident this session (logged above, Final Completion Pass Item 5): a
+screenshot script captured the *developer's own unrelated browser window*
+mid-script, because this is Faraz's live, actively-used desktop, not an
+isolated CI machine — `PIL.ImageGrab` captures whatever pixels are
+physically on screen at a given region, regardless of which window the
+script intends, and that risk can't be engineered away by being more
+careful in the script since it depends on what the human does on their own
+machine in real time between capture calls. Rather than risk a repeat (or
+silently skip mentioning why), every visual moment in the manual instead
+carries a precise, specific "📸 Screenshot needed: <exactly what to
+capture>" callout (9 of them) for Faraz to fill in on his own machine
+before sharing the guide externally — exactly the fallback this item's own
+instructions explicitly anticipated and allowed for.
+
+**Verified**: new `tests/test_user_manual_content.py` (5 tests, no Tk
+needed) — every content block has a recognized type and a real, non-empty
+payload (catches a malformed block, not just a missing one); the manual's
+top-level sections cover every topic Item 40 asked for, in the exact
+requested order (installation → setup wizard → importing contacts →
+composing/AI → card creation → sending safely → bounce checking → guided
+tour → troubleshooting — checked via heading substring positions, not just
+presence); every screenshot callout is a specific instruction (length-
+gated) rather than a generic stub; the support email/version are real,
+well-formed values; and the Markdown renderer actually includes one
+callout marker per real `"shot"` block and every real `h1` heading text.
+All 5 pass. Manually confirmed the PDF itself is real and substantive, not
+just claimed: 15 pages, 18,398 characters of extractable text (via
+`pypdf`), the real title/support email present, and exactly 9 "Screenshot
+needed" callouts matching the 9 `"shot"` blocks in the source data.
+
+A real, caught-before-shipping bug in the manual's own content: the
+"Reading the results" bounce table originally had no real header row (its
+Python list's first row, `["Sent", "..."]`, was being read as the column
+header by the shared renderer, so "Sent" rendered as a bold header instead
+of a normal table row alongside Bounced/Delivered). Fixed by adding a real
+`["Result", "What it means"]` header row; re-verified in both the
+regenerated Markdown and PDF output.
+
+Full regression check: the same 3-batch run recorded under Item 39 above
+already covers this item too, since both were verified together in one
+pass — **204/204** plain `tests/` includes this item's 5 new tests.
+
+**Final deliverable status**: Item 39 (guided tour, re-triggerable, real
+spotlighting, proven via a real 13-test run-through) — done. Item 40
+(manual produced as both `docs/getting_started_guide.md` and
+`docs/MessageCannon_Pro_User_Manual.pdf`, 9 sections marked for Faraz's own
+screenshots, none fabricated) — done. Full regression suite re-run with no
+regressions from either item (the one non-passing test is real,
+pre-existing, and unrelated — see above).
+
+**Git state**: none of Item 39/40's changes are committed — `src/ui/tour.py`,
+`docs/user_manual_content.py`, `scripts/build_user_manual.py`, the two
+generated manual files, `tests/ui/test_guided_tour.py`,
+`tests/test_user_manual_content.py`, plus edits to `src/ui/main_window.py`
+and `tests/ui/README.md`, all sit uncommitted in the working tree pending
+the user's own review, per this session's standing discipline.
