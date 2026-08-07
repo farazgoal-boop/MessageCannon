@@ -5573,3 +5573,215 @@ generated manual files, `tests/ui/test_guided_tour.py`,
 `tests/test_user_manual_content.py`, plus edits to `src/ui/main_window.py`
 and `tests/ui/README.md`, all sit uncommitted in the working tree pending
 the user's own review, per this session's standing discipline.
+
+## Item 39 v2 — Guided Tour redesign: cursor-following "hover to discover" (2026-08-08)
+
+Live feedback after using Item 39's original click-through-cards tour: it felt basic/generic, not
+memorable. Explicit new spec: toggle "Tour Mode" on and leave the real app fully usable underneath
+— as the cursor moves near a real feature, a floating detail card should chase it and explain what's
+under it in real time, with the real widget spotlighted, discovered items visibly marked, a "X of Y
+explored" indicator, Esc/Exit Tour to leave anytime, and a real demo (screenshots) before calling it
+done. `src/ui/tour.py` was rewritten from scratch — the old `GuidedTourDialog`/`TOUR_STEPS`/
+`start_guided_tour` (a modal, forced-navigation Next/Back sequence) are gone entirely.
+
+**Architecture**: `TourMode` (constructed once in `MainWindow.__init__` as `self.tour_mode`, reused
+across repeated enable()/disable() cycles). `DISCOVERABLE_ITEMS` is a flat list of `{id, icon,
+title, description, getter}` — no forced view navigation at all; a view-specific item (Compose's
+"Generate with AI", the Card Creator's template gallery) only becomes hoverable once the user
+navigates there themselves, exactly like a real feature would be discovered in normal use. Since
+this app already builds every view upfront at startup (not lazily), every getter resolves to a real,
+already-constructed widget regardless of which view is currently active — Enter/Leave binding
+doesn't need the widget to be mapped, only real.
+
+Every visual piece is a small, separately-positioned `CTkToplevel` (`overrideredirect` +
+`-topmost`), continuously repositioned against real widget/cursor coordinates — the same "no
+per-widget alpha, no CSS `:hover`" constraint already documented repeatedly elsewhere in this file
+for the signature view-transition and the sidebar's gradient accent bar. Two genuine engineering
+pieces beyond what any other dialog in this app does:
+- **Real alpha fade** in/out for the detail card and cursor glow (`-alpha`, a real, already-working
+  whole-window attribute on this stack — `toast.py` already sets a static one; here it's animated
+  via a cancelable `.after()`-stepped loop, `FADE_STEPS`/`FADE_STEP_MS`).
+- **Real click-through overlays.** The glow dot sits exactly at the cursor's own position by design
+  — meaning it's exactly the spot a real click would land. Every purely-visual overlay (ring, card,
+  glow, discovery badges) is marked `WS_EX_LAYERED | WS_EX_TRANSPARENT` via a small, disclosed,
+  try/except-wrapped ctypes call (`_make_click_through`) — same established precedent as
+  `utils/dpi.py`'s DPI-awareness call, not a new pattern. **Verified at the real OS level, not just
+  "no exception was raised"**: a diagnostic script read back `GetWindowLongW` on each overlay's real
+  HWND and confirmed the extended style bits are genuinely set, and confirmed the HUD (whose Exit
+  Tour button must stay clickable) is correctly the one overlay *without* them. Non-Windows
+  gracefully no-ops (accepted fidelity loss, not a crash) — this app's shipped target and this whole
+  session's dev/test environment are Windows-only, consistent with every other platform-gated piece
+  of this codebase.
+- The cursor glow additionally uses Tk's own `-transparentcolor` attribute (a real per-pixel
+  color-key transparency, Windows Tk only) so it renders as an actual circle, not a colored square —
+  confirmed live (the sentinel hex color was genuinely applied, not silently falling back).
+
+**Discovery tracking**: hovering an item adds its id to a `set`, updates the HUD's "N of Y explored"
+text, and spawns/persists a small green checkmark badge (its own tiny click-through circular
+overlay) pinned to that widget's corner — badges are re-positioned/hidden every ~260ms based on the
+widget's real `winfo_ismapped()` state, so a badge for a Compose-only item correctly disappears while
+viewing Settings and reappears exactly where it should on returning to Compose. Switching hover
+target directly (A→B with no gap) updates card/ring content immediately without waiting for A's
+fade-out; a genuine leave (mouse goes to empty space) is debounced (`HIDE_DELAY_MS`) before the real
+fade-out/hide runs, so moving across two adjacent internal sub-widgets of the same button doesn't
+flicker.
+
+**Entry points, unchanged in spirit from the original Item 39**: the header "?" button (now visually
+reflects tour state — fills `T.ACCENT` while active) and Settings' "🧭 Take a Tour" button, both now
+call `tour_mode.toggle()`. Escape and the HUD's own "Exit Tour" button both call `disable()`.
+Re-enabling always resets `_discovered` to empty — a fresh session each time, not a resume.
+`MainWindow._on_close()` gained a `self.tour_mode.disable()` call (wrapped in the same
+try/except-defensive style as its neighboring `_stop_sending()` call) so an active tour's overlay
+windows and repeating `.after()` loops don't survive past the main window being withdrawn.
+
+**A real, worth-fixing bug found while producing this item's own demo, not part of the original
+ask**: `_follow_tick`'s card-position clamp used `winfo_screenheight()` — the *full* screen height,
+taskbar included — so on any real machine with a visible Windows taskbar, hovering something near
+the bottom of the screen could place the floating card partially behind/under the taskbar. Fixed
+with `_work_area_bottom()` (Win32 `SPI_GETWORKAREA`, same disclosed ctypes-call pattern, graceful
+fallback to the old full-height behavior on failure/non-Windows) — a genuine improvement to the
+shipped feature, not just a demo-script fix, found by actually looking at a real screenshot rather
+than trusting the positioning math.
+
+**Real demo, produced and reviewed before calling this done, per the item's own explicit
+requirement**: `scripts/demo_tour_mode.py` drives a real `MainWindow` through 4 real discoveries —
+warps the real OS cursor to each real widget first (Tk's own `event_generate(..., warp=True)`, a
+real, verified-working cursor move, not simulated), calls the tour's real `_on_enter`/`_on_leave`
+(the literal method a real `<Enter>`/`<Leave>` binding invokes — this suite's own established,
+documented practice for testing hover in this environment, see `test_card_creator_premium.py`'s
+icon-hover tests / `conftest.py`'s own account of direct-event-synthesis fragility here), lets the
+real fade/follow `.after()` loops actually run, then captures a real screenshot cropped tightly to
+the app window's own bounds (no margin — a first attempt with a 40px margin bled into the real
+Windows taskbar, exposing pinned taskbar icons unrelated to the app; fixed before treating any
+screenshot as final, which is also what surfaced the `_work_area_bottom` bug above). Sequence:
+Campaigns nav (sidebar) → Contacts nav (sidebar, showing Campaigns' real green checkmark badge
+already in place) → Compose's real "✨ Generate with AI" button (after really navigating to Compose
+first, matching how the feature is meant to be used) → the Card Creator's real template gallery
+thumbnail (scrolled into view first via the real `CTkScrollableFrame`'s own `_parent_canvas.
+yview_moveto`, computed from the real scrollregion rather than guessed, since Item 18's own
+scrollable Card Identity panel doesn't show the gallery by default at every window size). All 4
+screenshots show the real spotlight ring around the real widget, the real floating card with real
+content near the real cursor position, and the real "N of 10 explored" HUD advancing 1→2→3→4 — shown
+to the user directly in this session before this item was called complete, exactly as asked.
+
+**Verified**: `tests/ui/test_guided_tour.py` was replaced entirely (the old file tested APIs that no
+longer exist) — 17 new tests: every discoverable item's getter resolves to a real widget and the
+named example features (sidebar nav, Generate-with-AI, the card gallery, the update badge) are all
+present; both entry points exist and toggle real state; `enable()` binds every real widget and sets
+the real total; hovering marks discovered + updates the real HUD text; the real card content and
+real spotlight ring position match the real target widget's bounds; switching targets updates
+without needing an explicit leave; a discovered badge persists across switching to a different
+hover target; a **real, `.after()`-timer-driven** (not simulated) leave-after-delay hides card/ring
+but keeps the badge; Exit Tour tears down every real overlay window (`winfo_exists()` confirmed
+False afterward); real `<Escape>` (via `event_generate`) disables tour mode; the header button's
+real fill color changes and reverts; re-enabling resets progress to zero; toggle() flips state;
+click-through style bits are confirmed at the real OS level for every visual overlay and confirmed
+absent on the HUD (skipped on non-Windows); a real Tk-level binding-wiring check (not just handler
+logic) confirms `enable()` genuinely registered a real callback on the real widget's real hoverable
+surface; and `disable()`'s precise funcid-based unbind is confirmed to not wipe the widget's own
+pre-existing hover-color binding. Confirmed the click-through test is meaningful, not trivially
+green: temporarily disabled the `_make_click_through` call, reran, watched it fail, restored. New
+`tests/test_tour_work_area.py` (3 tests, no Tk needed) covers `_work_area_bottom`'s three real
+paths: non-Windows fallback, a Windows ctypes-failure fallback, and a real on-this-machine sanity
+bound.
+
+Full regression check per this file's standing discipline, run in 3 batches (same real,
+observed-load reasoning already documented earlier in this file for splitting large parallel runs):
+**303/304** functional UI tests across all 45 non-timing files (the one non-pass is the same
+already-flagged, pre-existing, unrelated `test_card_creator_premium.py::test_icon_zone_hover_
+changes_border_and_background` flake — re-confirmed via `git stash` back at the start of this
+checkpoint's own work that it already failed identically before any of this redesign's changes),
+**7/7** navigation-timing alone, **1/1** close-button alone, **2/2** nav-accent-timing alone,
+**207/207** plain `tests/` (was 204, +3 new). A first combined timing run (accidentally overlapping
+with a still-running background batch) showed 6/7 navigation-timing failures — re-confirmed as pure
+resource contention, not a regression, by re-running alone immediately after with nothing else
+contending: clean 7/7.
+
+**Not done / explicit scope note**: this redesign only replaces Item 39's tour mechanic — the User
+Manual (Item 40, `docs/getting_started_guide.md`/`docs/MessageCannon_Pro_User_Manual.pdf`) was NOT
+updated to describe the new hover-based interaction (it still describes the old Next/Back cards);
+flagged here rather than silently left stale, a real follow-up if the manual is meant to stay
+accurate to the shipped UI. `scripts/demo_tour_mode.py` is a real, reusable verification/proof tool
+(same category as `scripts/generate_license.py`), not shipped app functionality — kept in the repo
+for the same reason.
+
+**Git state**: none of this redesign is committed — `src/ui/tour.py` (full rewrite), edits to
+`src/ui/main_window.py` (import, `self.tour_mode` construction, both entry points, `_on_close`),
+`tests/ui/test_guided_tour.py` (full rewrite), and two new files (`tests/test_tour_work_area.py`,
+`scripts/demo_tour_mode.py`) all sit uncommitted, pending the user's own review.
+
+## Item 40 follow-up — user manual updated to describe Tour Mode (2026-08-08)
+
+The manual (Item 40) still described the old click-through Next/Back cards after Item 39 v2's
+redesign — flagged as a known gap in that checkpoint, closed here. `docs/user_manual_content.py`'s
+"Getting a Refresher" section was rewritten (now "...: Tour Mode") to describe the real mechanic:
+toggling Tour Mode on, hovering near a real feature to reveal a floating card + spotlight, checkmark
+badges marking what's been explored, the "N of Y explored" HUD, Escape/Exit Tour to leave. The
+content-block model gained a new `"image"` kind — `("image", (relative_path, caption))` — for a
+real, already-captured screenshot, distinct from the pre-existing `"shot"` placeholder-callout kind.
+
+**A real screenshot is embedded for this one section**, not a placeholder — the only exception to
+Item 40's own "no live screenshots" policy, and a deliberate one: it reuses a screenshot already
+produced and safety-reviewed for Item 39 v2's own demo (`scripts/demo_tour_mode.py`), not a fresh
+live capture taken for the manual itself, so it doesn't carry the same risk this file has already
+flagged twice for ad hoc screen captures on this shared, live desktop. `docs/screenshots/tour_mode_
+hover.png` now lives in the repo; both `render_markdown()` (real `![caption](path)` Markdown image
+syntax) and `render_pdf()` (a real `reportlab.platypus.Image` flowable, scaled to fit the page width
+via the real PNG's own pixel dimensions read through Pillow) were extended to handle the new block
+kind, so the single structured-data source still drives both output formats.
+
+**A second real bug found while reviewing the regenerated PDF page, not part of this item's own
+original scope**: the embedded screenshot showed the HUD's "Exit Tour" button cut off at the app
+window's own right edge. Root-caused directly, not guessed: `_ProgressHud.position_near()`
+measured its own width via `winfo_width()` immediately after construction — but a freshly-built
+`CTkToplevel` doesn't reflect its real, pack-computed content size until it's gone through a real
+window-manager configure round-trip (the exact same class of "stale placeholder size" issue
+`window_utils.py`'s own docstring already documents for centering brand-new dialogs, confirmed here
+too: `winfo_width()`/`winfo_reqwidth()` both stably returned 300 — not the real content-fit size,
+and unchanged even after an explicit `deiconify()` + real `update()`). Positioning against that
+wrong number left the HUD's real window extending past the app's own edge.
+
+Fixed in two parts, verified independently:
+1. Stopped relying on measured/natural sizing entirely — `_ProgressHud` now sets an explicit,
+   deliberately-generous `WIDTH`/`HEIGHT` via `.geometry()` up front, the same pattern every other
+   dialog in this app already uses (none of them rely on natural pack-sizing for a Toplevel).
+2. That alone still wasn't enough — a first fix using the logical `WIDTH` constant directly in the
+   position offset math left the HUD **overshooting even further** than before once corrected,
+   because CustomTkinter's `.geometry()` silently scales just the WxH component by the real DPI
+   factor (confirmed 300 → a real, physical 375px at this machine's 1.25× scale) while leaving any
+   `+x+y` position component unscaled — the exact same characteristic `window_utils.py` already
+   documents for dialog centering. Fixed by calling the widget's own real `_apply_window_scaling()`
+   (the same real, deterministic escape hatch `window_utils._real_dimensions` already uses) to get
+   the true physical width before computing the offset, rather than the logical one.
+
+**Verified**: re-ran `scripts/demo_tour_mode.py` after the fix and confirmed, via a direct
+`winfo_rootx()`/`winfo_width()` measurement script (not just eyeballing the screenshot), that the
+HUD's real window and the "Exit Tour" button's real bounds both now sit fully inside the real app
+window's own right edge with a clean margin — re-captured the manual's screenshot from this
+corrected run. New `tests/ui/test_guided_tour.py::test_hud_stays_fully_within_the_real_window_
+bounds` (now 18 tests in that file) checks the real, current window/HUD/button coordinates directly.
+Confirmed it's meaningful, not trivially green: temporarily reverted just the DPI-scaling half of
+the fix in place, reran, watched it fail, restored, reran clean. `tests/test_user_manual_
+content.py` gained 2 more tests (now 7) — a real image block's path must point at a file that
+genuinely exists on disk, and the Markdown renderer must emit real `![...](...)` syntax for it, not
+a placeholder callout.
+
+Full regression check per this file's standing discipline, run in the same 3-batch pattern:
+**304/305** functional UI tests (same one pre-existing, unrelated `test_icon_zone_hover_changes_
+border_and_background` flake, not re-litigated here, plus the new `test_hud_stays_fully_within_
+the_real_window_bounds`), **209/209** plain `tests/` (was 207, +2 new), **1/1** close-button alone,
+**2/2** nav-accent-timing alone.
+
+`test_navigation_timing.py`'s `[Contacts]` case was flaky alone this pass (~826ms, just over its
+own already-tight 800ms budget — that budget's own comment already records a previously-observed
+worst case up to 792ms, so this is a few percent past even that, not a large jump). Investigated
+before dismissing it, not assumed: a standalone timing script driving the identical `_show_view`
+call outside pytest measured a comfortable 500-640ms every time, and `git stash`-ing this entire
+session's changes back to the committed baseline reproduced the *same class* of near-budget failure
+on a *different* view (`History`) instead — both point to real, ordinary machine-load variance on
+this shared dev box at the edge of an already-tight budget, not a regression these changes
+introduced. Not chased further, consistent with this exact budget's own documented "diminishing
+returns" reasoning already on record above it.
+
+**Git state**: still nothing from either this manual update or the Item 39 v2 redesign itself is
+committed — all pending the user's own review together.

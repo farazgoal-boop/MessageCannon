@@ -1,8 +1,8 @@
 # MessageCannon Pro — Getting Started Guide
 
-Version 1.5.0 · Support: farazgoal@gmail.com · Generated 2026-08-07
+Version 1.6.0 · Support: farazgoal@gmail.com · Generated 2026-08-07
 
-> **A note on screenshots:** this guide is written to be followed with the real app open next to it. Sections marked "📸 Screenshot needed" describe exactly what to capture — those images weren't captured automatically for this pass (see the top of `docs/user_manual_content.py` for why), so Faraz should add his own screenshot for each one before sharing this guide externally.
+> **A note on screenshots:** this guide is written to be followed with the real app open next to it. Sections marked "📸 Screenshot needed" describe exactly what to capture — those images weren't captured automatically for this pass (see the top of `docs/user_manual_content.py` for why), so Faraz should add his own screenshot for each one before sharing this guide externally. The Tour Mode section is the one exception — it reuses a real, already-safety-reviewed screenshot from that feature's own demo.
 
 ---
 
@@ -12,7 +12,7 @@ MessageCannon Pro helps you send personalized WhatsApp messages and branded emai
 
 This guide walks through everything from installing the app to sending your first real campaign. You don't need any technical background — if you can use email and WhatsApp on your phone, you can use this app.
 
-> 💡 **Tip:** Keep this guide handy the first few times you use the app. Once you're comfortable, you can always get a quick refresher from the built-in Guided Tour — see the section on that below.
+> 💡 **Tip:** Keep this guide handy the first few times you use the app. Once you're comfortable, you can always get a quick refresher from the built-in Tour Mode — see the section on that below.
 
 ---
 
@@ -247,15 +247,19 @@ Every past campaign is listed in History with its real sent, failed, and bounced
 
 ---
 
-## 8. Getting a Refresher: The Guided Tour
+## 8. Getting a Refresher: Tour Mode
 
-Whenever you want a quick walkthrough of the app again — for yourself later on, or to show someone else on your team — click the "?" button in the top-right header, right next to the Settings gear icon. You can also find a "🧭 Take a Tour" button inside Settings → System Experience.
+Whenever you want a quick, hands-on refresher — for yourself later on, or to show someone else on your team — click the "?" button in the top-right header, right next to the Settings gear icon. You can also find a "🧭 Take a Tour" button inside Settings → System Experience. Either one turns Tour Mode on.
 
-The tour opens a short series of cards, one for each major part of the app (Campaigns, Contacts, Compose, Cards, delivery tracking, Settings, and updates), with the real matching item in the sidebar highlighted so it's always clear exactly what's being described. Use Next/Back to move through it, or Skip to close it anytime.
+Tour Mode isn't a slideshow you click through — the real app stays fully usable underneath it. Just move your mouse near any real feature (a sidebar item, the "Generate with AI" button, a template in the Card Creator's gallery, and more) and a small floating card appears next to your cursor explaining exactly what that feature does, with the real item outlined so there's never any doubt what's being described. There's no fixed order — explore whatever catches your eye, in whatever order you like, and everything you've already looked at keeps a small green checkmark next to it so you always know what's left.
 
-> 💡 **Tip:** The tour always starts fresh from the beginning every time you open it — there's nothing to reset, and running it again never loses any of your real data or settings.
+![Tour Mode active on the Campaigns screen — hovering the "Campaigns" sidebar item shows its real spotlight outline and a floating explanation card next to the cursor, with the "1 of 10 explored" counter and Exit Tour button in the top-right corner.](screenshots/tour_mode_hover.png)
 
-> 📸 **Screenshot needed:** The Guided Tour open on one of its steps, with the highlighted ring visible around the matching sidebar item.
+*Tour Mode active on the Campaigns screen — hovering the "Campaigns" sidebar item shows its real spotlight outline and a floating explanation card next to the cursor, with the "1 of 10 explored" counter and Exit Tour button in the top-right corner.*
+
+A small counter in the top-right corner ('N of 10 explored') keeps track of your progress, with an "Exit Tour" button right next to it — click that, or press Escape on your keyboard, anytime to turn Tour Mode back off.
+
+> 💡 **Tip:** Because Tour Mode doesn't lock you into one screen, some features (like Compose's "Generate with AI" button, or the Card Creator's template gallery) only become discoverable once you've actually navigated to that screen yourself — exactly like using the app normally. Turning Tour Mode off and back on always starts your exploration fresh again.
 
 ---
 

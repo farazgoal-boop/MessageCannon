@@ -16,16 +16,26 @@ rules) rather than copied from the older, partly-stale `docs/user_guide.md`
 pre-Item-36 shared-passkey license scheme — none of which match the app as
 it exists today).
 
-No live screenshots are embedded — a deliberate, disclosed decision, not an
-oversight. This exact sandbox has already had a real incident this session
-(logged in CLAUDE.md, "Final Completion Pass Item 5") where a screenshot
-script captured the *developer's own unrelated browser window* mid-script,
-because this is Faraz's live, actively-used desktop, not an isolated CI
-machine — screen capture on a shared live desktop can't be made safe by
-being more careful in the script, since it depends on what the human does
-on their own machine in real time. Every section that would normally carry
-a screenshot instead carries a precise "what to capture" callout for Faraz
-to fill in on his own machine.
+Almost no live screenshots are embedded — a deliberate, disclosed decision,
+not an oversight. This exact sandbox has already had a real incident this
+session (logged in CLAUDE.md, "Final Completion Pass Item 5") where a
+screenshot script captured the *developer's own unrelated browser window*
+mid-script, because this is Faraz's live, actively-used desktop, not an
+isolated CI machine — screen capture on a shared live desktop can't be made
+safe by being more careful in the script, since it depends on what the human
+does on their own machine in real time. Every section that would normally
+carry a screenshot instead carries a precise "what to capture" callout for
+Faraz to fill in on his own machine.
+
+The one exception (the Tour Mode section) reuses a real screenshot already
+produced and verified for a *separate*, already-completed task this same
+session (Item 39 v2's own hover-to-discover demo, `scripts/
+demo_tour_mode.py`) — not a new live capture taken for this manual. That
+script's own capture method was specifically hardened (tight crop to the
+app window's exact bounds, no margin, clamped to the real Windows
+taskbar-free work area) after an early draft of it *also* nearly leaked
+taskbar content, so reusing its already-safety-reviewed output here doesn't
+carry the same risk as a fresh, ad hoc capture would.
 """
 
 from __future__ import annotations
@@ -37,14 +47,23 @@ from __future__ import annotations
 #   ("ul", [items])
 #   ("ol", [items])
 #   ("table", [header, *rows])
-#   ("shot", "what to capture")          -- screenshot-needed callout
+#   ("shot", "what to capture")          -- screenshot-needed callout (no
+#                                            real image exists for this one
+#                                            yet -- see the module docstring
+#                                            for why most of these are still
+#                                            placeholders, not live captures)
+#   ("image", (relative_path, caption))   -- a REAL, already-captured
+#                                            screenshot, embedded for real in
+#                                            both the Markdown and the PDF.
+#                                            relative_path is relative to
+#                                            docs/.
 #   ("note", text)                        -- tip / info callout
 #   ("warn", text)                        -- caution callout
 #   ("pagebreak", None)
 
 MANUAL_TITLE = "MessageCannon Pro"
 MANUAL_SUBTITLE = "Getting Started Guide"
-MANUAL_VERSION = "1.5.0"
+MANUAL_VERSION = "1.6.0"
 MANUAL_SUPPORT_EMAIL = "farazgoal@gmail.com"
 
 CONTENT = [
@@ -59,7 +78,7 @@ CONTENT = [
           "you can use this app."),
     ("note", "Keep this guide handy the first few times you use the app. Once "
              "you're comfortable, you can always get a quick refresher from "
-             "the built-in Guided Tour — see the section on that below."),
+             "the built-in Tour Mode — see the section on that below."),
 
     ("pagebreak", None),
     ("h1", "1. Installing MessageCannon Pro"),
@@ -397,23 +416,40 @@ CONTENT = [
              "(assumed) breakdown after a real bounce check."),
 
     ("pagebreak", None),
-    ("h1", "8. Getting a Refresher: The Guided Tour"),
-    ("p", "Whenever you want a quick walkthrough of the app again — for "
-          "yourself later on, or to show someone else on your team — click "
-          "the \"?\" button in the top-right header, right next to the "
+    ("h1", "8. Getting a Refresher: Tour Mode"),
+    ("p", "Whenever you want a quick, hands-on refresher — for yourself "
+          "later on, or to show someone else on your team — click the "
+          "\"?\" button in the top-right header, right next to the "
           "Settings gear icon. You can also find a \"🧭 Take a Tour\" "
-          "button inside Settings → System Experience."),
-    ("p", "The tour opens a short series of cards, one for each major part "
-          "of the app (Campaigns, Contacts, Compose, Cards, delivery "
-          "tracking, Settings, and updates), with the real matching item in "
-          "the sidebar highlighted so it's always clear exactly what's "
-          "being described. Use Next/Back to move through it, or Skip to "
-          "close it anytime."),
-    ("note", "The tour always starts fresh from the beginning every time "
-             "you open it — there's nothing to reset, and running it again "
-             "never loses any of your real data or settings."),
-    ("shot", "The Guided Tour open on one of its steps, with the "
-             "highlighted ring visible around the matching sidebar item."),
+          "button inside Settings → System Experience. Either one turns "
+          "Tour Mode on."),
+    ("p", "Tour Mode isn't a slideshow you click through — the real app "
+          "stays fully usable underneath it. Just move your mouse near any "
+          "real feature (a sidebar item, the \"Generate with AI\" button, "
+          "a template in the Card Creator's gallery, and more) and a small "
+          "floating card appears next to your cursor explaining exactly "
+          "what that feature does, with the real item outlined so there's "
+          "never any doubt what's being described. There's no fixed "
+          "order — explore whatever catches your eye, in whatever order "
+          "you like, and everything you've already looked at keeps a "
+          "small green checkmark next to it so you always know what's "
+          "left."),
+    ("image", ("screenshots/tour_mode_hover.png",
+                "Tour Mode active on the Campaigns screen — hovering the "
+                "\"Campaigns\" sidebar item shows its real spotlight outline "
+                "and a floating explanation card next to the cursor, with "
+                "the \"1 of 10 explored\" counter and Exit Tour button in "
+                "the top-right corner.")),
+    ("p", "A small counter in the top-right corner ('N of 10 explored') "
+          "keeps track of your progress, with an \"Exit Tour\" button right "
+          "next to it — click that, or press Escape on your keyboard, "
+          "anytime to turn Tour Mode back off."),
+    ("note", "Because Tour Mode doesn't lock you into one screen, some "
+             "features (like Compose's \"Generate with AI\" button, or the "
+             "Card Creator's template gallery) only become discoverable "
+             "once you've actually navigated to that screen yourself — "
+             "exactly like using the app normally. Turning Tour Mode off "
+             "and back on always starts your exploration fresh again."),
 
     ("pagebreak", None),
     ("h1", "9. Troubleshooting Common Issues"),

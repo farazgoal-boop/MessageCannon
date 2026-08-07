@@ -41,7 +41,9 @@ def render_markdown() -> str:
         "needed\" describe exactly what to capture — those images weren't "
         "captured automatically for this pass (see the top of "
         "`docs/user_manual_content.py` for why), so Faraz should add his "
-        "own screenshot for each one before sharing this guide externally.",
+        "own screenshot for each one before sharing this guide externally. "
+        "The Tour Mode section is the one exception — it reuses a real, "
+        "already-safety-reviewed screenshot from that feature's own demo.",
         "",
         "---",
         "",
@@ -74,6 +76,12 @@ def render_markdown() -> str:
         elif kind == "shot":
             lines.append(f"> 📸 **Screenshot needed:** {payload}")
             lines.append("")
+        elif kind == "image":
+            rel_path, caption = payload
+            lines.append(f"![{caption}]({rel_path})")
+            lines.append("")
+            lines.append(f"*{caption}*")
+            lines.append("")
         elif kind == "note":
             lines.append(f"> 💡 **Tip:** {payload}")
             lines.append("")
@@ -94,7 +102,7 @@ def render_pdf() -> None:
     from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
     from reportlab.lib.units import inch
     from reportlab.platypus import (
-        HRFlowable, ListFlowable, ListItem, PageBreak, Paragraph,
+        HRFlowable, Image, ListFlowable, ListItem, PageBreak, Paragraph,
         SimpleDocTemplate, Spacer, Table, TableStyle,
     )
 
@@ -126,6 +134,9 @@ def render_pdf() -> None:
     style_meta = ParagraphStyle("MCMeta", parent=base["Normal"],
                                  textColor=TEXT_MUTED, fontSize=9.5,
                                  alignment=1)
+    style_caption = ParagraphStyle("MCCaption", parent=base["Normal"],
+                                    textColor=TEXT_MUTED, fontSize=9,
+                                    alignment=1, spaceAfter=10)
 
     story = []
     story.append(Spacer(1, 2.2 * inch))
@@ -200,6 +211,18 @@ def render_pdf() -> None:
             story.append(callout(payload, SHOT_BG, SHOT_BORDER,
                                   "📸", "Screenshot needed:"))
             story.append(Spacer(1, 10))
+        elif kind == "image":
+            rel_path, caption = payload
+            img_path = PROJECT_ROOT / "docs" / rel_path
+            from PIL import Image as PILImage
+            with PILImage.open(img_path) as pil_img:
+                px_w, px_h = pil_img.size
+            max_w = 6.3 * inch
+            max_h = 4.2 * inch
+            scale = min(max_w / px_w, max_h / px_h)
+            story.append(Image(str(img_path), width=px_w * scale, height=px_h * scale))
+            story.append(Spacer(1, 4))
+            story.append(Paragraph(caption, style_caption))
         elif kind == "note":
             story.append(callout(payload, BADGE_BG, NOTE_BORDER, "💡", "Tip:"))
             story.append(Spacer(1, 10))

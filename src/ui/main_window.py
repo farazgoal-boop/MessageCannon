@@ -28,7 +28,7 @@ from ..ui.card_creator_tab import build_card_creator_view, HAS_HTML_PREVIEW
 from ..ui.reports_chart import ReportsChart
 from ..ui.update_dialog import show_update_dialog
 from ..ui.accessibility import enable_keyboard_accessibility
-from ..ui.tour import start_guided_tour
+from ..ui.tour import install_tour_mode
 from ..core.update_checker import check_for_update, spawn_update_after_current_process_exits, UpdateInfo
 
 try:
@@ -461,6 +461,9 @@ class MainWindow(ctk.CTk):
         self.contact_manager = ContactManager()
         self.message_processor = MessageProcessor()
         self.whatsapp_sender = WhatsAppSender()
+        # Item 39 v2: constructed once, reused across repeated toggle-on/
+        # toggle-off cycles -- see tour.py's own module docstring.
+        self.tour_mode = install_tour_mode(self)
 
         self.contacts: List[Contact] = []
         self.templates: List[Template] = []
@@ -1066,11 +1069,12 @@ class MainWindow(ctk.CTk):
             command=lambda: self._show_view("Settings"),
         ).pack(side="left", padx=3)
 
-        # Item 39 (Guided Tour): a permanent, always-available entry point —
-        # not just a first-run popup like the Setup Wizard — so a user can
-        # get a refresher walkthrough anytime. Re-triggerable: every click
-        # restarts the tour from step 1, since start_guided_tour() carries
-        # no "already seen" state at all.
+        # Item 39 v2: a permanent, always-available entry point -- not just
+        # a first-run popup like the Setup Wizard -- toggles Tour Mode's
+        # cursor-following "hover to discover" layer on/off (tour.py). The
+        # button's own fill flips to T.ACCENT while active (TourMode.enable/
+        # disable reach back into this exact widget), so it visibly shows
+        # tour state, not just launches an action.
         self.header_tour_btn = ctk.CTkButton(
             header_right,
             text="?",
@@ -1081,10 +1085,11 @@ class MainWindow(ctk.CTk):
             hover_color=T.BG_BORDER,
             text_color=T.ACCENT_TEXT,
             font=ctk.CTkFont(size=14, weight="bold"),
-            command=lambda: start_guided_tour(self),
+            command=lambda: self.tour_mode.toggle(),
         )
         self.header_tour_btn.pack(side="left", padx=3)
-        add_tooltip(self.header_tour_btn, "Take a Tour — see how everything works, step by step.")
+        add_tooltip(self.header_tour_btn,
+                     "Tour Mode — hover any feature to discover what it does.")
 
         self.header_pill = ctk.CTkLabel(
             header_right,
@@ -1773,10 +1778,12 @@ class MainWindow(ctk.CTk):
 
         wa_ai_row = ctk.CTkFrame(wa_top, fg_color="transparent")
         wa_ai_row.grid(row=1, column=0, columnspan=4, padx=16, pady=(0, 14), sticky="w")
-        ctk.CTkButton(wa_ai_row, text="✨ Generate with AI", height=30, corner_radius=8,
-                      fg_color=T.ACCENT, hover_color=T.ACCENT_HOVER, text_color=T.TEXT_HEAD,
-                      font=ctk.CTkFont(size=11, weight="bold"),
-                      command=lambda: self._open_ai_compose("whatsapp")).pack(side="left", padx=(0, 8))
+        self.wa_generate_ai_btn = ctk.CTkButton(
+            wa_ai_row, text="✨ Generate with AI", height=30, corner_radius=8,
+            fg_color=T.ACCENT, hover_color=T.ACCENT_HOVER, text_color=T.TEXT_HEAD,
+            font=ctk.CTkFont(size=11, weight="bold"),
+            command=lambda: self._open_ai_compose("whatsapp"))
+        self.wa_generate_ai_btn.pack(side="left", padx=(0, 8))
         ctk.CTkButton(wa_ai_row, text="💾 Save as Template", height=30, corner_radius=8,
                       fg_color=T.BADGE_BG, hover_color=T.BG_BORDER, text_color=T.TEXT_HEAD,
                       font=ctk.CTkFont(size=11),
@@ -1956,10 +1963,12 @@ class MainWindow(ctk.CTk):
 
         em_ai_row = ctk.CTkFrame(em_left, fg_color="transparent")
         em_ai_row.grid(row=3, column=0, padx=16, pady=(0, 8), sticky="ew")
-        ctk.CTkButton(em_ai_row, text="✨ Generate with AI", height=30, corner_radius=8,
-                      fg_color=T.ACCENT, hover_color=T.ACCENT_HOVER, text_color=T.TEXT_HEAD,
-                      font=ctk.CTkFont(size=11, weight="bold"),
-                      command=lambda: self._open_ai_compose("email")).pack(side="left", padx=(0, 8))
+        self.em_generate_ai_btn = ctk.CTkButton(
+            em_ai_row, text="✨ Generate with AI", height=30, corner_radius=8,
+            fg_color=T.ACCENT, hover_color=T.ACCENT_HOVER, text_color=T.TEXT_HEAD,
+            font=ctk.CTkFont(size=11, weight="bold"),
+            command=lambda: self._open_ai_compose("email"))
+        self.em_generate_ai_btn.pack(side="left", padx=(0, 8))
         ctk.CTkButton(em_ai_row, text="💾 Save as Template", height=30, corner_radius=8,
                       fg_color=T.BADGE_BG, hover_color=T.BG_BORDER, text_color=T.TEXT_HEAD,
                       font=ctk.CTkFont(size=11),
@@ -3203,16 +3212,16 @@ class MainWindow(ctk.CTk):
                       fg_color=T.ACCENT, hover_color=T.ACCENT_HOVER,
                       text_color=T.TEXT_HEAD,
                       command=self._reopen_setup_wizard).pack(side="left", padx=(0, 8))
-        # Item 39: same on-demand-help tier as "Re-run Setup Wizard" right
+        # Item 39 v2: same on-demand-help tier as "Re-run Setup Wizard" right
         # next to it — outline-secondary styling (matches History's
         # "Duplicate" button / Compose's Pause-Resume, Item 27's own
         # established secondary-action recipe) since this isn't the primary
-        # action on this card.
+        # action on this card. Toggles the same Tour Mode as the header "?".
         ctk.CTkButton(system_actions, text="🧭 Take a Tour", corner_radius=8,
                       fg_color=T.BG_INNER, hover_color=T.BG_BORDER,
                       border_width=1, border_color=T.BG_BORDER,
                       text_color=T.ACCENT_TEXT,
-                      command=lambda: start_guided_tour(self)).pack(side="left")
+                      command=lambda: self.tour_mode.toggle()).pack(side="left")
 
         license_card = ctk.CTkFrame(frame, fg_color=T.BG_SURFACE, corner_radius=14,
                                     border_width=1, border_color=T.BG_BORDER)
@@ -6349,6 +6358,16 @@ class MainWindow(ctk.CTk):
         # resolves. Actual process teardown still happens below, safely.
         try:
             self.withdraw()
+        except Exception:
+            pass
+
+        # Tour Mode (Item 39 v2) owns several always-on-top overlay
+        # Toplevels (ring/card/glow/HUD) plus repeating after()-scheduled
+        # animation loops -- left active, those would keep floating on
+        # screen after the main window itself is withdrawn, and their
+        # after() callbacks would keep firing against a closing window.
+        try:
+            self.tour_mode.disable()
         except Exception:
             pass
 

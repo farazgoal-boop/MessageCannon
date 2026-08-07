@@ -6,10 +6,13 @@ empty/missing sections, without needing a real Tk window."""
 from __future__ import annotations
 
 import importlib
+from pathlib import Path
 
 from docs.user_manual_content import CONTENT, MANUAL_SUPPORT_EMAIL, MANUAL_VERSION
 
-_VALID_KINDS = {"h1", "h2", "p", "ul", "ol", "table", "shot", "note", "warn", "pagebreak"}
+DOCS_DIR = Path(__file__).resolve().parents[1] / "docs"
+
+_VALID_KINDS = {"h1", "h2", "p", "ul", "ol", "table", "shot", "image", "note", "warn", "pagebreak"}
 
 
 def test_every_block_has_a_known_kind_and_non_empty_payload():
@@ -25,8 +28,20 @@ def test_every_block_has_a_known_kind_and_non_empty_payload():
             header = payload[0]
             for row in payload:
                 assert len(row) == len(header)
+        elif kind == "image":
+            rel_path, caption = payload
+            assert rel_path.strip() and caption.strip()
         else:
             assert isinstance(payload, str) and payload.strip()
+
+
+def test_every_real_image_block_points_at_a_file_that_actually_exists():
+    """A real embedded screenshot must actually be a real file on disk --
+    not just a well-formed string that happens to look like a path."""
+    images = [payload for kind, payload in CONTENT if kind == "image"]
+    assert len(images) >= 1
+    for rel_path, _caption in images:
+        assert (DOCS_DIR / rel_path).is_file(), rel_path
 
 
 def test_manual_covers_every_section_item_40_asked_for():
@@ -38,7 +53,7 @@ def test_manual_covers_every_section_item_40_asked_for():
         "Installing", "Setup Wizard", "Importing Your Contacts",
         "Composing Your First Message", "Creating a Marketing Card",
         "Sending a Campaign Safely", "Checking Delivery & Bounce Results",
-        "Guided Tour", "Troubleshooting",
+        "Tour Mode", "Troubleshooting",
     ]
     joined = " | ".join(headings)
     positions = []
@@ -72,3 +87,12 @@ def test_markdown_render_includes_every_screenshot_marker():
     for kind, text in CONTENT:
         if kind == "h1":
             assert f"## {text}" in markdown
+
+
+def test_markdown_render_embeds_real_images_not_placeholder_callouts():
+    build_module = importlib.import_module("scripts.build_user_manual")
+    markdown = build_module.render_markdown()
+    for kind, payload in CONTENT:
+        if kind == "image":
+            rel_path, caption = payload
+            assert f"![{caption}]({rel_path})" in markdown
