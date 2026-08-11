@@ -29,7 +29,12 @@ from ..ui.reports_chart import ReportsChart
 from ..ui.update_dialog import show_update_dialog
 from ..ui.accessibility import enable_keyboard_accessibility
 from ..ui.tour import install_tour_mode
-from ..core.update_checker import check_for_update, spawn_update_after_current_process_exits, UpdateInfo
+from ..core.update_checker import (
+    check_for_update,
+    spawn_update_after_current_process_exits,
+    get_installed_exe_path,
+    UpdateInfo,
+)
 
 try:
     from tkinterdnd2 import TkinterDnD
@@ -5837,9 +5842,16 @@ class MainWindow(ctk.CTk):
         ever runs the installer, structurally eliminating the race. Contacts/
         templates/settings live in %APPDATA%\\MessageCannon Pro (see
         db_manager.py), entirely outside the install directory the installer
-        touches, so they are structurally untouched by this."""
+        touches, so they are structurally untouched by this.
+
+        2026-08-11: also passes the real installed .exe path (read from the
+        registry now, before this process exits) as relaunch_exe_path, so
+        the helper reopens the new version automatically once the install
+        genuinely succeeds -- the user no longer has to find and relaunch
+        it themselves via the Start Menu/Desktop icon."""
         try:
-            spawn_update_after_current_process_exits(installer_path)
+            spawn_update_after_current_process_exits(
+                installer_path, relaunch_exe_path=get_installed_exe_path())
         except Exception as exc:
             Logger.warning(f"Failed to launch downloaded installer: {exc}")
             show_toast(self, f"Could not start the installer: {exc}", kind="error")

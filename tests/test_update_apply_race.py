@@ -50,21 +50,29 @@ import os
 import subprocess
 import sys
 import time
+from types import SimpleNamespace
 
 import pytest
 
 pytestmark = pytest.mark.skipif(sys.platform != "win32", reason="Windows-only update mechanism")
 
-from src.core.update_checker import spawn_update_after_current_process_exits  # noqa: E402
+from src.core.update_checker import (  # noqa: E402
+    spawn_update_after_current_process_exits,
+    get_installed_exe_path,
+)
 
 
-def _write_marker_stand_in(tmp_path, marker_path):
+def _write_marker_stand_in(tmp_path, marker_path, name="fake_installer.bat"):
     """A trivial stand-in for the real Inno Setup installer: when run with
     the same /VERYSILENT /SUPPRESSMSGBOXES /NORESTART args the real
     installer receives (a .bat ignores unknown args harmlessly), it just
     writes a marker file -- proving the real wait-then-launch mechanism
-    without needing a real installer or touching any real install."""
-    bat_path = tmp_path / "fake_installer.bat"
+    without needing a real installer or touching any real install. `name`
+    defaults to the original fixed filename every pre-existing test in
+    this file already relies on; pass a distinct name when a test needs
+    two independent stand-ins in the same tmp_path (e.g. installer +
+    relaunch target) so one doesn't silently overwrite the other."""
+    bat_path = tmp_path / name
     bat_path.write_text(f'@echo off\r\necho done> "{marker_path}"\r\n')
     return str(bat_path)
 
@@ -147,3 +155,145 @@ def test_does_not_use_detached_process_flag(monkeypatch, tmp_path):
     assert flags & subprocess.DETACHED_PROCESS == 0, (
         "DETACHED_PROCESS must not be used -- confirmed via direct testing "
         "that it prevents the update-apply helper from ever completing")
+
+
+def _write_failing_installer_stand_in(tmp_path):
+    """A trivial stand-in for a real installer that fails (matching the
+    real, already-documented Inno Setup exit-code-5 case) -- writes no
+    marker and exits non-zero, so a relaunch triggered off this must never
+    happen."""
+    bat_path = tmp_path / "failing_installer.bat"
+    bat_path.write_text("@echo off\r\nexit /b 5\r\n")
+    return str(bat_path)
+
+
+def test_relaunches_the_app_after_a_successful_install(tmp_path):
+    """The real fix (2026-08-11): the app previously stayed closed after a
+    successful update, forcing the user to find and reopen it themselves.
+    Once the silent install genuinely succeeds (a real, checked exit code
+    0 -- not assumed), the new version must now be relaunched
+    automatically."""
+    install_marker = tmp_path / "install_marker.txt"
+    installer = _write_marker_stand_in(tmp_path, install_marker, name="fake_installer.bat")
+    relaunch_marker = tmp_path / "relaunch_marker.txt"
+    relaunch_exe = _write_marker_stand_in(tmp_path, relaunch_marker, name="fake_relaunch.bat")
+
+    dummy = subprocess.Popen(
+        ["powershell.exe", "-NoProfile", "-Command", "Start-Sleep -Seconds 30"])
+    try:
+        spawn_update_after_current_process_exits(
+            installer, pid=dummy.pid, relaunch_exe_path=relaunch_exe)
+        dummy.terminate()
+        dummy.wait(timeout=5)
+
+        deadline = time.time() + 15
+        while time.time() < deadline and not install_marker.exists():
+            time.sleep(0.5)
+        assert install_marker.exists(), "the installer never ran"
+
+        deadline = time.time() + 15
+        while time.time() < deadline and not relaunch_marker.exists():
+            time.sleep(0.5)
+        assert relaunch_marker.exists(), (
+            "the app was not relaunched after a real, successful install")
+    finally:
+        if dummy.poll() is None:
+            dummy.terminate()
+            dummy.wait(timeout=5)
+
+
+def test_does_not_relaunch_when_the_install_fails(tmp_path):
+    """The install genuinely failing (the real, documented exit-code-5
+    case) must never trigger a relaunch -- that would reopen the OLD
+    version while implying an update that didn't actually happen."""
+    installer = _write_failing_installer_stand_in(tmp_path)
+    relaunch_marker = tmp_path / "relaunch_marker.txt"
+    relaunch_exe = _write_marker_stand_in(tmp_path, relaunch_marker, name="fake_relaunch.bat")
+
+    dummy = subprocess.Popen(
+        ["powershell.exe", "-NoProfile", "-Command", "Start-Sleep -Seconds 30"])
+    try:
+        spawn_update_after_current_process_exits(
+            installer, pid=dummy.pid, relaunch_exe_path=relaunch_exe)
+        dummy.terminate()
+        dummy.wait(timeout=5)
+
+        time.sleep(4)
+        assert not relaunch_marker.exists(), (
+            "the app was relaunched even though the install failed")
+    finally:
+        if dummy.poll() is None:
+            dummy.terminate()
+            dummy.wait(timeout=5)
+
+
+def test_no_relaunch_param_keeps_the_original_fire_and_forget_behavior(monkeypatch, tmp_path):
+    """When relaunch_exe_path is omitted -- every call site before this fix
+    -- behavior must stay byte-for-byte the pre-fix fire-and-forget
+    Start-Process: no -Wait, no -PassThru, no exit-code branch. This is
+    the "don't touch anything else" guarantee for the default path."""
+    captured = {}
+
+    class _FakePopen:
+        def __init__(self, command, **kwargs):
+            captured["script"] = command[-1]
+            self.pid = 999999
+
+    monkeypatch.setattr("src.core.update_checker.subprocess.Popen", _FakePopen)
+    spawn_update_after_current_process_exits(str(tmp_path / "installer.exe"), pid=1234)
+
+    script = captured["script"]
+    assert "-Wait" not in script
+    assert "PassThru" not in script
+    assert "ExitCode" not in script
+
+
+class TestGetInstalledExePath:
+    """get_installed_exe_path() reads the real HKCU\\Software\\MessageCannon
+    InstallPath value installer/setup.iss already writes on every install.
+    These tests monkeypatch winreg entirely rather than reading it for
+    real -- this dev machine genuinely does have a real MessageCannon
+    install registered there from earlier verification passes, so a real
+    read would make the test's result depend on whatever happens to be
+    installed locally right now, not the code under test."""
+
+    def test_returns_none_on_non_windows(self, monkeypatch):
+        monkeypatch.setattr("src.core.update_checker.sys.platform", "linux")
+        assert get_installed_exe_path() is None
+
+    def test_builds_exe_path_from_the_real_registry_value(self, monkeypatch):
+        monkeypatch.setattr("src.core.update_checker.sys.platform", "win32")
+
+        class _FakeKey:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+        fake_winreg = SimpleNamespace(
+            HKEY_CURRENT_USER=object(),
+            OpenKey=lambda root, subkey: _FakeKey(),
+            QueryValueEx=lambda key, name: (
+                r"C:\Users\Test\AppData\Local\Programs\MessageCannon", 1),
+        )
+        monkeypatch.setitem(sys.modules, "winreg", fake_winreg)
+
+        result = get_installed_exe_path()
+        assert result == (
+            r"C:\Users\Test\AppData\Local\Programs\MessageCannon\MessageCannon.exe")
+
+    def test_returns_none_when_the_registry_key_is_missing(self, monkeypatch):
+        monkeypatch.setattr("src.core.update_checker.sys.platform", "win32")
+
+        def _raise_open_key(root, subkey):
+            raise OSError("key not found")
+
+        fake_winreg = SimpleNamespace(
+            HKEY_CURRENT_USER=object(),
+            OpenKey=_raise_open_key,
+            QueryValueEx=lambda key, name: 1 / 0,  # must never be reached
+        )
+        monkeypatch.setitem(sys.modules, "winreg", fake_winreg)
+
+        assert get_installed_exe_path() is None

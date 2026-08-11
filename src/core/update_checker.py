@@ -175,7 +175,30 @@ def spawn_detached(command: list) -> None:
     subprocess.Popen(command, close_fds=True, **kwargs)
 
 
-def spawn_update_after_current_process_exits(installer_path: str, pid: Optional[int] = None) -> None:
+def get_installed_exe_path() -> Optional[str]:
+    """Reads the real, current install directory from the same
+    HKCU\\Software\\MessageCannon\\InstallPath registry value
+    installer/setup.iss already writes on every install (see its own
+    [Registry] section) and returns the full path to the app's own .exe
+    inside it. Windows-only; returns None on any failure (key/value
+    missing, non-Windows) rather than guessing a path -- a None result
+    just means no auto-relaunch happens, never a crash."""
+    if sys.platform != "win32":
+        return None
+    try:
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\MessageCannon") as key:
+            install_dir, _ = winreg.QueryValueEx(key, "InstallPath")
+    except OSError:
+        return None
+    return os.path.join(install_dir, "MessageCannon.exe")
+
+
+def spawn_update_after_current_process_exits(
+    installer_path: str,
+    pid: Optional[int] = None,
+    relaunch_exe_path: Optional[str] = None,
+) -> None:
     """Real bug fix (2026-07-28): the previous sequence was
     `spawn_detached(install_command)` immediately followed by `_on_close()` —
     launching the installer and closing the app at essentially the same
@@ -208,16 +231,39 @@ def spawn_update_after_current_process_exits(installer_path: str, pid: Optional[
     helper from this process's own Ctrl+C/console signals, and `-WindowStyle
     Hidden` (passed to the PowerShell command itself, not a Popen flag)
     already keeps it invisible, so nothing is lost by dropping
-    `DETACHED_PROCESS`."""
+    `DETACHED_PROCESS`.
+
+    2026-08-11 real bug fix: the app did not reopen automatically once the
+    silent install finished -- the user had to find and relaunch it
+    themselves via the Start Menu/Desktop icon. installer/setup.iss's own
+    `[Run]` post-install launch step is deliberately `skipifsilent` (a
+    silent install must never pop UI), so nothing in the installer itself
+    can do this. Fixed by optionally extending this same helper:
+    `relaunch_exe_path`, when given, makes the install run synchronously
+    (`-Wait -PassThru`, so its real exit code can be checked instead of
+    assumed) and relaunches the app only once that exit code confirms
+    success. Left as an opt-in parameter, defaulting to None (no relaunch,
+    identical to the previous fire-and-forget behavior), specifically so
+    this function's own existing tests -- which use a trivial stand-in
+    installer, not a real install -- can never accidentally trigger a real
+    relaunch."""
     if pid is None:
         pid = os.getpid()
     install_cmd = launch_silent_install_and_get_command(installer_path)
     escaped_path = install_cmd[0].replace("'", "''")
     args_literal = ",".join(f"'{a}'" for a in install_cmd[1:])
-    ps_script = (
-        f"Wait-Process -Id {pid} -ErrorAction SilentlyContinue; "
-        f"Start-Process -FilePath '{escaped_path}' -ArgumentList {args_literal}"
-    )
+    if relaunch_exe_path:
+        escaped_relaunch = relaunch_exe_path.replace("'", "''")
+        ps_script = (
+            f"Wait-Process -Id {pid} -ErrorAction SilentlyContinue; "
+            f"$p = Start-Process -FilePath '{escaped_path}' -ArgumentList {args_literal} -Wait -PassThru; "
+            f"if ($p.ExitCode -eq 0) {{ Start-Process -FilePath '{escaped_relaunch}' }}"
+        )
+    else:
+        ps_script = (
+            f"Wait-Process -Id {pid} -ErrorAction SilentlyContinue; "
+            f"Start-Process -FilePath '{escaped_path}' -ArgumentList {args_literal}"
+        )
     command = ["powershell.exe", "-NoProfile", "-WindowStyle", "Hidden", "-Command", ps_script]
     kwargs = {}
     if sys.platform == "win32":
