@@ -246,25 +246,64 @@ def spawn_update_after_current_process_exits(
     identical to the previous fire-and-forget behavior), specifically so
     this function's own existing tests -- which use a trivial stand-in
     installer, not a real install -- can never accidentally trigger a real
-    relaunch."""
+    relaunch.
+
+    2026-08-11 follow-up real bug fix: the relaunch above worked mechanically
+    (verified: the new process really does start, with the right exit-code
+    gate) but a real user reported the new window never actually appeared on
+    screen -- they had to open it themselves via the Start Menu/Desktop icon.
+    Root-caused via a real, controlled reproduction of the exact production
+    two-process shape (PyInstaller onefile ships a bootloader parent process
+    that spawns the real, windowed app as a CHILD process -- confirmed
+    directly via `Get-CimInstance Win32_Process`): a background helper
+    process (this PowerShell script) launching a new window is subject to
+    Windows' anti-focus-stealing protection -- `Start-Process` alone starts
+    the process but does **not** grant it the right to become the foreground
+    window, so it can open invisibly behind whatever else is on screen (e.g.
+    other browser windows) with no visible cue, which reads exactly like "it
+    didn't reopen." Fixed two ways, both standard Windows techniques for
+    exactly this "close and relaunch as a new process" scenario:
+    1. The relaunch script now walks down to the real windowed CHILD process
+       (mirroring the same bootloader-to-child resolution used to verify this
+       bug) and explicitly calls `ShowWindow`/`SetForegroundWindow` on its
+       real window handle once it appears, wrapped in its own try/catch so a
+       failure here can never prevent the relaunch itself from happening.
+    2. `_apply_downloaded_update` (main_window.py) now calls
+       `AllowSetForegroundWindow(ASFW_ANY)` from the still-foreground old
+       process just before it closes, granting the *next* SetForegroundWindow
+       call from *any* process the right to succeed -- both the new app's own
+       normal startup `focus_force()` (main.py) and this script's explicit
+       call benefit from that grant.
+
+    Also switched from a single inline `-Command` string (manually
+    single-quote-escaped, fragile for paths containing spaces like this
+    project's own real "HAROON TRADERS" test install path) to a real,
+    parameterized `.ps1` script file: paths are passed as genuine argv
+    elements via `subprocess.Popen`'s own list-based quoting, not
+    hand-escaped into a string, eliminating that whole class of risk."""
     if pid is None:
         pid = os.getpid()
     install_cmd = launch_silent_install_and_get_command(installer_path)
-    escaped_path = install_cmd[0].replace("'", "''")
-    args_literal = ",".join(f"'{a}'" for a in install_cmd[1:])
-    if relaunch_exe_path:
-        escaped_relaunch = relaunch_exe_path.replace("'", "''")
-        ps_script = (
-            f"Wait-Process -Id {pid} -ErrorAction SilentlyContinue; "
-            f"$p = Start-Process -FilePath '{escaped_path}' -ArgumentList {args_literal} -Wait -PassThru; "
-            f"if ($p.ExitCode -eq 0) {{ Start-Process -FilePath '{escaped_relaunch}' }}"
-        )
-    else:
+    if not relaunch_exe_path:
+        escaped_path = install_cmd[0].replace("'", "''")
+        args_literal = ",".join(f"'{a}'" for a in install_cmd[1:])
         ps_script = (
             f"Wait-Process -Id {pid} -ErrorAction SilentlyContinue; "
             f"Start-Process -FilePath '{escaped_path}' -ArgumentList {args_literal}"
         )
-    command = ["powershell.exe", "-NoProfile", "-WindowStyle", "Hidden", "-Command", ps_script]
+        command = ["powershell.exe", "-NoProfile", "-WindowStyle", "Hidden", "-Command", ps_script]
+    else:
+        script_fd, script_path = tempfile.mkstemp(suffix=".ps1", prefix="mc_update_")
+        with os.fdopen(script_fd, "w", encoding="utf-8") as f:
+            f.write(_RELAUNCH_PS1_SCRIPT)
+        command = [
+            "powershell.exe", "-NoProfile", "-WindowStyle", "Hidden",
+            "-ExecutionPolicy", "Bypass", "-File", script_path,
+            "-TargetPid", str(pid),
+            "-InstallerPath", install_cmd[0],
+            "-InstallerArgsStr", " ".join(install_cmd[1:]),
+            "-RelaunchPath", relaunch_exe_path,
+        ]
     kwargs = {}
     if sys.platform == "win32":
         kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
@@ -272,3 +311,45 @@ def spawn_update_after_current_process_exits(
         command, close_fds=True,
         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         **kwargs)
+
+
+_RELAUNCH_PS1_SCRIPT = r"""param(
+    [int]$TargetPid,
+    [string]$InstallerPath,
+    [string]$InstallerArgsStr,
+    [string]$RelaunchPath
+)
+
+Wait-Process -Id $TargetPid -ErrorAction SilentlyContinue
+
+$installerArgs = @($InstallerArgsStr -split ' ' | Where-Object { $_ -ne '' })
+$p = Start-Process -FilePath $InstallerPath -ArgumentList $installerArgs -Wait -PassThru
+
+if ($p.ExitCode -eq 0 -and $RelaunchPath) {
+    $new = Start-Process -FilePath $RelaunchPath -PassThru
+    try {
+        Add-Type -Name ForegroundHelper -Namespace MessageCannonUpdate -MemberDefinition @'
+[System.Runtime.InteropServices.DllImport("user32.dll")]
+public static extern bool SetForegroundWindow(System.IntPtr hWnd);
+[System.Runtime.InteropServices.DllImport("user32.dll")]
+public static extern bool ShowWindow(System.IntPtr hWnd, int nCmdShow);
+'@
+        $deadline = (Get-Date).AddSeconds(15)
+        $targetId = $new.Id
+        $hwnd = [IntPtr]::Zero
+        while ((Get-Date) -lt $deadline -and $hwnd -eq [IntPtr]::Zero) {
+            Start-Sleep -Milliseconds 300
+            $child = Get-CimInstance Win32_Process -Filter "ParentProcessId=$targetId" -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($child) { $targetId = $child.ProcessId }
+            $proc = Get-Process -Id $targetId -ErrorAction SilentlyContinue
+            if ($proc -and $proc.MainWindowHandle -ne [IntPtr]::Zero) { $hwnd = $proc.MainWindowHandle }
+        }
+        if ($hwnd -ne [IntPtr]::Zero) {
+            [MessageCannonUpdate.ForegroundHelper]::ShowWindow($hwnd, 9) | Out-Null
+            [MessageCannonUpdate.ForegroundHelper]::SetForegroundWindow($hwnd) | Out-Null
+        }
+    } catch {}
+}
+
+try { Remove-Item -LiteralPath $MyInvocation.MyCommand.Path -Force -ErrorAction SilentlyContinue } catch {}
+"""

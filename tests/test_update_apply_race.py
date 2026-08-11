@@ -297,3 +297,140 @@ class TestGetInstalledExePath:
         monkeypatch.setitem(sys.modules, "winreg", fake_winreg)
 
         assert get_installed_exe_path() is None
+
+
+class TestRelaunchForegroundFix:
+    """2026-08-11 follow-up real bug: a real user reported the relaunch
+    above didn't visibly work -- confirmed via a real, controlled
+    reproduction of the actual production shape (PyInstaller onefile's
+    bootloader-parent + windowed-child process pair, via
+    `Get-CimInstance Win32_Process`) that the underlying mechanism DOES
+    fire correctly (the new process really does start with the right
+    exit-code gate), but Windows' anti-focus-stealing protection can let a
+    background-launched window open invisibly behind whatever else is on
+    screen -- reading exactly like "it didn't reopen." Fixed by switching
+    to a real parameterized .ps1 script file (argv-list quoting instead of
+    hand-escaped string interpolation, which also removes a latent
+    fragility for paths containing spaces, like this project's own real
+    "HAROON TRADERS" test path) that explicitly resolves the real windowed
+    child process and calls ShowWindow/SetForegroundWindow on it."""
+
+    def test_relaunch_uses_a_real_ps1_file_not_a_hand_escaped_command_string(
+            self, monkeypatch, tmp_path):
+        captured = {}
+
+        class _FakePopen:
+            def __init__(self, command, **kwargs):
+                captured["command"] = command
+                self.pid = 999999
+
+        monkeypatch.setattr("src.core.update_checker.subprocess.Popen", _FakePopen)
+        relaunch_path = str(tmp_path / "HAROON TRADERS" / "MessageCannon.exe")
+        spawn_update_after_current_process_exits(
+            str(tmp_path / "installer.exe"), pid=1234, relaunch_exe_path=relaunch_path)
+
+        command = captured["command"]
+        assert "-File" in command
+        script_path = command[command.index("-File") + 1]
+        assert script_path.endswith(".ps1")
+        assert os.path.exists(script_path), "the .ps1 helper must actually be written to disk"
+        # The path (with its real embedded space) must travel as its own
+        # untouched argv element -- not hand-quoted into a larger string,
+        # which is exactly the class of fragility this fix removes.
+        assert relaunch_path in command
+        assert "-RelaunchPath" in command
+        os.remove(script_path)
+
+    def test_ps1_script_explicitly_forces_the_new_window_to_the_foreground(
+            self, monkeypatch, tmp_path):
+        """The actual fix: the written script must resolve the real windowed
+        process (walking parent -> child, matching the real PyInstaller
+        onefile shape) and call the real Win32 foreground APIs on it."""
+        captured = {}
+
+        class _FakePopen:
+            def __init__(self, command, **kwargs):
+                captured["command"] = command
+                self.pid = 999999
+
+        monkeypatch.setattr("src.core.update_checker.subprocess.Popen", _FakePopen)
+        spawn_update_after_current_process_exits(
+            str(tmp_path / "installer.exe"), pid=1234,
+            relaunch_exe_path=str(tmp_path / "MessageCannon.exe"))
+
+        script_path = captured["command"][captured["command"].index("-File") + 1]
+        content = open(script_path).read()
+        os.remove(script_path)
+
+        assert "SetForegroundWindow" in content
+        assert "ShowWindow" in content
+        assert "ParentProcessId" in content, (
+            "must walk down to the real windowed child, not assume the "
+            "launched process itself owns the window")
+        assert "try {" in content and "} catch {}" in content, (
+            "the foreground-forcing step must be best-effort -- a failure "
+            "there must never be able to block the relaunch itself")
+
+    def test_relaunch_still_works_end_to_end_with_the_new_ps1_file(self, tmp_path):
+        """Confirms the .ps1-file refactor didn't regress the actual
+        mechanism this whole feature exists for -- same real assertion as
+        test_relaunches_the_app_after_a_successful_install, run again here
+        as a direct check on this specific change."""
+        install_marker = tmp_path / "install_marker.txt"
+        installer = _write_marker_stand_in(tmp_path, install_marker, name="fake_installer.bat")
+        relaunch_marker = tmp_path / "relaunch_marker.txt"
+        relaunch_exe = _write_marker_stand_in(tmp_path, relaunch_marker, name="fake_relaunch.bat")
+
+        dummy = subprocess.Popen(
+            ["powershell.exe", "-NoProfile", "-Command", "Start-Sleep -Seconds 30"])
+        try:
+            spawn_update_after_current_process_exits(
+                installer, pid=dummy.pid, relaunch_exe_path=relaunch_exe)
+            dummy.terminate()
+            dummy.wait(timeout=5)
+
+            deadline = time.time() + 15
+            while time.time() < deadline and not install_marker.exists():
+                time.sleep(0.5)
+            assert install_marker.exists(), "the installer never ran"
+
+            deadline = time.time() + 15
+            while time.time() < deadline and not relaunch_marker.exists():
+                time.sleep(0.5)
+            assert relaunch_marker.exists(), (
+                "the app was not relaunched after a real, successful install")
+        finally:
+            if dummy.poll() is None:
+                dummy.terminate()
+                dummy.wait(timeout=5)
+
+
+def test_apply_downloaded_update_grants_foreground_rights_before_closing(monkeypatch):
+    """The other half of the fix: `_apply_downloaded_update` (main_window.py)
+    must call AllowSetForegroundWindow(ASFW_ANY) while it is still the
+    foreground app, before it closes -- granting the *next*
+    SetForegroundWindow call (from the new app's own startup focus_force(),
+    or the relaunch script's explicit call) the right to succeed."""
+    import types
+    import src.ui.main_window as mw
+
+    calls = []
+
+    fake_user32 = types.SimpleNamespace(
+        AllowSetForegroundWindow=lambda flag: calls.append(flag))
+    fake_windll = types.SimpleNamespace(user32=fake_user32)
+    monkeypatch.setattr(mw.ctypes, "windll", fake_windll, raising=False)
+    monkeypatch.setattr(mw.sys, "platform", "win32")
+    monkeypatch.setattr(
+        mw, "spawn_update_after_current_process_exits", lambda *a, **k: None)
+    monkeypatch.setattr(mw, "get_installed_exe_path", lambda: None)
+
+    class _Dummy:
+        _apply_downloaded_update = mw.MainWindow._apply_downloaded_update
+
+        def _on_close(self):
+            pass
+
+    _Dummy()._apply_downloaded_update("C:\\fake\\installer.exe")
+
+    assert calls == [-1], "must grant ASFW_ANY (-1) exactly once, before closing"

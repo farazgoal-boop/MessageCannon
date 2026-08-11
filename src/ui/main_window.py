@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ctypes
 import html as html_module
 import json
 import os
@@ -5848,7 +5849,25 @@ class MainWindow(ctk.CTk):
         registry now, before this process exits) as relaunch_exe_path, so
         the helper reopens the new version automatically once the install
         genuinely succeeds -- the user no longer has to find and relaunch
-        it themselves via the Start Menu/Desktop icon."""
+        it themselves via the Start Menu/Desktop icon.
+
+        2026-08-11 follow-up: a real user reported the relaunch above didn't
+        visibly work -- the mechanism itself was confirmed correct (the new
+        process really does start), but Windows' anti-focus-stealing
+        protection can let a background-launched window open invisibly
+        behind whatever else is on screen. `AllowSetForegroundWindow(ASFW_ANY
+        = -1)`, called here while this (old) process is still the foreground
+        app, grants the *next* SetForegroundWindow call from *any* process
+        the right to succeed -- both the new app's own normal startup
+        focus_force() (main.py) and the relaunch helper's own explicit
+        foreground call (update_checker.py) benefit from this. Best-effort:
+        wrapped so a failure here (non-Windows, or the call itself failing)
+        can never block the update from proceeding."""
+        try:
+            if sys.platform == "win32":
+                ctypes.windll.user32.AllowSetForegroundWindow(-1)  # ASFW_ANY
+        except Exception:
+            pass
         try:
             spawn_update_after_current_process_exits(
                 installer_path, relaunch_exe_path=get_installed_exe_path())
