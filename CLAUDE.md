@@ -5889,7 +5889,108 @@ and not just re-run the earlier adversarial focus-stealing test:**
   consistent with this file's own established practice for backend-only fixes (see the Item 16
   follow-up's Gemini-model fix, which used the same reasoning).
 
-**Not committed yet** — pending the user's own review, same standing discipline as every other fix
-in this file. Final real installed state on this dev machine was deliberately left at the genuine,
-freshly-verified **v1.7.2** (not reverted back to 1.7.1) since that's the real, working end state the
-whole investigation was trying to reach.
+**Update**: committed (`5575e40` fix + `58985db` version bump), tagged, pushed, and released as
+**v1.7.3** — real CI run green on all 4 jobs, real GitHub release live with all 4 platform assets,
+`check_for_update("1.7.2")` confirmed detecting it for real. The "not committed yet" line above is
+stale, left as-is per this file's own practice of not editing another checkpoint's historical wording
+after the fact.
+
+## Real bug found via a real live update attempt on v1.7.3: "Security validation failure: parent process has different executable!" (2026-08-17)
+
+User tried the real v1.7.3 update flow for real and hit a NEW, more serious symptom: a PowerShell
+console window briefly flashed, then a real native error dialog — "Security validation failure:
+parent process has different executable!" — appeared, and no MessageCannon window ever reopened
+automatically (had to reopen manually via the Start Menu).
+
+**Investigated for real, not guessed, per this file's own standing discipline:**
+1. Confirmed via a live, direct byte-scan of the real currently-installed `MessageCannon.exe` that
+   this exact string is genuinely embedded in the shipped binary itself (found alongside
+   `"Security validation failure: failed to obtain information about parent process!"`,
+   `"...failed to obtain executable path for parent process!"`,
+   `"...unexpected name of application's home directory!"`, and PyInstaller's own splash-related
+   bootloader strings) — confirming this comes from **PyInstaller's own onefile bootloader**, not
+   this app's own code (a targeted `grep` across every `.py` file in this repo found zero matches).
+2. `WebSearch` + fetching PyInstaller's actual bootloader source
+   (`bootloader/src/pyi_security.c` on GitHub, located via `gh api
+   repos/pyinstaller/pyinstaller/contents/bootloader/src`) confirmed the exact real mechanism: since
+   PyInstaller 6.9, a process spawned via the same executable as its parent is, by default, assumed
+   to be a "worker subprocess" that should reuse the parent's already-extracted resources (tracked
+   via internal `_PYI_ARCHIVE_FILE`/`_PYI_APPLICATION_HOME_DIR`/`_PYI_PARENT_PROCESS_LEVEL`
+   environment variables); PyInstaller 6.22.1+ added a real security check for exactly this
+   scenario — the literal C code: `if (strcmp(parent_executable, pyi_ctx->executable_filename) !=
+   0) { ...error... }`, comparing the REAL, OS-queried parent process's executable path against the
+   current process's own path. **CI's workflow runs a bare `pip install pyinstaller` with no version
+   pin**, so the real shipped exe is built with whatever's latest at build time (confirmed: upgrading
+   this dev machine's own PyInstaller from the previously-installed 6.20.0 to 6.22.1 was needed
+   before this check even existed locally to test against — this exact version gap is almost
+   certainly why the original v1.7.1/v1.7.2 relaunch fixes were never caught failing this way in
+   earlier local testing).
+3. **Found the literal real crashed process still sitting on this real desktop** (the user's own
+   machine) — a genuine `MessageCannon.exe` (pid 17960, window title "Error") left over from their
+   real attempt. Installed `psutil` (read-only, diagnostic-only, not a shipped dependency) and read
+   that REAL process's own real environment directly: `_PYI_APPLICATION_HOME_DIR =
+   C:\Users\HAROON~1\AppData\Local\Temp\_MEI120802` (a directory confirmed no longer on disk — a
+   genuinely stale reference from an already-exited process) and `_PYI_PARENT_PROCESS_LEVEL = 1` —
+   real, direct, undeniable confirmation that this real process was carrying real leaked/stale
+   PyInstaller bookkeeping at the moment it hit the real security check. Confirmed via the real
+   registry that the install itself had genuinely already applied (`Version=1.7.3`) — this bug is
+   specific to the **relaunch** step, not the install step already fixed above.
+4. Root cause: `subprocess.Popen` inherits the calling process's full environment by default when
+   `env=` isn't given. When `_apply_downloaded_update()` runs for real (inside the actual running,
+   frozen MessageCannon.exe — which has real `_PYI_*` bookkeeping vars set by its own bootloader),
+   those vars leak into the spawned PowerShell helper and, since PowerShell's own `Start-Process`
+   also inherits environment by default, onward into the relaunched top-level bootloader process
+   too — which can then misclassify itself as a "worker subprocess" of a parent that, per the real
+   OS, is `powershell.exe` (not another MessageCannon.exe), tripping the real security check.
+   **Confirmed directly, not assumed**: a throwaway script setting fake `_PYI_ARCHIVE_FILE`/
+   `_PYI_APPLICATION_HOME_DIR` on itself (simulating being inside a real frozen process) and having
+   the spawned target dump its own visible environment showed those exact fake values leaking all
+   the way through, unmodified, on the pre-fix code.
+
+**Fixed**, both in `spawn_update_after_current_process_exits()`: the helper's own `subprocess.Popen`
+call now passes an explicit `env=` with every `_PYI`-prefixed key stripped, so nothing stale ever
+reaches PowerShell in the first place; and, defensively, the `.ps1` relaunch script itself also
+clears any `_PYI*` variables from its own process environment immediately before launching the
+relaunch target, in case a future PyInstaller version adds more variables under the same prefix.
+
+**Verified — the leak mechanism itself, rigorously, both ways:**
+- New `tests/test_update_apply_race.py::test_helper_env_strips_pyi_prefixed_vars` (the `env=` passed
+  to `Popen` never contains a `_PYI`-prefixed key, while real unrelated vars are preserved) and
+  `test_relaunch_target_does_not_inherit_stale_pyi_env_vars` (a real, full subprocess chain — helper
+  → installer stand-in → relaunch target, nothing mocked — with fake `_PYI_*` vars set on the
+  calling process; the relaunched target's own real visible environment must come up clean).
+  **Confirmed the second test is genuinely load-bearing**: reverted the fix (`git stash`) and reran
+  it directly — it failed with the real leaked values
+  (`_PYI_APPLICATION_HOME_DIR=C:\fake\_MEIold`, `_PYI_ARCHIVE_FILE=C:\fake\OLD_VERSION.exe`) visibly
+  present in the relaunched target's own environment, then restored the fix and confirmed it passes.
+  20/20 tests in the file pass; full plain `tests/` suite 225/225.
+
+**Honest, explicit limitation — could NOT force the exact real MessageBox to reproduce synthetically,
+despite substantial real effort, and this is stated plainly rather than glossed over:** built a real,
+minimal PyInstaller onefile "probe" exe (compiled with the same unpinned/latest PyInstaller CI would
+use, confirmed to contain the same real security-check bytes) that calls the real
+`spawn_update_after_current_process_exits()` against itself, including a version that genuinely
+overwrites its own on-disk file mid-flight with a second, distinct build (the closest synthetic
+mirror of a real Inno Setup install swap) before relaunching from the same stable path — run both
+with and without the fix. In every variant tried, the relaunch succeeded cleanly, with no crash, even
+on the pre-fix code — meaning whatever exact condition made the REAL app's real top-level bootloader
+process inherit and act on the stale vars (as directly proven happened, via the real crashed
+process's own real environment above) wasn't reproduced by this synthetic probe, likely because that
+inheritance happens at the top-level bootloader (a separate, pure-C process this probe's own Python
+code can never directly instrument) and something about the probe's simpler setup didn't trigger the
+same "worker subprocess" misclassification the real app hit. The fix itself rests on three
+independent, solid pieces of real evidence (PyInstaller's own source code showing exactly what's
+compared; the real crashed process's own real leaked environment values; and a real, confirmed
+subprocess-chain test proving the leak class this fix targets is real and that the fix eliminates
+it) — but the very last step, a full literal MessageBox reproduction, was not achieved. Flagging this
+explicitly rather than overclaiming a "fully proven" fix: **the real, decisive confirmation still
+needs the user's own next real update attempt.**
+
+Cleaned up after this investigation: the real stray "Error"-titled MessageCannon.exe process left on
+the desktop, all local probe-exe build artifacts, and `psutil` was installed only as a local,
+read-only diagnostic tool (not added to `requirements.txt`, not shipped). Real production database
+reconfirmed untouched throughout (34 contacts, 3 campaigns).
+
+**Not committed yet** — pending the user's own review and explicit go-ahead, given the honest
+reproduction gap above, before this goes through the same version-bump/tag/push/release pattern as
+every other real fix in this file.

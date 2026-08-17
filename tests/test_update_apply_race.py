@@ -337,6 +337,97 @@ def test_relaunch_ps1_file_also_waits_for_the_target_file_to_unlock(monkeypatch,
     assert "targetExePath" in content
 
 
+def test_helper_env_strips_pyi_prefixed_vars(monkeypatch, tmp_path):
+    """Real bug fix (2026-08-17), found from a real user report showing an
+    actual PyInstaller error dialog after a real Download & Install click:
+    "Security validation failure: parent process has different
+    executable!" -- confirmed by reading the strings embedded in the real
+    shipped MessageCannon.exe to come from PyInstaller's OWN onefile
+    bootloader security check, not this app's code. Root cause:
+    subprocess.Popen inherits the calling process's full environment by
+    default -- when this whole flow runs for real (inside the actual
+    frozen app, which has real _PYI_ARCHIVE_FILE/_PYI_APPLICATION_HOME_DIR
+    etc. set by its own bootloader), those stale values leak into the
+    spawned PowerShell helper and, from there, into the relaunched
+    (updated) exe too -- which then looks like a spoofed worker
+    sub-process of a parent that doesn't match its real OS parent
+    (powershell.exe), tripping the security check for real."""
+    monkeypatch.setenv("_PYI_ARCHIVE_FILE", r"C:\fake\OLD_VERSION.exe")
+    monkeypatch.setenv("_PYI_APPLICATION_HOME_DIR", r"C:\fake\_MEIold")
+    monkeypatch.setenv("SOME_REAL_UNRELATED_VAR", "keep-me")
+    captured = {}
+
+    class _FakePopen:
+        def __init__(self, command, **kwargs):
+            captured["kwargs"] = kwargs
+            self.pid = 999999
+
+    monkeypatch.setattr("src.core.update_checker.subprocess.Popen", _FakePopen)
+    spawn_update_after_current_process_exits(str(tmp_path / "installer.exe"), pid=1234)
+
+    env = captured["kwargs"].get("env")
+    assert env is not None, "must pass an explicit env= to Popen, not inherit implicitly"
+    assert not any(k.startswith("_PYI") for k in env), (
+        "no _PYI-prefixed variable may reach the helper -- this is exactly "
+        "what leaked into the relaunched app and tripped PyInstaller's own "
+        "real security check")
+    assert env.get("SOME_REAL_UNRELATED_VAR") == "keep-me", (
+        "must still be a real environment (other variables preserved), not "
+        "an empty/broken one")
+
+
+def test_relaunch_target_does_not_inherit_stale_pyi_env_vars(monkeypatch, tmp_path):
+    """The real, full end-to-end version of the test above: a genuine
+    subprocess.Popen chain (helper -> installer -> relaunch target, all
+    real Windows processes, nothing mocked at this level) with fake
+    _PYI_* vars set on the calling process (simulating being inside a
+    real frozen MessageCannon.exe) must NOT let those vars reach the
+    relaunched target's own visible environment. Confirmed to fail
+    against the pre-fix code (a real, direct repro, not assumed) before
+    trusting this test."""
+    monkeypatch.setenv("_PYI_ARCHIVE_FILE", r"C:\fake\OLD_VERSION.exe")
+    monkeypatch.setenv("_PYI_APPLICATION_HOME_DIR", r"C:\fake\_MEIold")
+
+    install_marker = tmp_path / "install_marker.txt"
+    installer = _write_marker_stand_in(tmp_path, install_marker, name="fake_installer.bat")
+
+    relaunch_marker = tmp_path / "relaunch_env_marker.txt"
+    relaunch_bat = tmp_path / "fake_relaunch_target.bat"
+    relaunch_bat.write_text(
+        '@echo off\r\n'
+        f'(for /f "delims=" %%v in (\'set _PYI 2^>nul\') do echo %%v)> "{relaunch_marker}"\r\n'
+        f'if not exist "{relaunch_marker}" echo NO_PYI_VARS_FOUND> "{relaunch_marker}"\r\n'
+    )
+
+    dummy = subprocess.Popen(
+        ["powershell.exe", "-NoProfile", "-Command", "Start-Sleep -Seconds 30"])
+    try:
+        spawn_update_after_current_process_exits(
+            installer, pid=dummy.pid, relaunch_exe_path=str(relaunch_bat))
+        dummy.terminate()
+        dummy.wait(timeout=5)
+
+        deadline = time.time() + 15
+        while time.time() < deadline and not install_marker.exists():
+            time.sleep(0.3)
+        assert install_marker.exists(), "the installer never ran"
+
+        deadline = time.time() + 15
+        while time.time() < deadline and not relaunch_marker.exists():
+            time.sleep(0.3)
+        assert relaunch_marker.exists(), "the relaunch target never ran"
+
+        content = relaunch_marker.read_text()
+        assert "_PYI_ARCHIVE_FILE" not in content and "_PYI_APPLICATION_HOME_DIR" not in content, (
+            f"stale _PYI_* env vars leaked into the relaunched target's own "
+            f"visible environment -- this is the real mechanism behind the "
+            f"reported 'Security validation failure' dialog. Saw: {content!r}")
+    finally:
+        if dummy.poll() is None:
+            dummy.terminate()
+            dummy.wait(timeout=5)
+
+
 def test_uses_create_no_window_to_prevent_console_flash(monkeypatch, tmp_path):
     """Real bug fix (2026-08-17): a real user reported a visible PowerShell
     console window briefly flashing on screen right after clicking

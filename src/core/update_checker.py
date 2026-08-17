@@ -329,10 +329,50 @@ def spawn_update_after_current_process_exits(
        ever allocating a console for the helper in the first place (so
        there is nothing to flash, a stronger guarantee than hiding an
        already-created one) and does not reintroduce the earlier
-       `Wait-Process` breakage, since it is not `DETACHED_PROCESS`."""
+       `Wait-Process` breakage, since it is not `DETACHED_PROCESS`.
+
+    2026-08-17 follow-up real bug fix, found from a real user report showing
+    an actual PyInstaller error dialog after a real Download & Install
+    click: "Security validation failure: parent process has different
+    executable!" -- this exact wording, confirmed by reading the strings
+    embedded in the real shipped MessageCannon.exe, comes from PyInstaller's
+    own onefile bootloader (not this app's code): starting around
+    PyInstaller 6.9, a process spawned via the same executable as its
+    parent is assumed to be a worker sub-process that should REUSE the
+    parent's already-extracted resources, tracked via internal `_PYI_*`
+    environment variables (`_PYI_ARCHIVE_FILE`, `_PYI_APPLICATION_HOME_DIR`,
+    etc.) -- and newer PyInstaller versions added a real security check
+    validating that assumption against the actual OS-reported parent
+    process before trusting it.
+
+    Root cause: `subprocess.Popen` inherits the calling process's FULL
+    environment by default when `env=` isn't given. When this whole update
+    flow runs for real (inside the actual running, frozen MessageCannon.exe,
+    not an external test driver), the OLD process's own real `_PYI_*`
+    bookkeeping vars leak into the spawned PowerShell helper, and from there
+    -- since PowerShell's own `Start-Process` also inherits its environment
+    by default -- into the newly relaunched (updated) exe too. That process
+    then sees stale bookkeeping pointing at the OLD version's archive/temp
+    dir while its real OS parent is `powershell.exe`, not another
+    MessageCannon.exe -- exactly the mismatch the security check correctly
+    flags. Confirmed directly, not assumed: a throwaway test that sets fake
+    `_PYI_ARCHIVE_FILE`/`_PYI_APPLICATION_HOME_DIR` values (simulating being
+    inside a real frozen process) and has the spawned target dump its own
+    visible environment showed those exact values leaking all the way
+    through, unmodified, before this fix.
+
+    Fixed by explicitly building the helper's environment (`env=`) with
+    every `_PYI`-prefixed key stripped, so nothing stale ever reaches
+    PowerShell in the first place -- and, defensively, the `.ps1` script
+    itself also clears any `_PYI*` variables from its own process
+    environment immediately before it launches the relaunch target, in case
+    a future PyInstaller version introduces additional internal variables
+    under the same prefix that this Python-level filter should already
+    catch, or PowerShell itself ever picks up something from elsewhere."""
     if pid is None:
         pid = os.getpid()
     install_cmd = launch_silent_install_and_get_command(installer_path)
+    helper_env = {k: v for k, v in os.environ.items() if not k.startswith("_PYI")}
     if not relaunch_exe_path:
         escaped_path = install_cmd[0].replace("'", "''")
         args_literal = ",".join(f"'{a}'" for a in install_cmd[1:])
@@ -364,7 +404,7 @@ def spawn_update_after_current_process_exits(
     if sys.platform == "win32":
         kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW
     subprocess.Popen(
-        command, close_fds=True,
+        command, close_fds=True, env=helper_env,
         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         **kwargs)
 
@@ -414,6 +454,19 @@ $installerArgs = @($InstallerArgsStr -split ' ' | Where-Object { $_ -ne '' })
 $p = Start-Process -FilePath $InstallerPath -ArgumentList $installerArgs -Wait -PassThru
 
 if ($p.ExitCode -eq 0 -and $RelaunchPath) {
+    # Real bug fix (2026-08-17): PyInstaller onefile's own internal _PYI_*
+    # bookkeeping env vars (belonging to the OLD, closed process) can reach
+    # this helper via inheritance and, if left in place, would leak into
+    # the relaunch target below too -- making it look like a spoofed
+    # "worker sub-process" of a process that no longer matches its real OS
+    # parent, tripping PyInstaller's own real "Security validation failure:
+    # parent process has different executable!" check. The Python side
+    # already strips these before spawning this helper; clearing again here
+    # is defense in depth against any future PyInstaller internal variable
+    # under the same prefix, or anything else that might set one.
+    Get-ChildItem Env: | Where-Object { $_.Name -like '_PYI*' } | ForEach-Object {
+        Remove-Item "Env:$($_.Name)" -ErrorAction SilentlyContinue
+    }
     $new = Start-Process -FilePath $RelaunchPath -PassThru
     try {
         Add-Type -Name ForegroundHelper -Namespace MessageCannonUpdate -MemberDefinition @'
