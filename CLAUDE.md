@@ -5785,3 +5785,111 @@ returns" reasoning already on record above it.
 
 **Git state**: still nothing from either this manual update or the Item 39 v2 redesign itself is
 committed — all pending the user's own review together.
+
+## Reconciliation note (2026-08-17) — checkpoint drift found, and a real, deeper update-apply bug fixed
+
+Session picked up with `git status`/`git log` review before any new work, per this file's own
+standing "read history first" discipline. Found this file's own checkpoint trail had gone stale:
+the Item 39 v2 redesign and manual update above (recorded as "nothing committed") had in fact been
+committed and released as `v1.6.0`/`v1.7.0` (`6a20bbf`, `45f919e`, `ca60d9f`, `6667c64`), and two
+further real fixes had shipped after that — `31d3aed`/`59f79d0` (v1.7.1: auto-relaunch the app after
+a successful in-app update install) and `d46f276`/`4153f3d` (v1.7.2: bring the auto-relaunched
+window to the real OS foreground, since Windows' anti-focus-stealing protection let it open
+invisibly behind other windows) — with **no corresponding CLAUDE.md checkpoint ever written for
+either**. Noted here rather than silently rewritten, per this file's own practice of not editing
+another checkpoint's historical wording after the fact.
+
+**The v1.7.2 fix did not actually work.** The user reported, from a real live install attempt: a
+PowerShell console window briefly flashed on screen right after clicking "Download & Install", no
+MessageCannon window ever reappeared automatically, and manually reopening via the Start Menu still
+showed the OLD version (not v1.7.2) — a more serious symptom than "relaunch didn't focus," since it
+implies the install itself never applied.
+
+**Investigated for real, not assumed, per the user's explicit instruction to reproduce end to end
+and not just re-run the earlier adversarial focus-stealing test:**
+1. Confirmed via the real Windows registry (`HKCU\Software\MessageCannon\Version`) that the real
+   installed version genuinely was still 1.7.1 — the install had in fact never applied.
+2. Confirmed the leftover downloaded v1.7.2 installer in `%TEMP%` was genuine and worked correctly
+   when run directly (no app running): real `/LOG=` output showed "Installation process succeeded",
+   registry flipped to 1.7.2. So the installer itself was never the problem.
+3. Launched the real installed exe and confirmed, via `Get-CimInstance Win32_Process`, the same
+   PyInstaller onefile bootloader-parent + windowed-child process pair already documented in the
+   original v1.7.1 fix's own commit message. Measured directly, repeatedly: killing the CHILD
+   process (the one `os.getpid()` inside the running app actually resolves to, and therefore the
+   PID `spawn_update_after_current_process_exits()`'s `Wait-Process` was waiting on) left the real,
+   on-disk `MessageCannon.exe` file **still locked for up to ~900ms-1.8s afterward** — the *parent*
+   bootloader process, not the child, is the one still holding it open while it finishes cleaning up
+   its own temp extraction directory. `Wait-Process -Id $TargetPid` was returning almost
+   immediately once the child exited, so the installer launched right into a still-locked target
+   file, failed with a real (silently-suppressed, `/SUPPRESSMSGBOXES`) non-zero Inno Setup exit
+   code, and — since relaunch is correctly gated on exit code 0 — never relaunched either. One root
+   cause explains both halves of the reported symptom.
+4. Separately confirmed the console-flash cause by reading the code: `creationflags` for the
+   PowerShell helper was `CREATE_NEW_PROCESS_GROUP` only (`DETACHED_PROCESS` was deliberately
+   dropped in the original 2026-08-11 fix, confirmed via a real marker-file test to break
+   `Wait-Process`) — but `CREATE_NO_WINDOW` (a distinct flag, 0x08000000 vs `DETACHED_PROCESS`'s
+   0x00000008) was never actually tried. `-WindowStyle Hidden` alone only hides an already-created
+   console, a known `powershell.exe`-specific flash quirk.
+
+**Fixed, both in `src/core/update_checker.py`'s `spawn_update_after_current_process_exits()`:**
+1. Neither PS1 variant (the inline no-relaunch branch, and the `.ps1`-file relaunch branch) trusts
+   "watched PID exited" as a proxy for "the file is free" anymore. Both now poll the actual target
+   `.exe` path (`$RelaunchPath` when given — it's built from the exact registry `InstallPath` value
+   the installer itself writes, so it names the precise on-disk file — falling back to the watched
+   process's own resolved image path otherwise) for real exclusive-openability (`[System.IO.File]::Open(...,
+   'ReadWrite', 'None')`, the same access Inno Setup itself needs), bounded by a 10s timeout, before
+   ever launching the installer. This sidesteps needing to reason about exactly which process in the
+   bootloader/child pair holds the lock — a PyInstaller implementation detail that could shift across
+   versions — by checking the one fact that actually matters.
+2. `creationflags` is now `CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW` — prevents Windows from ever
+   allocating a console for the helper at all, a stronger guarantee than hiding an already-created
+   one, and confirmed not to reintroduce the earlier `Wait-Process` breakage since it is not
+   `DETACHED_PROCESS`.
+
+**Verified with real, repeated, end-to-end proof — not just unit tests, per the user's explicit
+"don't mark this fixed until a real, repeated test shows both" instruction:**
+- 12 new/extended tests in `tests/test_update_apply_race.py` (now 18, all passing). The key new one
+  (`test_installer_does_not_run_while_target_exe_file_is_still_locked_after_pid_exits`) simulates the
+  exact bootloader/child split directly: a dummy process stands in for the watched PID and exits
+  immediately, while a SEPARATE real process independently holds a real, exclusive `.NET FileStream`
+  lock (`share=None`) on the target path for ~2s more. **A first version of this test used a single
+  fixed `time.sleep(0.8)` check and was confirmed, via a real measured timing script, to pass against
+  BOTH the buggy and the fixed code by pure coincidence** (the real buggy-code marker consistently
+  appeared at ~0.9-1.0s on this machine, uncomfortably close to the 0.8s sample point) — caught before
+  trusting the test, and rewritten to continuously poll and assert the real ordering
+  (`marker_seen_at >= lock_released_at`) instead of a single timed sample. Re-confirmed the corrected
+  test fails against the pre-fix code (`git stash`, exact real failure:
+  `1786951758.5 >= 1786951760.0` — install ran ~1.5s before the real lock released) and passes after
+  restoring the fix.
+- **Three full, real, physical install cycles**, each one: uninstall the current install via its
+  real uninstaller, install the real, genuinely-downloaded `v1.7.1` GitHub release asset (SHA256/size
+  confirmed) as an honest "old version" baseline, launch the real compiled exe, wait for its real
+  main window (not the transient splash — a first attempt sent `WM_CLOSE` to the splash's own hwnd
+  by mistake and had to be corrected), call the real `spawn_update_after_current_process_exits()`
+  with the real child PID and the real installed-exe path (exactly what `_apply_downloaded_update`
+  does) using the real, genuinely-downloaded `v1.7.2` installer, send a real `WM_CLOSE` to the real
+  running window (not a force-kill — matching how the app actually closes), and continuously poll
+  via raw `EnumWindows`/`GetClassNameW` (no subprocess spawning in the monitor itself, to avoid any
+  self-noise) for any new `ConsoleWindowClass` window appearing anywhere on the system throughout the
+  whole sequence. All three runs: the real registry `Version` genuinely flipped `1.7.1` → `1.7.2`
+  (16-18s after close), the real installed `.exe`'s mtime/size genuinely changed (confirming a real
+  file overwrite, not a no-op), **zero console windows were ever observed** in any of the three runs,
+  and a new MessageCannon process genuinely launched automatically each time. Foreground confirmation
+  itself had a real automated false-negative on runs 2-3 (traced to my own test script comparing
+  against the transient splash screen's window handle, which differs from the real main window's
+  handle once the splash closes — not a product bug); re-verified with a fresh, direct
+  `GetForegroundWindow()`/`GetWindowThreadProcessId` check immediately after each of those runs and
+  confirmed the real, current foreground window genuinely was the relaunched app's real main window
+  (title "MessageCannon Pro v1.7.2") in both cases.
+- Real production database reconfirmed untouched throughout all three physical install cycles: 34
+  contacts, 3 campaigns — this investigation only launched/closed the app, never touched its data.
+- Full `tests/test_update_apply_race.py` (18/18) and the full plain `tests/` suite (223/223) re-run
+  clean after the fix. The full parallel `tests/ui/` suite was not re-run for this specific change —
+  it's scoped entirely to `update_checker.py`, a pure backend module with no UI structure touched,
+  consistent with this file's own established practice for backend-only fixes (see the Item 16
+  follow-up's Gemini-model fix, which used the same reasoning).
+
+**Not committed yet** — pending the user's own review, same standing discipline as every other fix
+in this file. Final real installed state on this dev machine was deliberately left at the genuine,
+freshly-verified **v1.7.2** (not reverted back to 1.7.1) since that's the real, working end state the
+whole investigation was trying to reach.

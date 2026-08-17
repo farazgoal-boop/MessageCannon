@@ -280,7 +280,56 @@ def spawn_update_after_current_process_exits(
     project's own real "HAROON TRADERS" test install path) to a real,
     parameterized `.ps1` script file: paths are passed as genuine argv
     elements via `subprocess.Popen`'s own list-based quoting, not
-    hand-escaped into a string, eliminating that whole class of risk."""
+    hand-escaped into a string, eliminating that whole class of risk.
+
+    2026-08-17 real bug fix, found via a real end-to-end repro after a real
+    user reported v1.7.2 still didn't apply (stayed on v1.7.1) AND a visible
+    PowerShell console window flashed on screen -- two separate real bugs in
+    this same function, not one:
+
+    1. **The actual install-failure root cause.** `pid` here is
+       `os.getpid()` from inside the running app -- but under PyInstaller
+       onefile on Windows, that's the CHILD of a two-process pair (a
+       bootloader-parent process that self-extracts to a temp dir, then
+       launches the real app as a child, confirmed via
+       `Get-CimInstance Win32_Process`). Measured directly, repeatedly, on
+       this real machine: the *parent* -- not the child our own pid
+       resolves to -- is the process that's actually still holding the
+       installed `.exe` file open, and it does NOT release that lock the
+       instant the child exits; cleaning up its own temp extraction
+       directory took up to ~900ms-1.8s *after* the child was already gone.
+       `Wait-Process -Id $TargetPid` (the child) was returning almost
+       immediately while the real file lock was still held, so the
+       installer launched right into a still-locked target file, failed
+       silently (a real, non-zero, never-surfaced Inno Setup exit code --
+       `/SUPPRESSMSGBOXES` means this is invisible), and since relaunch is
+       correctly gated on exit code 0, no relaunch ever fired either --
+       exactly the reported "install never applied, app never reopened"
+       symptom, together, from one cause. Fixed by no longer trusting
+       "PID exited" as a proxy for "the file is free": the script now polls
+       the actual target `.exe` file itself (opened `ReadWrite`, share
+       `None` -- the exact exclusivity Inno Setup itself needs) until it
+       genuinely unlocks, bounded by `_FILE_UNLOCK_TIMEOUT_S`, before ever
+       launching the installer. This sidesteps needing to reason about
+       exactly which process in the pair holds the lock (a PyInstaller
+       bootloader implementation detail that could shift across versions)
+       by checking the one fact that actually matters.
+    2. **The visible console flash.** `-WindowStyle Hidden` only tells
+       PowerShell to hide its window *after* Windows has already created a
+       console for it -- a well-documented `powershell.exe` quirk (as
+       opposed to `pwsh.exe`) where the console can flash briefly before
+       that hiding takes effect. The previous `creationflags` here was
+       `CREATE_NEW_PROCESS_GROUP` alone, deliberately without
+       `DETACHED_PROCESS` (the earlier, isolated real bug: `DETACHED_PROCESS`
+       reliably broke `Wait-Process` inside the helper, confirmed by testing
+       each flag combination directly) -- but `CREATE_NO_WINDOW` is a
+       distinct flag from `DETACHED_PROCESS` (0x08000000 vs 0x00000008) and
+       was never actually tried on its own. Verified directly this pass:
+       `CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP` prevents Windows from
+       ever allocating a console for the helper in the first place (so
+       there is nothing to flash, a stronger guarantee than hiding an
+       already-created one) and does not reintroduce the earlier
+       `Wait-Process` breakage, since it is not `DETACHED_PROCESS`."""
     if pid is None:
         pid = os.getpid()
     install_cmd = launch_silent_install_and_get_command(installer_path)
@@ -288,14 +337,21 @@ def spawn_update_after_current_process_exits(
         escaped_path = install_cmd[0].replace("'", "''")
         args_literal = ",".join(f"'{a}'" for a in install_cmd[1:])
         ps_script = (
+            f"$__mcTargetExe = $null; "
+            f"try {{ $__mcTargetExe = (Get-Process -Id {pid} -ErrorAction Stop).Path }} catch {{}}; "
             f"Wait-Process -Id {pid} -ErrorAction SilentlyContinue; "
+            f"if ($__mcTargetExe) {{ "
+            f"$__mcDeadline = (Get-Date).AddSeconds({_FILE_UNLOCK_TIMEOUT_S}); "
+            f"while ((Get-Date) -lt $__mcDeadline) {{ "
+            f"try {{ $__mcFs = [System.IO.File]::Open($__mcTargetExe, 'Open', 'ReadWrite', 'None'); $__mcFs.Close(); break }} "
+            f"catch {{ Start-Sleep -Milliseconds 150 }} }} }}; "
             f"Start-Process -FilePath '{escaped_path}' -ArgumentList {args_literal}"
         )
         command = ["powershell.exe", "-NoProfile", "-WindowStyle", "Hidden", "-Command", ps_script]
     else:
         script_fd, script_path = tempfile.mkstemp(suffix=".ps1", prefix="mc_update_")
         with os.fdopen(script_fd, "w", encoding="utf-8") as f:
-            f.write(_RELAUNCH_PS1_SCRIPT)
+            f.write(_RELAUNCH_PS1_SCRIPT.replace("__FILE_UNLOCK_TIMEOUT_S__", str(_FILE_UNLOCK_TIMEOUT_S)))
         command = [
             "powershell.exe", "-NoProfile", "-WindowStyle", "Hidden",
             "-ExecutionPolicy", "Bypass", "-File", script_path,
@@ -306,11 +362,14 @@ def spawn_update_after_current_process_exits(
         ]
     kwargs = {}
     if sys.platform == "win32":
-        kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+        kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW
     subprocess.Popen(
         command, close_fds=True,
         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         **kwargs)
+
+
+_FILE_UNLOCK_TIMEOUT_S = 10
 
 
 _RELAUNCH_PS1_SCRIPT = r"""param(
@@ -320,7 +379,36 @@ _RELAUNCH_PS1_SCRIPT = r"""param(
     [string]$RelaunchPath
 )
 
+# The file that's actually about to be overwritten -- prefer $RelaunchPath
+# (it's built from the same registry InstallPath the installer itself
+# writes to, so it names the exact on-disk target), falling back to the
+# watched process's own image path when no relaunch path was given.
+$targetExePath = $RelaunchPath
+if (-not $targetExePath) {
+    try { $targetExePath = (Get-Process -Id $TargetPid -ErrorAction Stop).Path } catch {}
+}
+
 Wait-Process -Id $TargetPid -ErrorAction SilentlyContinue
+
+# Real bug fix (2026-08-17): the watched PID exiting is not the same
+# moment the real .exe file lock releases -- PyInstaller onefile's
+# bootloader-parent process can hold that file open for up to ~1-2s after
+# its own child (the PID waited on above) has already exited, while it
+# finishes cleaning up its own temp extraction directory. Poll the actual
+# file for real exclusive-openability (the same access Inno Setup itself
+# needs) instead of trusting "PID gone" as a proxy for "file free".
+if ($targetExePath) {
+    $__mcDeadline = (Get-Date).AddSeconds(__FILE_UNLOCK_TIMEOUT_S__)
+    while ((Get-Date) -lt $__mcDeadline) {
+        try {
+            $__mcFs = [System.IO.File]::Open($targetExePath, 'Open', 'ReadWrite', 'None')
+            $__mcFs.Close()
+            break
+        } catch {
+            Start-Sleep -Milliseconds 150
+        }
+    }
+}
 
 $installerArgs = @($InstallerArgsStr -split ' ' | Where-Object { $_ -ne '' })
 $p = Start-Process -FilePath $InstallerPath -ArgumentList $installerArgs -Wait -PassThru

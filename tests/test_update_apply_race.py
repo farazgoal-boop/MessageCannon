@@ -227,6 +227,144 @@ def test_does_not_relaunch_when_the_install_fails(tmp_path):
             dummy.wait(timeout=5)
 
 
+def test_installer_does_not_run_while_target_exe_file_is_still_locked_after_pid_exits(tmp_path):
+    """Real bug fix (2026-08-17), found from a real user report that v1.7.2
+    still didn't apply (stayed on v1.7.1) after clicking Download & Install:
+    the watched PID exiting is NOT the same moment the real installed .exe
+    file's lock actually releases. PyInstaller onefile ships a bootloader-
+    parent process that self-extracts to a temp dir and then launches the
+    real app as a CHILD -- `os.getpid()` inside the app resolves to that
+    child, but the *parent* is the one still holding the real, on-disk exe
+    file open, and measured directly on a real machine it can keep holding
+    it for up to ~1-2s after the child has already exited (cleaning up its
+    own temp extraction dir). This test simulates that split directly: a
+    dummy process stands in for the watched PID and exits immediately,
+    while a SEPARATE process independently holds a real, exclusive lock
+    (.NET FileStream, share=None -- the same access Inno Setup itself
+    needs) on the target exe path for a further ~2s. The installer must
+    not run until that real lock actually releases, not just once the
+    watched PID is gone."""
+    marker = tmp_path / "marker.txt"
+    installer = _write_marker_stand_in(tmp_path, marker)
+    target_exe = tmp_path / "MessageCannon.exe"
+    target_exe.write_bytes(b"stand-in exe bytes")
+
+    dummy = subprocess.Popen(
+        ["powershell.exe", "-NoProfile", "-Command", "Start-Sleep -Seconds 30"])
+    lock_holder = subprocess.Popen([
+        "powershell.exe", "-NoProfile", "-Command",
+        f"$fs = [System.IO.File]::Open('{target_exe}', 'Open', 'ReadWrite', 'None'); "
+        f"Start-Sleep -Seconds 2; $fs.Close()",
+    ])
+    try:
+        spawn_update_after_current_process_exits(
+            installer, pid=dummy.pid, relaunch_exe_path=str(target_exe))
+        dummy.terminate()
+        dummy.wait(timeout=5)
+
+        # Poll continuously (not a single fixed-delay sample -- a first
+        # version of this test used a single time.sleep(0.8) check and was
+        # confirmed, via a real measured timing script, to pass against
+        # BOTH the buggy and the fixed code by pure coincidence: on the
+        # real buggy code the marker consistently appeared around ~0.9-1.0s
+        # on this machine, uncomfortably close to a 0.8s single sample) so
+        # the actual real-world ordering of "marker appears" vs "lock
+        # released" is what's asserted, not a guessed timing window.
+        marker_seen_at = None
+        lock_released_at = None
+        deadline = time.time() + 10
+        while time.time() < deadline and (marker_seen_at is None or lock_released_at is None):
+            if marker_seen_at is None and marker.exists():
+                marker_seen_at = time.time()
+            if lock_released_at is None and lock_holder.poll() is not None:
+                lock_released_at = time.time()
+            time.sleep(0.05)
+
+        assert lock_released_at is not None, "lock_holder never exited -- test setup is broken"
+        assert marker_seen_at is not None, (
+            "installer never ran even after the real file lock released")
+        assert marker_seen_at >= lock_released_at, (
+            "installer ran BEFORE the real target .exe file lock actually "
+            "released, even though the watched PID had already exited -- "
+            "this is exactly the newly-found real race")
+    finally:
+        if dummy.poll() is None:
+            dummy.terminate()
+            dummy.wait(timeout=5)
+        lock_holder.wait(timeout=10)
+
+
+def test_no_relaunch_script_also_waits_for_the_target_file_to_unlock(monkeypatch, tmp_path):
+    """The rarer no-relaunch branch (relaunch_exe_path omitted) must get the
+    same real-file-lock-wait fix, not just the relaunch branch -- it
+    resolves the watched process's own image path up front and polls it
+    the same way."""
+    captured = {}
+
+    class _FakePopen:
+        def __init__(self, command, **kwargs):
+            captured["script"] = command[-1]
+            self.pid = 999999
+
+    monkeypatch.setattr("src.core.update_checker.subprocess.Popen", _FakePopen)
+    spawn_update_after_current_process_exits(str(tmp_path / "installer.exe"), pid=1234)
+
+    script = captured["script"]
+    assert "System.IO.File" in script and "'None'" in script, (
+        "even the no-relaunch branch must wait for the real file lock to "
+        "release before launching the installer, not just for the "
+        "watched PID to exit")
+
+
+def test_relaunch_ps1_file_also_waits_for_the_target_file_to_unlock(monkeypatch, tmp_path):
+    captured = {}
+
+    class _FakePopen:
+        def __init__(self, command, **kwargs):
+            captured["command"] = command
+            self.pid = 999999
+
+    monkeypatch.setattr("src.core.update_checker.subprocess.Popen", _FakePopen)
+    spawn_update_after_current_process_exits(
+        str(tmp_path / "installer.exe"), pid=1234,
+        relaunch_exe_path=str(tmp_path / "MessageCannon.exe"))
+
+    script_path = captured["command"][captured["command"].index("-File") + 1]
+    content = open(script_path).read()
+    os.remove(script_path)
+
+    assert "System.IO.File" in content and "'None'" in content
+    assert "targetExePath" in content
+
+
+def test_uses_create_no_window_to_prevent_console_flash(monkeypatch, tmp_path):
+    """Real bug fix (2026-08-17): a real user reported a visible PowerShell
+    console window briefly flashing on screen right after clicking
+    Download & Install. `-WindowStyle Hidden` only hides an already-created
+    console -- a well-documented `powershell.exe` quirk where the console
+    can flash before that hiding takes effect. `CREATE_NO_WINDOW` (0x08000000,
+    distinct from the earlier, already-rejected `DETACHED_PROCESS`,
+    0x00000008) prevents Windows from ever allocating a console for the
+    helper process in the first place."""
+    captured = {}
+
+    class _FakePopen:
+        def __init__(self, command, **kwargs):
+            captured["kwargs"] = kwargs
+            self.pid = 999999
+
+    monkeypatch.setattr("src.core.update_checker.subprocess.Popen", _FakePopen)
+    spawn_update_after_current_process_exits(str(tmp_path / "installer.exe"), pid=1234)
+
+    flags = captured["kwargs"].get("creationflags", 0)
+    assert flags & subprocess.CREATE_NO_WINDOW != 0, (
+        "CREATE_NO_WINDOW must be set so the console never has a chance to "
+        "flash -- -WindowStyle Hidden alone is not sufficient")
+    assert flags & subprocess.DETACHED_PROCESS == 0, (
+        "must not reintroduce DETACHED_PROCESS -- already confirmed to "
+        "break Wait-Process inside this same helper")
+
+
 def test_no_relaunch_param_keeps_the_original_fire_and_forget_behavior(monkeypatch, tmp_path):
     """When relaunch_exe_path is omitted -- every call site before this fix
     -- behavior must stay byte-for-byte the pre-fix fire-and-forget
