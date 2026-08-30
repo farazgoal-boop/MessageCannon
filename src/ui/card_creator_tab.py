@@ -2567,14 +2567,30 @@ class CardCreatorV2(ctk.CTkFrame):
         most of the zone, or -- when empty -- a dashed-border drop zone
         with explicit drag-and-drop helper text, not a tiny icon. Border/
         background both shift on hover as the only available stand-in for
-        a CSS :hover state on a plain Canvas."""
+        a CSS :hover state on a plain Canvas.
+
+        Real bug found while re-running the full suite after unrelated
+        work: the hover fill used to swap between T.BG_INNER and
+        T.BADGE_BG, but theme.py's Warm Ivory palette defines both tokens
+        as the literal same hex (#F3EAD8) -- a real, silent hover-feedback
+        regression specifically in that palette (Warm Ivory is also this
+        app's default theme for a fresh install, so this wasn't an edge
+        case). Confirmed via `test_icon_zone_hover_changes_border_and_
+        background` failing even run alone, not just under parallel load.
+        Switched the hover fill to T.BG_SURFACE, which is a genuinely
+        distinct value from T.BG_INNER in all three palettes (dark
+        #2A4762 vs #152C42, light #FFFFFF vs #F1F3F7, warm #FFFDF8 vs
+        #F3EAD8) -- confirmed directly, not assumed -- so hover feedback
+        now actually renders everywhere, without touching the shared
+        BADGE_BG token (used at 40+ other call sites app-wide, already
+        contrast-verified against its current value)."""
         canvas = getattr(self, "_icon_preview_canvas", None)
         if canvas is None or not canvas.winfo_exists():
             return
         canvas.delete("all")
         width, height = self._ICON_ZONE_WIDTH, self._ICON_ZONE_HEIGHT
         hovering = getattr(self, "_icon_zone_hovering", False)
-        canvas.configure(bg=T.resolve(T.BADGE_BG if hovering else T.BG_INNER))
+        canvas.configure(bg=T.resolve(T.BG_SURFACE if hovering else T.BG_INNER))
         border_color = T.resolve(T.ACCENT) if hovering else T.resolve(T.BG_BORDER)
 
         if self._micon_image_uri:
