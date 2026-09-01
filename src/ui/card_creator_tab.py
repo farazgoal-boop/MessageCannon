@@ -585,6 +585,16 @@ def generate_html(sections: list, meta: dict, for_preview: bool = False) -> str:
     title = f"{app_name} — {org}" if org else app_name
     footer_tag = f"Created with MessageCannon Pro · {org}" if org else "Created with MessageCannon Pro"
 
+    # Compose reliability pass (P0): mirror the shell rules from <style> onto
+    # inline style="" attributes too, so the card still renders as a card in
+    # an email client that strips embedded <style> blocks. A url(...) (custom
+    # background image, already a large base64 data URI) is deliberately NOT
+    # duplicated inline — it would double-embed the whole payload, and div
+    # background images are unreliable in email clients anyway; it stays in
+    # <style> only, exactly as before this change.
+    _body_bg_inline = f"background:{body_bg};" if "url(" not in body_bg else ""
+    _card_bg_inline = f"background:{card_bg};" if "url(" not in card_bg else ""
+
     return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -618,12 +628,12 @@ def generate_html(sections: list, meta: dict, for_preview: bool = False) -> str:
     color:rgba(255,255,255,0.2)}}
 </style>
 </head>
-<body>
-<div class="page">
-  <div class="card">
+<body style="margin:0;padding:20px;{_body_bg_inline}font-family:Arial,Helvetica,sans-serif">
+<div class="page" style="max-width:560px;margin:0 auto">
+  <div class="card" style="width:100%;max-width:520px;margin:0 auto;{_card_bg_inline}border-radius:20px;overflow:hidden;border:0.5px solid rgba(255,255,255,0.08)">
 {body_html}
   </div>
-  <div class="footer-tag">{footer_tag}</div>
+  <div class="footer-tag" style="text-align:center;margin-top:10px;font-size:10px;color:rgba(255,255,255,0.35)">{footer_tag}</div>
 </div>
 </body>
 </html>"""

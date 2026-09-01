@@ -1876,7 +1876,7 @@ class MainWindow(ctk.CTk):
                                border_width=1, border_color=T.BG_BORDER)
         em_left.grid(row=0, column=0, rowspan=3, sticky="nsew", padx=(0, 8))
         em_left.grid_columnconfigure(0, weight=1)
-        em_left.grid_rowconfigure(4, weight=1)
+        em_left.grid_rowconfigure(5, weight=1)
 
         ctk.CTkLabel(em_left, text="Email compose",
                      font=ctk.CTkFont(size=15, weight="bold"),
@@ -1968,7 +1968,7 @@ class MainWindow(ctk.CTk):
         ]
 
         em_ai_row = ctk.CTkFrame(em_left, fg_color="transparent")
-        em_ai_row.grid(row=3, column=0, padx=16, pady=(0, 8), sticky="ew")
+        em_ai_row.grid(row=3, column=0, padx=16, pady=(0, 4), sticky="ew")
         self.em_generate_ai_btn = ctk.CTkButton(
             em_ai_row, text="✨ Generate with AI", height=30, corner_radius=8,
             fg_color=T.ACCENT, hover_color=T.ACCENT_HOVER, text_color=T.TEXT_HEAD,
@@ -1995,10 +1995,16 @@ class MainWindow(ctk.CTk):
         # re-importing a different file while one is already active is a
         # reasonable, harmless action (it just replaces the current card),
         # unlike the rich-text toolbar/dropdowns which have nothing to act on.
+        #
+        # The warning message gets its OWN full-width row below the buttons
+        # (P2 of the Compose reliability pass): sharing em_ai_row with three
+        # buttons squeezed it to a truncated fragment hidden behind the
+        # "Generate with AI" button.
         self._em_warning_var = StringVar(value="")
-        ctk.CTkLabel(em_ai_row, textvariable=self._em_warning_var, text_color=T.TEXT_DIM,
-                     font=ctk.CTkFont(size=11), wraplength=340, justify="left").pack(
-            side="left", padx=(12, 0))
+        self._em_warning_label = ctk.CTkLabel(
+            em_left, textvariable=self._em_warning_var, text_color=T.TEXT_DIM,
+            font=ctk.CTkFont(size=11), wraplength=560, justify="left", anchor="w")
+        self._em_warning_label.grid(row=4, column=0, padx=16, pady=(0, 6), sticky="ew")
 
         self._compose_em_body = tk.Text(
             em_left, wrap="word", bg=T.resolve(T.BG_INNER), fg=T.resolve(T.TEXT_HEAD),
@@ -2019,7 +2025,7 @@ class MainWindow(ctk.CTk):
         self._compose_em_body.tag_configure("i", font=("Segoe UI", 11, "italic"))
         self._compose_em_body.insert("1.0", "Dear {name},\n\nYour message here.")
         self._pillify_text_widget(self._compose_em_body)
-        self._compose_em_body.grid(row=4, column=0, padx=16, pady=(0, 16), sticky="nsew")
+        self._compose_em_body.grid(row=5, column=0, padx=16, pady=(0, 16), sticky="nsew")
         self._compose_em_body.bind("<KeyRelease>", lambda _e: self._update_email_warnings())
         # _em_subj_var is created once in __init__ and outlives UI rebuilds
         # (e.g. switching to/from the Warm Ivory theme), but this method runs
@@ -2100,10 +2106,22 @@ class MainWindow(ctk.CTk):
         ctk.CTkLabel(em_recip_card, textvariable=self._em_compose_count_var,
                      text_color=T.ACCENT_TEXT, font=ctk.CTkFont(size=13, weight="bold")).grid(
             row=1, column=0, padx=16, pady=(0, 4), sticky="w")
-        ctk.CTkLabel(em_recip_card,
-                     text="Sends to all contacts with an email address.",
-                     text_color=T.TEXT_MUTED, font=ctk.CTkFont(size=11), justify="left").grid(
+        # P2 of the Compose reliability pass: instead of a static "sends to
+        # all with an email address" line that never explained why the count
+        # was lower than the contact total, this now spells out exactly who
+        # is excluded and why (unsubscribed / previously bounced / no email),
+        # and — after a send — what the last run actually did.
+        self._em_recip_detail_var = StringVar(
+            value="All contacts with an email address are included.")
+        ctk.CTkLabel(em_recip_card, textvariable=self._em_recip_detail_var,
+                     text_color=T.TEXT_MUTED, font=ctk.CTkFont(size=11), justify="left",
+                     wraplength=300, anchor="w").grid(
             row=2, column=0, padx=16, pady=(0, 4), sticky="w")
+        self._em_last_run_var = StringVar(value="")
+        ctk.CTkLabel(em_recip_card, textvariable=self._em_last_run_var,
+                     text_color=T.SUCCESS, font=ctk.CTkFont(size=11, weight="bold"),
+                     justify="left", wraplength=300, anchor="w").grid(
+            row=3, column=0, padx=16, pady=(0, 4), sticky="w")
         # Item 10 of the Live Testing Findings pass: the count used to be a
         # dead-end number -- clicking through to the actual contact list
         # (rather than just "manage contacts in the Contacts tab") answers
@@ -2112,7 +2130,7 @@ class MainWindow(ctk.CTk):
                       fg_color="transparent", hover_color=T.BADGE_BG, text_color=T.ACCENT_TEXT,
                       font=ctk.CTkFont(size=11), anchor="w",
                       command=self._show_email_recipients_list).grid(
-            row=3, column=0, padx=12, pady=(0, 12), sticky="w")
+            row=4, column=0, padx=12, pady=(0, 12), sticky="w")
 
         em_preview_card = ctk.CTkFrame(self._em_compose_frame, fg_color=T.BG_SURFACE, corner_radius=14,
                                        border_width=1, border_color=T.BG_BORDER)
@@ -2122,6 +2140,18 @@ class MainWindow(ctk.CTk):
         ctk.CTkLabel(em_preview_card, text="Live preview",
                      font=ctk.CTkFont(size=15, weight="bold"),
                      text_color=T.TEXT_HEAD).grid(row=0, column=0, padx=16, pady=(16, 6), sticky="w")
+        # Always-works escape hatch: renders the exact HTML that will be
+        # sent (first eligible contact's data substituted) in the system
+        # browser -- a real rendering engine, so it's never a blank/blurred
+        # strip. Shown only in Visual HTML Card mode.
+        self._em_preview_browser_btn = ctk.CTkButton(
+            em_preview_card, text="↗ Open in browser", width=140, height=26, corner_radius=6,
+            fg_color=T.BG_INNER, hover_color=T.BG_BORDER, border_width=1,
+            border_color=T.BG_BORDER, text_color=T.ACCENT_TEXT,
+            font=ctk.CTkFont(size=11),
+            command=self._open_email_card_preview_in_browser)
+        self._em_preview_browser_btn.grid(row=0, column=0, padx=16, pady=(14, 6), sticky="e")
+        self._em_preview_browser_btn.grid_remove()
         self._em_preview_text = tk.Text(
             em_preview_card, wrap="word", bg=T.resolve(T.BG_INNER), fg=T.resolve(T.TEXT_HEAD),
             font=("Segoe UI", 11), borderwidth=0, highlightthickness=0, relief="flat",
@@ -2175,7 +2205,7 @@ class MainWindow(ctk.CTk):
         controls = ctk.CTkFrame(frame, fg_color=T.BG_SURFACE, corner_radius=14,
                                 border_width=1, border_color=T.BG_BORDER)
         controls.grid(row=2, column=0, sticky="ew", pady=(10, 0))
-        controls.grid_columnconfigure(3, weight=1)
+        controls.grid_columnconfigure(4, weight=1)
 
         ctk.CTkButton(controls, text="Start", width=90,
                       fg_color=T.ACCENT, hover_color=T.ACCENT_HOVER,
@@ -2183,6 +2213,23 @@ class MainWindow(ctk.CTk):
                       corner_radius=8, font=ctk.CTkFont(size=13, weight="bold"),
                       command=self._dispatch_send).grid(
             row=0, column=0, padx=(16, 8), pady=(14, 8))
+        # "Send test to myself" — builds and sends ONE message exactly as a
+        # real batch would (same template, same _build_email_message, same
+        # compliance footer), to the configured SMTP account, so a campaign
+        # can be verified in a real inbox before it goes to real recipients.
+        # Email-only (hidden on the WhatsApp channel); never logs a campaign
+        # row and never counts toward the warm-up ramp.
+        self._em_test_send_btn = ctk.CTkButton(
+            controls, text="✉ Send test to myself", width=150,
+            fg_color=T.BG_INNER, hover_color=T.BG_BORDER,
+            border_width=1, border_color=T.ACCENT,
+            text_color=T.ACCENT_TEXT, corner_radius=8,
+            font=ctk.CTkFont(size=12),
+            command=self._send_test_email_to_self)
+        self._em_test_send_btn.grid(row=0, column=1, padx=8, pady=(14, 8))
+        # Compose opens on the WhatsApp channel by default — this is
+        # Email-only, shown by _on_channel_switch("Email").
+        self._em_test_send_btn.grid_remove()
         # Item 27 (Final Premium Polish Pass): was fg_color="transparent" on
         # this T.BG_SURFACE card -- ACCENT text measured 2.16:1 in Dark mode,
         # a real WCAG fail (well under even the 3:1 UI-component floor), and
@@ -2195,12 +2242,12 @@ class MainWindow(ctk.CTk):
             border_width=1, border_color=T.ACCENT,
             text_color=T.ACCENT_TEXT, corner_radius=8,
             command=self._toggle_pause)
-        self._compose_pause_btn.grid(row=0, column=1, padx=8, pady=(14, 8))
+        self._compose_pause_btn.grid(row=0, column=2, padx=8, pady=(14, 8))
         ctk.CTkButton(controls, text="Stop", width=80,
                       fg_color=T.DANGER, hover_color=T.DANGER_HOVER,
                       text_color=T.TEXT_HEAD,
                       corner_radius=8, command=self._dispatch_stop).grid(
-            row=0, column=2, padx=8, pady=(14, 8))
+            row=0, column=3, padx=8, pady=(14, 8))
 
         # ── Rate limit — editable right here, not just in Settings ─────────────
         rate_row = ctk.CTkFrame(controls, fg_color="transparent")
@@ -2243,10 +2290,14 @@ class MainWindow(ctk.CTk):
             self._wa_compose_frame.grid()
             self._em_compose_frame.grid_remove()
             self._compose_pause_btn.configure(state="normal")
+            if hasattr(self, "_em_test_send_btn"):
+                self._em_test_send_btn.grid_remove()
         else:
             self._wa_compose_frame.grid_remove()
             self._em_compose_frame.grid()
             self._compose_pause_btn.configure(state="normal")
+            if hasattr(self, "_em_test_send_btn"):
+                self._em_test_send_btn.grid()
             self._refresh_compose_email_recipients()
             if self._compose_card_mode:
                 self._render_email_card_preview()
@@ -2266,12 +2317,55 @@ class MainWindow(ctk.CTk):
         else:
             self._stop_sending()
 
+    def _email_recipient_breakdown(self) -> dict:
+        """Who the next email send will actually reach, and who it won't.
+        `eligible` is the real recipient list (has an email, not
+        unsubscribed, not previously bounced); `warmup_cap` is how many of
+        those can go out today under the warm-up ramp (None = no cap
+        applies)."""
+        with_email = [c for c in self.contacts if c.email]
+        eligible = [c for c in with_email if not c.opted_out and not c.bounced]
+        warmup_cap = None
+        if getattr(self, "email_warmup_enabled_var", None) is not None and \
+                self.email_warmup_enabled_var.get():
+            try:
+                remaining = self._email_warmup_remaining_today()
+                if remaining < len(eligible):
+                    warmup_cap = remaining
+            except Exception:
+                warmup_cap = None
+        return {
+            "eligible": eligible,
+            "unsubscribed": sum(1 for c in with_email if c.opted_out),
+            "bounced": sum(1 for c in with_email if c.bounced),
+            "no_email": len(self.contacts) - len(with_email),
+            "warmup_cap": warmup_cap,
+        }
+
     def _refresh_compose_email_recipients(self) -> None:
         if not hasattr(self, "_em_compose_count_var"):
             return
-        count = sum(1 for c in self.contacts if c.email)
+        b = self._email_recipient_breakdown()
+        n = len(b["eligible"])
         self._em_compose_count_var.set(
-            f"{count} contact{'s' if count != 1 else ''} with email")
+            f"{n} will receive this send" if n != 1 else "1 will receive this send")
+        if hasattr(self, "_em_recip_detail_var"):
+            excl = []
+            if b["unsubscribed"]:
+                excl.append(f"{b['unsubscribed']} unsubscribed")
+            if b["bounced"]:
+                excl.append(f"{b['bounced']} previously bounced")
+            if b["no_email"]:
+                excl.append(f"{b['no_email']} with no email address")
+            if excl:
+                detail = "Excluded: " + ", ".join(excl) + "."
+            else:
+                detail = "All contacts with an email address are included."
+            if b["warmup_cap"] is not None:
+                detail += (f"\n⏳ Warm-up mode: only {b['warmup_cap']} can be sent today "
+                           f"(of {n} eligible). Turn off in Settings → Campaign Safety "
+                           "for an established account.")
+            self._em_recip_detail_var.set(detail)
 
     def _start_email_from_compose(self) -> None:
         if self._em_send_thread and self._em_send_thread.is_alive():
@@ -2304,23 +2398,10 @@ class MainWindow(ctk.CTk):
 
         if hasattr(self, "_em_validation_label"):
             self._em_validation_label.configure(text="")
-        if self._compose_card_mode and self._compose_card_html_template:
-            # "Send as Visual HTML Card": the real generated card HTML sends
-            # as-is (with its own {variable} tokens substituted per-contact
-            # below, same as any other template) instead of the rich-text
-            # editor's export -- the editor is locked/unused in this mode.
-            html_template = self._compose_card_html_template
-            plain_template = self._strip_html_for_preview(html_template)
-        else:
-            # Item 10 of the Live Testing Findings pass: the editor is now a
-            # rich-text (bold/italic/bullet) surface, not raw HTML text -- its
-            # real content has to be exported into HTML (not read as plain
-            # text) or bold/italic/bullet formatting would silently never reach
-            # the sent email.
-            html_template = self._email_rich_export_html(self._compose_em_body) if hasattr(
-                self, "_compose_em_body") else ""
-            plain_template = self._get_text_with_tokens(self._compose_em_body) if hasattr(
-                self, "_compose_em_body") else ""
+        # Single source of truth for what actually gets sent (Visual HTML
+        # Card HTML in card mode, else the rich-text editor's real HTML
+        # export) -- shared with "Send test to myself" so they can't diverge.
+        html_template, plain_template = self._current_email_templates()
         if not plain_template.strip():
             self.progress_status_var.set("⚠ Email body is empty.")
             return
@@ -2340,7 +2421,8 @@ class MainWindow(ctk.CTk):
             }
             vars_map.update(contact.custom_fields)
             subject = sub(subject_template, vars_map)
-            recipients.append((contact, subject, sub(html_template, vars_map)))
+            recipients.append((contact, subject, sub(html_template, vars_map),
+                               sub(plain_template, vars_map)))
             if len(preview_lines) < 3:
                 preview_lines.append(
                     f"To: {contact.name or contact.email}\nSubject: {subject}\n"
@@ -2348,15 +2430,106 @@ class MainWindow(ctk.CTk):
 
         from .send_dialogs import show_send_confirmation
         from ..core.contact_quality import flag_low_quality_emails
-        quality_flags = flag_low_quality_emails(c.email for c, _s, _b in recipients)
+        quality_flags = flag_low_quality_emails(c.email for c, *_rest in recipients)
+
+        b = self._email_recipient_breakdown()
+        excl_bits = []
+        if b["unsubscribed"]:
+            excl_bits.append(f"{b['unsubscribed']} unsubscribed")
+        if b["bounced"]:
+            excl_bits.append(f"{b['bounced']} previously bounced")
+        if b["no_email"]:
+            excl_bits.append(f"{b['no_email']} with no email address")
+        exclusions_note = ""
+        if excl_bits:
+            exclusions_note = (
+                f"{len(self.contacts)} contacts total · excluded from this send: "
+                + ", ".join(excl_bits) + ".")
+
         show_send_confirmation(
             self, "email", len(recipients), float(self._em_delay.get() or 5), preview_lines,
             on_confirm=lambda: self._execute_email_send(recipients),
             subject=recipients[0][1] if recipients else subject_template,
-            quality_flag_count=len(quality_flags))
+            quality_flag_count=len(quality_flags),
+            exclusions_note=exclusions_note)
+
+    def _send_test_email_to_self(self) -> None:
+        """Send ONE message — built exactly as a real batch would be
+        (same template selection, same _build_email_message,
+        same compliance footer) — to the configured SMTP account, so a
+        campaign can be verified in a real inbox before it reaches real
+        recipients. Deliberately does NOT create a campaign row, write to
+        message_logs, or count against the warm-up ramp: it's a preview,
+        not a send to the audience."""
+        if not self._em_user.get() or not self._em_pass.get():
+            self.progress_status_var.set(
+                "⚠ SMTP not configured — add credentials in Settings → Email first.")
+            return
+        html_template, plain_template = self._current_email_templates()
+        if not (plain_template or "").strip():
+            self.progress_status_var.set("⚠ Nothing to test — the email body is empty.")
+            return
+
+        # Use the first eligible real contact's data so the test shows real
+        # substitution; fall back to obvious sample values if there are none.
+        eligible = [c for c in self.contacts
+                    if c.email and not c.opted_out and not c.bounced]
+        if eligible:
+            c = eligible[0]
+            vars_map = {"name": c.name, "email": c.email, "phone": c.phone,
+                        "sender": self._em_from_name.get()}
+            vars_map.update(c.custom_fields)
+        else:
+            vars_map = {"name": "Sample Name", "email": self._em_user.get(),
+                        "phone": "+10000000000", "sender": self._em_from_name.get()}
+
+        def sub(text: str) -> str:
+            for k, v in vars_map.items():
+                text = text.replace(f"{{{k}}}", str(v))
+            return text
+
+        to_addr = self._em_user.get().strip()
+        subject = "[TEST] " + sub(self._em_subj_var.get())
+        html_body = sub(html_template)
+        plain_body = sub(plain_template)
+
+        btn = getattr(self, "_em_test_send_btn", None)
+        if btn is not None:
+            btn.configure(state="disabled", text="Sending test…")
+        self.progress_status_var.set(f"Sending test message to {to_addr}…")
+
+        def worker():
+            try:
+                ctx = ssl.create_default_context()
+                conn = smtplib.SMTP(self._em_host.get(),
+                                    int(self._em_port.get() or 587), timeout=15)
+                conn.starttls(context=ctx)
+                conn.login(self._em_user.get(), self._em_pass.get())
+                msg = self._build_email_message(subject, to_addr, html_body, plain_body)
+                conn.sendmail(self._em_from_addr.get(), to_addr, msg.as_string())
+                try:
+                    conn.quit()
+                except Exception:
+                    pass
+                ok, detail = True, to_addr
+            except Exception as ex:
+                ok, detail = False, str(ex)
+
+            def done():
+                if btn is not None:
+                    btn.configure(state="normal", text="✉ Send test to myself")
+                if ok:
+                    self.progress_status_var.set(
+                        f"✅ Test sent to {detail} — open it in your inbox to verify styling.")
+                    show_toast(self, f"Test email sent to {detail}.", kind="success")
+                else:
+                    self.progress_status_var.set(f"⚠ Test send failed: {detail}")
+            self.after(0, done)
+
+        threading.Thread(target=worker, daemon=True).start()
 
     def _execute_email_send(self, recipients: list) -> None:
-        """Real send for a specific list of (contact, subject, html_body)
+        """Real send for a specific list of (contact, subject, html_body[, plain_body])
         tuples — used both for the initial campaign and Retry Failed Only."""
         self._em_stop_flag.clear()
         self._em_pause_event.set()
@@ -2391,6 +2564,12 @@ class MainWindow(ctk.CTk):
                 self.compose_progress.set(1)
                 self.progress_status_var.set(
                     f"Done — ✅ {result['sent']} sent  ❌ {result['failed']} failed")
+                if hasattr(self, "_em_last_run_var"):
+                    ts = datetime.now().strftime("%H:%M")
+                    self._em_last_run_var.set(
+                        f"Last run ({ts}): {result['sent']} sent, {result['failed']} failed "
+                        "(SMTP-accepted, not confirmed delivered).")
+                self._refresh_compose_email_recipients()
                 if result.get("sent", 0) > 0:
                     self._ensure_email_warmup_started()
                     self._update_email_warmup_status_label()
@@ -2414,8 +2593,9 @@ class MainWindow(ctk.CTk):
 
     def _show_email_report(self, result: dict, campaign_name: str = "Email Campaign") -> None:
         from .send_dialogs import show_send_report
-        failed_details = [(c.name or c.email, reason) for c, _s, _b, reason in result.get("failed_items", [])]
-        failed_recipients = [(c, s, b) for c, s, b, _r in result.get("failed_items", [])]
+        failed_details = [(c.name or c.email, reason)
+                          for c, _s, _b, _p, reason in result.get("failed_items", [])]
+        failed_recipients = [(c, s, b, p) for c, s, b, p, _r in result.get("failed_items", [])]
 
         def retry_failed() -> None:
             self._execute_email_send(failed_recipients)
@@ -2482,6 +2662,11 @@ class MainWindow(ctk.CTk):
         stats = {
             "campaign_name": campaign_name, "total_sent": sent,
             "failed": failed, "bounced": bounced,
+            "bounce_check_status": (
+                f"{bounced} bounce(s) confirmed so far; more may still arrive"
+                if bounced else
+                "no bounces reported yet — an automatic re-check runs a few minutes "
+                "after sending, and \"Check for Bounces\" can be run any time"),
         }
 
         def worker():
@@ -2592,6 +2777,52 @@ class MainWindow(ctk.CTk):
 
         threading.Thread(target=worker, daemon=True).start()
 
+    def _current_email_templates(self) -> tuple:
+        """The single source of truth for "what will actually be sent" from
+        the Compose Email panel: returns (html_template, plain_template) for
+        the current mode — the real Visual HTML Card HTML when a card is
+        loaded (Card Creator's Insert-into-Compose / Import HTML), otherwise
+        the rich-text editor's real HTML export. Shared by
+        _start_email_from_compose and _send_test_email_to_self so a test send
+        and a real batch can never diverge on which body they use."""
+        if self._compose_card_mode and self._compose_card_html_template:
+            html_template = self._compose_card_html_template
+            plain_template = self._strip_html_for_preview(html_template)
+        else:
+            html_template = self._email_rich_export_html(self._compose_em_body) if hasattr(
+                self, "_compose_em_body") else ""
+            plain_template = self._get_text_with_tokens(self._compose_em_body) if hasattr(
+                self, "_compose_em_body") else ""
+        return html_template, plain_template
+
+    def _build_email_message(self, subject: str, to_addr: str, html_body: str,
+                             plain_body: str = "") -> MIMEMultipart:
+        """Build the real outgoing message: a proper multipart/alternative
+        carrying BOTH a text/plain part (accessibility + a real deliverability
+        signal — a bare HTML-only body scores worse with spam filters) and the
+        full text/html part with every inline style intact and unmodified
+        except the compliance footer. The HTML is NEVER flattened here — what
+        Card Creator / Import HTML produced is exactly what goes on the wire.
+
+        `plain_body` is the caller's own plain-text template when it has one;
+        otherwise a readable text rendering is derived from the HTML so the
+        text/plain part is never empty."""
+        html_body = self._add_unsubscribe_footer(html_body)
+        if not (plain_body or "").strip():
+            plain_body = self._strip_html_for_preview(html_body)
+        if "reply" not in plain_body.lower() or "stop" not in plain_body.lower():
+            plain_body = (plain_body.rstrip()
+                          + "\n\n---\nDon't want these emails? Reply STOP to unsubscribe.")
+        msg = MIMEMultipart("alternative")
+        msg["Subject"] = subject
+        msg["From"] = f"{self._em_from_name.get()} <{self._em_from_addr.get()}>"
+        msg["To"] = to_addr
+        # RFC 2046 §5.1.4: least-rich alternative first, richest last — a
+        # client picks the last part it can render.
+        msg.attach(MIMEText(plain_body, "plain", "utf-8"))
+        msg.attach(MIMEText(html_body, "html", "utf-8"))
+        return msg
+
     def _add_unsubscribe_footer(self, html_body: str) -> str:
         """Append a compliance footer to every outgoing email, no exceptions
         — this is what keeps the sending domain's reputation safe at high
@@ -2617,11 +2848,15 @@ class MainWindow(ctk.CTk):
 
     def _send_email_campaign(self, recipients, campaign_name: str,
                               progress_callback=None, stop_flag=None, pause_event=None) -> dict:
-        """Send pre-resolved (contact, subject, html_body) tuples over SMTP,
-        logging each to message_logs. Shared by Compose and AI Cards sends.
+        """Send pre-resolved recipient tuples over SMTP, logging each to
+        message_logs. Accepts the Compose 4-tuple
+        (contact, subject, html_body, plain_body) and the AI-Cards 3-tuple
+        (contact, subject, html_body) — the text/plain alternative is derived
+        from the HTML when no plain_body is supplied. Shared by Compose and
+        AI Cards sends.
 
         Returns {"sent": int, "failed": int, "campaign_id": Optional[int],
-        "failed_items": [(contact, subject, html_body, reason), ...]}.
+        "failed_items": [(contact, subject, html_body, plain_body, reason), ...]}.
         """
         total = len(recipients)
         ctx = ssl.create_default_context()
@@ -2641,31 +2876,35 @@ class MainWindow(ctk.CTk):
         sent = 0
         failed_items = []
 
-        for contact, subject, html_body in recipients:
+        for row in recipients:
+            # Accept both the Compose 4-tuple (contact, subject, html, plain)
+            # and the AI-Cards 3-tuple (contact, subject, html) — the plain
+            # part is derived from the HTML when the caller didn't supply one.
+            contact, subject, html_body = row[0], row[1], row[2]
+            plain_body = row[3] if len(row) > 3 else ""
             if stop_flag is not None and stop_flag.is_set():
                 break
             if pause_event is not None:
                 pause_event.wait()
             to_addr = (contact.email or "").strip()
-            html_body = self._add_unsubscribe_footer(html_body)
+            msg = self._build_email_message(subject, to_addr, html_body, plain_body)
+            # message_text is logged as the real HTML that went on the wire
+            # (footer included) — read back verbatim by the bounce checker
+            # and the report/export.
+            logged_html = self._add_unsubscribe_footer(html_body)
             try:
-                msg = MIMEMultipart("alternative")
-                msg["Subject"] = subject
-                msg["From"] = f"{self._em_from_name.get()} <{self._em_from_addr.get()}>"
-                msg["To"] = to_addr
-                msg.attach(MIMEText(html_body, "html", "utf-8"))
                 conn.sendmail(self._em_from_addr.get(), to_addr, msg.as_string())
                 sent += 1
                 db.add_message_log(MessageLog(
                     campaign_id=campaign_id, contact_email=to_addr,
                     contact_name=contact.name, subject=subject,
-                    message_text=html_body, status=MessageStatus.SENT,
+                    message_text=logged_html, status=MessageStatus.SENT,
                     sent_at=datetime.now(),
                 ))
                 if progress_callback:
                     progress_callback(sent, len(failed_items), total, to_addr)
             except Exception as ex:
-                failed_items.append((contact, subject, html_body, str(ex)))
+                failed_items.append((contact, subject, html_body, plain_body, str(ex)))
                 db.add_message_log(MessageLog(
                     campaign_id=campaign_id, contact_email=to_addr,
                     contact_name=contact.name, subject=subject,
@@ -5373,16 +5612,56 @@ class MainWindow(ctk.CTk):
         locked = self._compose_card_mode
         if locked:
             self._compose_em_body.grid_remove()
-            self._em_card_lock_frame.grid(row=4, column=0, padx=16, pady=(0, 16), sticky="nsew")
+            self._em_card_lock_frame.grid(row=5, column=0, padx=16, pady=(0, 16), sticky="nsew")
         else:
             self._em_card_lock_frame.grid_remove()
-            self._compose_em_body.grid(row=4, column=0, padx=16, pady=(0, 16), sticky="nsew")
+            self._compose_em_body.grid(row=5, column=0, padx=16, pady=(0, 16), sticky="nsew")
         state = "disabled" if locked else "normal"
         for widget in getattr(self, "_em_card_mode_controls", []):
             try:
                 widget.configure(state=state)
             except Exception:
                 pass
+        # "Open in browser" only makes sense for a visual HTML card.
+        if hasattr(self, "_em_preview_browser_btn"):
+            if locked:
+                self._em_preview_browser_btn.grid()
+            else:
+                self._em_preview_browser_btn.grid_remove()
+
+    def _rendered_email_card_html(self) -> str:
+        """The real card HTML with the first eligible contact's data
+        substituted (obvious sample values if there are no contacts) — the
+        exact bytes a recipient would receive, minus the per-send compliance
+        footer. Shared by the in-app preview and the browser preview."""
+        contacts = [c for c in self.contacts
+                    if c.email and not c.opted_out and not c.bounced]
+        if contacts:
+            c = contacts[0]
+            vars_map = {"name": c.name, "email": c.email, "phone": c.phone,
+                        "sender": self._em_from_name.get()}
+            vars_map.update(c.custom_fields)
+        else:
+            vars_map = {"name": "Sample Name", "email": "sample@example.com",
+                        "phone": "+10000000000", "sender": self._em_from_name.get()}
+        html = self._compose_card_html_template
+        for key, value in vars_map.items():
+            html = html.replace(f"{{{key}}}", str(value))
+        return html
+
+    def _open_email_card_preview_in_browser(self) -> None:
+        """Reliable fallback for the in-app preview: writes the real
+        rendered card HTML to a temp file and opens it in the system
+        browser — a full rendering engine, never a blank/blurred strip."""
+        if not (self._compose_card_mode and self._compose_card_html_template):
+            return
+        import tempfile
+        html = self._rendered_email_card_html()
+        tmp = tempfile.NamedTemporaryFile(
+            delete=False, suffix=".html", mode="w", encoding="utf-8")
+        tmp.write(html)
+        tmp.close()
+        webbrowser.open(f"file://{tmp.name}")
 
     def _open_subject_optimizer(self) -> None:
         """Item 34 (sub-item 1): suggests 3 alternative subject lines,
@@ -5526,7 +5805,24 @@ class MainWindow(ctk.CTk):
         try:
             from ..ui.card_creator_tab import HtmlFrame
             self._em_card_preview_fallback.pack_forget()
-            self._em_card_html_frame = HtmlFrame(self._em_card_preview_host, messages_enabled=False)
+            # tkinterweb's engine does not honor CustomTkinter's widget
+            # scaling, so on a HiDPI display the card otherwise renders as a
+            # tiny, hard-to-read strip inside a large panel. Match the
+            # rendering zoom to the app's own scaling factor so the preview
+            # is legible; best-effort — never let this stop the frame being
+            # created.
+            zoom = 1.0
+            try:
+                from customtkinter.windows.widgets.scaling.scaling_tracker import ScalingTracker
+                zoom = max(1.0, float(ScalingTracker.get_widget_scaling(self._em_card_preview_host)))
+            except Exception:
+                pass
+            try:
+                self._em_card_html_frame = HtmlFrame(
+                    self._em_card_preview_host, messages_enabled=False, zoom=zoom)
+            except TypeError:
+                self._em_card_html_frame = HtmlFrame(
+                    self._em_card_preview_host, messages_enabled=False)
             self._em_card_html_frame.pack(fill="both", expand=True)
             return True
         except Exception as exc:
@@ -5560,9 +5856,33 @@ class MainWindow(ctk.CTk):
                 text = text.replace(f"{{{key}}}", str(value))
             return text
 
+        if hasattr(self, "_em_preview_browser_btn"):
+            self._em_preview_browser_btn.grid()
+
         rendered = sub(self._compose_card_html_template)
         if self._ensure_em_card_html_frame():
-            self._em_card_html_frame.load_html(rendered)
+            try:
+                self._em_card_html_frame.load_html(rendered)
+            except Exception as exc:
+                Logger.warning(f"Email card preview load_html failed: {exc}")
+                self._show_em_card_preview_fallback()
+        else:
+            # tkinterweb present but the widget couldn't init, OR not
+            # installed — either way show the informative label rather than
+            # an empty frame that reads as "broken".
+            self._show_em_card_preview_fallback()
+
+    def _show_em_card_preview_fallback(self) -> None:
+        if not hasattr(self, "_em_card_preview_fallback"):
+            return
+        self._em_card_preview_fallback.configure(
+            text="In-app card preview is unavailable right now — click "
+                 "\"↗ Open in browser\" above to see the exact card that "
+                 "will be sent, or use \"✉ Send test to myself\".")
+        try:
+            self._em_card_preview_fallback.pack(fill="both", expand=True, padx=12, pady=24)
+        except Exception:
+            pass
 
     def _show_email_recipients_list(self) -> None:
         """Item 10 of the Live Testing Findings pass: makes the "Recipients"

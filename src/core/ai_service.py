@@ -474,17 +474,46 @@ def summarize_campaign_performance(
     if missing:
         raise AIServiceError(f"Missing real campaign stats: {', '.join(sorted(missing))}")
 
+    # The report dialog itself already frames "Delivered" as an assumption
+    # until a real bounce check runs. The AI summary must use the SAME honest
+    # framing -- an earlier version of this prompt let the model write things
+    # like "every email was successfully delivered" and "reached all 20
+    # recipients", which the data does not support (SMTP "250 OK" is
+    # acceptance by the mail server, not proof of inbox delivery; a bounce
+    # count of 0 means none have arrived YET, not that delivery is confirmed).
+    bounce_status = stats.get("bounce_check_status", "not yet checked for real bounces")
     system = (
         "You are a plain-spoken marketing analyst reviewing ONE real completed email/"
         "WhatsApp campaign for a small business owner. You are given real, already-"
         "measured numbers for this campaign -- do not invent, estimate, or assume any "
-        "number not given to you. Write a short (3-5 sentence) plain-language summary of "
-        "how the campaign went, followed by exactly 1-2 concrete, specific suggestions "
-        "for the next campaign based on these real numbers. No markdown, no headers, "
-        "plain text only."
+        "number not given to you.\n\n"
+        "CRITICAL - how to talk about these numbers honestly:\n"
+        "- 'total_sent' means the mail server ACCEPTED the message for sending. It is "
+        "NOT proof the message reached anyone's inbox.\n"
+        "- 'bounced' is the count of bounce/failure notices received SO FAR. A value of "
+        "0 means none have come back yet -- bounces can arrive hours later -- it does "
+        "NOT mean delivery is confirmed.\n"
+        "- NEVER write that messages were 'delivered', 'landed in inboxes', 'reached "
+        "all recipients', or 'successfully delivered'. Say 'sent' or 'accepted for "
+        "sending'. If you mention delivery at all, call it unconfirmed / an assumption "
+        "and suggest re-checking for bounces in a few hours.\n\n"
+        "Write a short (3-5 sentence) plain-language summary of how the campaign went "
+        "using that honest framing, followed by exactly 1-2 concrete, specific "
+        "suggestions for the next campaign based on these real numbers. No markdown, "
+        "no headers, plain text only."
     )
-    raw = _call_ai(provider, api_key, system=system, user=json.dumps(stats), max_tokens=500)
+    payload = dict(stats)
+    payload.setdefault("note", (
+        "total_sent = server-accepted, not confirmed delivered. "
+        f"bounce status: {bounce_status}."))
+    raw = _call_ai(provider, api_key, system=system, user=json.dumps(payload), max_tokens=500)
     text = raw.strip()
     if not text:
         raise AIServiceError("AI returned an empty summary.")
-    return text
+
+    # App-controlled caveat, prepended regardless of what the model wrote, so
+    # the honest framing is guaranteed even if a model ignores the prompt.
+    caveat = ("Note: \"sent\" means the mail server accepted the message — it is not "
+              "confirmed inbox delivery, and bounces can still arrive later. Re-check "
+              "for bounces in a few hours if you need confirmation.\n\n")
+    return caveat + text

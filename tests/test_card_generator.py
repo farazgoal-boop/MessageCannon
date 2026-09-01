@@ -111,11 +111,37 @@ class TestCardGenerator(unittest.TestCase):
         html = generate_html(sections, meta)
         self.assertIn(".page{", html.replace(" ", ""))
         self.assertIn("margin:0auto", html.replace(" ", ""))
-        self.assertIn('<div class="page">', html)
+        # The wrapper still carries class="page" — it now ALSO carries an
+        # inline style="max-width...;margin:0 auto" (Compose reliability
+        # pass) so the shell survives an email client that strips <style>
+        # blocks, so match on the class attribute, not an exact tag string.
+        self.assertIn('class="page"', html)
+        self.assertRegex(html.replace(" ", ""),
+                         r'<divclass="page"style="[^"]*margin:0auto')
         # The flex-based centering must still be present too, for real
         # browsers (Open in Browser / the saved .html export) that do
         # support it -- this is an additive fallback, not a replacement.
         self.assertIn("justify-content:center", html)
+
+    def test_card_shell_styles_are_also_inline_for_style_stripping_clients(self) -> None:
+        """Compose reliability pass (P0): some email clients drop embedded
+        <style> blocks entirely. The card shell (body background, .card
+        background + rounding, page centering) must ALSO be carried as inline
+        style="" attributes so the card still renders as a card, not a bare
+        left-aligned block of text, when <style> is stripped."""
+        sections = [{"type": "text", "data": {"content": "Hi", "size": "medium", "align": "left"}}]
+        meta = {"app_name": "Test", "style": CARD_STYLE_TEMPLATES["Dark Premium"]}
+        html = generate_html(sections, meta)
+        body_bg = CARD_STYLE_TEMPLATES["Dark Premium"]["body_bg"]
+        card_bg = CARD_STYLE_TEMPLATES["Dark Premium"]["bg"]
+        # Simulate a client that removes the <style> block.
+        import re
+        stripped = re.sub(r"(?is)<style.*?</style>", "", html)
+        self.assertIn(f'background:{body_bg}', stripped)          # <body> inline
+        self.assertIn(f'background:{card_bg}', stripped)          # .card inline
+        self.assertIn("border-radius:20px", stripped)             # .card inline
+        self.assertRegex(stripped.replace(" ", ""),
+                         r'class="card"style="[^"]*border-radius:20px')
 
     def test_buy_now_link(self) -> None:
         sections = [{"type": "price", "data": {"price": "$89", "old_price": "", "note": ""}}]

@@ -30,7 +30,7 @@ class SendConfirmationDialog(ctk.CTkToplevel):
 
     def __init__(self, main_window, channel: str, recipient_count: int,
                  delay_seconds: float, preview_lines: list, on_confirm, subject: str = "",
-                 quality_flag_count: int = 0):
+                 quality_flag_count: int = 0, exclusions_note: str = ""):
         super().__init__(main_window)
         self.on_confirm = on_confirm
         self.title("Confirm Send")
@@ -66,6 +66,16 @@ class SendConfirmationDialog(ctk.CTkToplevel):
                          font=ctk.CTkFont(size=16, weight="bold")).pack(anchor="w")
 
         next_row = 2
+
+        # Compose reliability pass (P2/P3): spell out who is NOT in this send
+        # and why, right where the count is shown — so a recipient number
+        # lower than the contact total is never a silent mystery.
+        if exclusions_note:
+            ctk.CTkLabel(
+                self, text=exclusions_note, text_color=T.TEXT_MUTED,
+                font=ctk.CTkFont(size=10), wraplength=500, justify="left").grid(
+                row=next_row, column=0, padx=24, pady=(0, 8), sticky="w")
+            next_row += 1
 
         # Item 34 (sub-item 2): a general best-practice send-time window,
         # computed purely from `channel` -- never claimed to be based on
@@ -341,10 +351,12 @@ class SendReportDialog(ctk.CTkToplevel):
 
 
 def show_send_confirmation(main_window, channel, recipient_count, delay_seconds, preview_lines,
-                            on_confirm, subject: str = "", quality_flag_count: int = 0):
+                            on_confirm, subject: str = "", quality_flag_count: int = 0,
+                            exclusions_note: str = ""):
     return SendConfirmationDialog(main_window, channel, recipient_count, delay_seconds,
                                    preview_lines, on_confirm, subject=subject,
-                                   quality_flag_count=quality_flag_count)
+                                   quality_flag_count=quality_flag_count,
+                                   exclusions_note=exclusions_note)
 
 
 def show_send_report(main_window, channel, sent, failed, failed_details, on_retry_failed=None,

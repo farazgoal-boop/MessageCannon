@@ -5994,3 +5994,101 @@ reconfirmed untouched throughout (34 contacts, 3 campaigns).
 **Not committed yet** — pending the user's own review and explicit go-ahead, given the honest
 reproduction gap above, before this goes through the same version-bump/tag/push/release pattern as
 every other real fix in this file.
+
+## Compose & Reporting Reliability pass (2026-09-01) — P0–P3 punch list from live email testing
+
+User tested the Compose email flow end to end and filed a P0–P3 punch list (P0 blocking:
+"verify what actually gets sent matches what's designed"; P1: AI summary overstates delivery;
+P2: three UI-clarity bugs; P3: confirm compliance basics). Traced the whole
+Card Creator / Import HTML → Insert into Compose → SMTP path before changing anything.
+
+**Key finding on P0**: the LIVE send path (`_send_email_campaign`) was already sending the card
+HTML as a real `text/html` part, NOT flattening it — but it built `MIMEMultipart("alternative")`
+with ONLY that one part (no `text/plain` alternative — a real deliverability/spam-score gap the
+user explicitly called out), and `generate_html`'s card-shell rules (`.card`/`.page`/`body`
+background, rounding, centering) lived ONLY in a `<style>` block, which some email clients strip
+(the likely mechanism behind the user's "styling stripped, only bold/italic/links survived"
+report — or that batch went through the rich-text flatten path via "Switch to Rich Text").
+
+**Built:**
+- `_build_email_message(subject, to_addr, html_body, plain_body)` — one shared builder producing a
+  proper `multipart/alternative` with a real `text/plain` part (caller's plain template, or a
+  readable rendering derived from the HTML) AND the full `text/html` part, inline styles intact,
+  unmodified except `{token}` substitution + the compliance footer. Used by the campaign send and
+  the new test send. `_send_email_campaign` now accepts both the Compose 4-tuple
+  `(contact, subject, html, plain)` and the AI-Cards 3-tuple (derives plain from html) so that
+  caller was untouched.
+- `_current_email_templates()` — single source of truth for "what will actually be sent" (Visual
+  HTML Card HTML in card mode, else the rich-text editor's real HTML export), shared by
+  `_start_email_from_compose` and the test send so they can't diverge.
+- **"Send test to myself"** button next to Start (Email channel only) — `_send_test_email_to_self`
+  builds ONE message exactly as a real batch would (same template selection, same
+  `_build_email_message`, same footer), substitutes the first eligible contact's data, sends to
+  the configured SMTP account. Never creates a campaign row, never counts toward warm-up.
+- `generate_html` shell rules are now ALSO inline `style=""` on `<body>`/`.page`/`.card`/
+  `.footer-tag` (kept the `<style>` block too, for browser/preview) so the card still renders as a
+  card in a `<style>`-stripping client. A `url(...)` custom-background image is deliberately NOT
+  duplicated inline (would double-embed a multi-MB base64 payload; div bg images are unreliable in
+  email anyway) — stays in `<style>` only, exactly as before (confirmed by
+  `test_custom_bg_image_is_not_embedded_twice` staying green).
+- Live preview robustness: an "↗ Open in browser" button in the preview panel (card mode) that
+  writes the real rendered HTML to a temp file and opens it in the system browser (a real
+  rendering engine — never a blank/blurred strip); `HtmlFrame` now gets a `zoom` matching
+  CustomTkinter's own scaling factor (tkinterweb 4.x doesn't honor CTk scaling, so the card
+  otherwise renders as a tiny strip on HiDPI); an informative fallback label is shown if the
+  embedded frame can't init or `load_html` throws (previously an empty frame that read as
+  "broken").
+- **P1**: `summarize_campaign_performance` — the prompt now defines the terms
+  ("sent" = server-accepted, NOT inbox delivery; "bounced: 0" = none yet, NOT confirmed
+  delivered), forbids "delivered"/"landed in inboxes"/"reached all recipients" language, and is
+  passed a `bounce_check_status` string. The returned text is ALWAYS prefixed with an
+  app-controlled caveat ("'sent' means the mail server accepted the message — it is not confirmed
+  inbox delivery, and bounces can still arrive later") regardless of what the model wrote.
+- **P2.1**: the "formatting/spam checks don't apply…" warning was truncated behind the
+  "Generate with AI" button (shared a row with 3 buttons). It now has its own full-width row
+  (`_em_warning_label`, `wraplength=560`) between the AI-button row and the editor (compose Email
+  left column re-numbered: body/lock frame moved row 4 → row 5). Full text:
+  **"🔒 Visual HTML card — formatting/spam checks don't apply to card content."**
+- **P2.2 / P2.3**: the Recipients card now shows `_email_recipient_breakdown()` — "N will receive
+  this send", an "Excluded: X unsubscribed, Y previously bounced, Z with no email address." line,
+  a warm-up-cap note when the ramp would limit today's send, and (after a send) a persistent
+  "Last run (HH:MM): N sent, M failed (SMTP-accepted, not confirmed delivered)." line. The
+  pre-send confirmation dialog got an optional `exclusions_note` param carrying the same
+  breakdown.
+- **P3**: `_start_email_from_compose` already filtered `c.email and not c.opted_out and not
+  c.bounced` — confirmed and now covered by tests (opted-out AND bounced excluded). The
+  compliance footer ("Reply STOP to unsubscribe") is confirmed present in the actual `text/html`
+  AND `text/plain` bytes of the built message. There is no separate "recently-contacted"
+  suppression list in this codebase (warm-up is a daily cap, not a per-contact cooldown) —
+  stated honestly rather than claimed.
+
+**Verified**: new `tests/ui/test_compose_email_send_pipeline.py` (9 tests, dedicated fresh-DB
+MainWindow, in-memory fake SMTP, `_SynchronousThread` for the send worker — same harness pattern
+as `test_ai_error_reporting.py`): `_build_email_message` is `multipart/alternative` with both
+parts; the compliance footer is in both parts; an end-to-end Visual HTML Card send puts the real
+card HTML (`<style>` block + `border-radius:20px` + `href=` + "Buy Now") on the wire with `{name}`
+substituted, footer added, nothing else stripped; `_current_email_templates()` returns card HTML
+in card mode; opted-out + bounced + no-email contacts are all excluded; "Send test to myself"
+sends one message to the configured account with real styling and creates no campaign row, and
+blocks when SMTP is unconfigured; the recipient breakdown counts exclusions; the last-run
+indicator is set after a send. Plus new tests in `tests/test_ai_service.py` (prompt forbids
+delivery claims + the app-controlled caveat always leads, even when the model over-claims
+"successfully delivered") and `tests/test_card_generator.py` (shell styles survive a simulated
+`<style>`-strip). Updated 3 existing tests for the intentional shape changes
+(`test_page_wrapper_…` now matches `class="page"` + inline margin; `test_email_visual_card_mode`
+unpacks 4-tuples + `**kwargs` confirmation stub; `test_ai_features_item34` checks
+`bounce_check_status` is threaded through). Full plain `tests/` (229) green; every affected UI
+file green run per the README's per-file-process pattern (compose / email / card / nav /
+view-stacking / spacing / dropdown / button / accessibility / bounce / reputation / warmup / ai
+groups). Integrated smoke: imported a real styled HTML file → card mode → "Send test to myself"
+against a fake SMTP → confirmed the raw message carries the full card styling, both MIME parts,
+the footer, and the token substitution.
+
+**Not verified (needs the user's own real account)**: an actual email landing in a real Gmail
+inbox with styling intact (the whole point of the "Send test to myself" button is that the user
+can now do exactly this before a real campaign) and the real tkinterweb preview's on-screen
+appearance after the zoom fix (this sandbox can't screenshot reliably — the "↗ Open in browser"
+button is the guaranteed-working path regardless).
+
+**Git**: uncommitted, working tree only, per this file's standing "commit/push is the user's call"
+discipline.

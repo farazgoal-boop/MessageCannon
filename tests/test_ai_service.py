@@ -280,3 +280,42 @@ def test_summarize_campaign_performance_rejects_empty_response(monkeypatch):
     stats = {"campaign_name": "X", "total_sent": 1, "failed": 0, "bounced": 0}
     with pytest.raises(AIServiceError, match="empty summary"):
         ai_service.summarize_campaign_performance(stats, "key")
+
+
+# ── Compose reliability pass, P1: the campaign summary must not overstate
+# delivery. "sent" == server-accepted, not confirmed inbox delivery. ──────
+
+def test_summary_prompt_forbids_delivery_claims_and_defines_the_terms(monkeypatch):
+    captured = {}
+
+    def fake_call_ai(provider, api_key, system, user, max_tokens=1024):
+        captured["system"] = system
+        captured["user"] = user
+        return "Campaign went fine."
+
+    monkeypatch.setattr(ai_service, "_call_ai", fake_call_ai)
+    ai_service.summarize_campaign_performance(
+        {"campaign_name": "X", "total_sent": 20, "failed": 0, "bounced": 0}, "key")
+    sys_l = captured["system"].lower()
+    # The prompt must define 'sent' as acceptance, not delivery, and
+    # explicitly forbid delivery-confirmed language.
+    assert "not proof" in sys_l or "not confirmed" in sys_l or "not delivered" in sys_l
+    assert "never write that messages were 'delivered'" in sys_l or "never" in sys_l
+    assert "accepted" in sys_l
+    # bounce status is passed so the model can be honest that 0 != confirmed.
+    assert "bounce" in captured["user"].lower()
+
+
+def test_summary_always_carries_the_app_controlled_delivery_caveat(monkeypatch):
+    # Even if the model ignores the prompt and claims confirmed delivery,
+    # the returned text must still lead with the honest caveat.
+    monkeypatch.setattr(
+        ai_service, "_call_ai",
+        lambda *a, **k: "Every single email was successfully delivered to all 20 recipients.")
+    summary = ai_service.summarize_campaign_performance(
+        {"campaign_name": "X", "total_sent": 20, "failed": 0, "bounced": 0}, "key")
+    lead = summary.split("\n\n", 1)[0].lower()
+    assert "not confirmed inbox delivery" in lead
+    assert "bounces can still arrive later" in lead
+    # The model's own (over-claiming) text is still included after the caveat.
+    assert "successfully delivered" in summary

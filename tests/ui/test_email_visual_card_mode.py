@@ -133,9 +133,10 @@ def test_start_email_from_compose_sends_real_card_html_with_substitution(window,
     captured = {}
 
     def fake_confirmation(main_window, channel, count, delay, preview_lines,
-                           on_confirm=None, subject=None, quality_flag_count=0):
+                           on_confirm=None, subject=None, quality_flag_count=0, **kwargs):
         captured["preview_lines"] = preview_lines
         captured["subject"] = subject
+        captured["exclusions_note"] = kwargs.get("exclusions_note", "")
         if on_confirm:
             on_confirm()
 
@@ -160,7 +161,10 @@ def test_start_email_from_compose_sends_real_card_html_with_substitution(window,
         window.update()
 
         assert "recipients" in captured, "on_confirm was never invoked"
-        contact, subject, html_body = captured["recipients"][0]
+        # Recipients are now (contact, subject, html_body, plain_body) 4-tuples
+        # — the plain_body part was added so the SMTP message can carry a real
+        # text/plain alternative alongside text/html.
+        contact, subject, html_body, plain_body = captured["recipients"][0]
         assert subject == "Card for Priya"
         assert "Priya" in html_body
         assert "{name}" not in html_body

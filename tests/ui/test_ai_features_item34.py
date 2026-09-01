@@ -151,9 +151,15 @@ def test_request_ai_campaign_summary_grounds_in_real_stats_not_invented(app, mon
             deadline_updates += 1
         assert results and results[0][0] is True
         assert results[0][1] == "Real summary text."
-        assert captured["stats"] == {
-            "campaign_name": "Real Campaign", "total_sent": 42, "failed": 3, "bounced": 1,
-        }
+        # The real, already-logged counts must be passed through exactly as-is.
+        for key, value in {"campaign_name": "Real Campaign", "total_sent": 42,
+                           "failed": 3, "bounced": 1}.items():
+            assert captured["stats"][key] == value
+        # Compose reliability pass (P1): a bounce_check_status string is now
+        # also passed so the AI summary can't claim confirmed delivery — it
+        # must be honest that no bounce check has confirmed anything yet.
+        assert "bounce_check_status" in captured["stats"]
+        assert "bounce" in captured["stats"]["bounce_check_status"].lower()
     finally:
         app._ai_api_key.set(original_key)
 
