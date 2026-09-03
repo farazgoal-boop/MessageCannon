@@ -20,6 +20,7 @@ import smtplib
 import ssl
 import tkinter as tk
 import webbrowser
+from uuid import uuid4
 from html.parser import HTMLParser
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
@@ -566,6 +567,8 @@ class MainWindow(ctk.CTk):
         self._em_compose_count_var = StringVar(value="0 contacts with email")
         self._em_recipient_scope_var = StringVar(value="All email contacts")
         self._latest_import_emails: set[str] = set()
+        self._imported_email_lists: list[dict] = []
+        self._em_recipient_list_keys: dict[str, str] = {}
 
         # "Send as Visual HTML Card" mode (Card Creator's Insert-into-Compose):
         # when active, _compose_em_body is locked read-only and the real
@@ -2108,7 +2111,7 @@ class MainWindow(ctk.CTk):
         self._em_recipient_scope_menu = ctk.CTkOptionMenu(
             em_recip_card, variable=self._em_recipient_scope_var,
             values=["All email contacts", "Latest imported list only"],
-            command=lambda _value: self._refresh_compose_email_recipients(),
+            command=lambda _value: self._on_email_recipient_scope_changed(),
             fg_color=T.BG_INNER, button_color=T.BG_INNER,
             button_hover_color=T.BG_BORDER, dropdown_fg_color=T.BG_SURFACE,
             dropdown_hover_color=T.BG_BORDER, text_color=T.TEXT_HEAD,
@@ -2338,9 +2341,17 @@ class MainWindow(ctk.CTk):
         all_with_email = [c for c in self.contacts if c.email]
         with_email = all_with_email
         not_in_latest = 0
-        if self._em_recipient_scope_var.get() == "Latest imported list only":
+        selected_key = self._em_recipient_list_keys.get(self._em_recipient_scope_var.get())
+        if not selected_key and self._em_recipient_scope_var.get() == "Latest imported list only":
             with_email = [c for c in all_with_email
                           if c.email.strip().lower() in self._latest_import_emails]
+            not_in_latest = len(all_with_email) - len(with_email)
+        if selected_key:
+            selected = next((item for item in self._imported_email_lists
+                             if item.get("key") == selected_key), None)
+            selected_emails = set(selected.get("emails", [])) if selected else set()
+            with_email = [c for c in all_with_email
+                          if c.email.strip().lower() in selected_emails]
             not_in_latest = len(all_with_email) - len(with_email)
         eligible = [c for c in with_email if not c.opted_out and not c.bounced]
         warmup_cap = None
@@ -2354,6 +2365,7 @@ class MainWindow(ctk.CTk):
                 warmup_cap = None
         return {
             "eligible": eligible,
+            "scope": self._em_recipient_scope_var.get(),
             "unsubscribed": sum(1 for c in with_email if c.opted_out),
             "bounced": sum(1 for c in with_email if c.bounced),
             "no_email": len(self.contacts) - len(all_with_email),
@@ -2381,7 +2393,11 @@ class MainWindow(ctk.CTk):
             if excl:
                 detail = "Excluded: " + ", ".join(excl) + "."
             else:
-                detail = "All contacts with an email address are included."
+                detail = ("Latest imported email list only is active."
+                          if b["scope"] == "Latest imported list only"
+                          else f"Selected imported list: {b['scope']}."
+                          if b["scope"] != "All email contacts"
+                          else "All contacts with an email address are included.")
             if b["warmup_cap"] is not None:
                 detail += (f"\n⏳ Warm-up mode: only {b['warmup_cap']} can be sent today "
                            f"(of {n} eligible). Turn off in Settings → Campaign Safety "
@@ -2459,6 +2475,8 @@ class MainWindow(ctk.CTk):
             excl_bits.append(f"{b['unsubscribed']} unsubscribed")
         if b["bounced"]:
             excl_bits.append(f"{b['bounced']} previously bounced")
+        if b["not_in_latest"]:
+            excl_bits.append(f"{b['not_in_latest']} not in selected imported list")
         if b["no_email"]:
             excl_bits.append(f"{b['no_email']} with no email address")
         exclusions_note = ""
@@ -4482,12 +4500,19 @@ class MainWindow(ctk.CTk):
         self.setup_wizard_channel_index = int(settings.get("setup_wizard_channel_index", 0))
         self.setup_wizard_substep = str(settings.get("setup_wizard_substep", ""))
         self._sidebar_collapsed = bool(settings.get("sidebar_collapsed", False))
+        self._imported_email_lists = list(settings.get("imported_email_lists", []))
         self._em_recipient_scope_var.set(
             str(settings.get("email_recipient_scope", "All email contacts")))
         self._latest_import_emails = {
             str(email).strip().lower() for email in settings.get("latest_import_emails", [])
             if str(email).strip()
         }
+        if not self._imported_email_lists and self._latest_import_emails:
+            self._imported_email_lists = [{
+                "key": "legacy-latest", "name": "Latest imported list",
+                "emails": sorted(self._latest_import_emails),
+            }]
+        self._rebuild_email_recipient_scope_options(self._em_recipient_scope_var.get())
 
     def _save_settings(self) -> None:
         self.db.set_setting_json(
@@ -4521,6 +4546,7 @@ class MainWindow(ctk.CTk):
                 "sidebar_collapsed":          self._sidebar_collapsed,
                 "email_recipient_scope":       self._em_recipient_scope_var.get(),
                 "latest_import_emails":        sorted(self._latest_import_emails),
+                "imported_email_lists":         self._imported_email_lists,
             },
         )
         self._update_settings_summary()
@@ -4907,16 +4933,38 @@ class MainWindow(ctk.CTk):
         self._refresh_compose_email_recipients()
         self._refresh_email_preview()
 
-    def _record_latest_import(self, rows: list[dict]) -> None:
+    def _rebuild_email_recipient_scope_options(self, selected: str | None = None) -> None:
+        self._em_recipient_list_keys = {}
+        values = ["All email contacts"]
+        for item in self._imported_email_lists:
+            label = item.get("name", "Imported email list")
+            if label in values:
+                label = f"{label} ({item.get('key', '')[-4:]})"
+            self._em_recipient_list_keys[label] = item.get("key", "")
+            values.append(label)
+        if hasattr(self, "_em_recipient_scope_menu"):
+            self._em_recipient_scope_menu.configure(values=values)
+        choice = selected if selected in values else (values[-1] if len(values) > 1 else values[0])
+        self._em_recipient_scope_var.set(choice)
+
+    def _on_email_recipient_scope_changed(self) -> None:
+        self._save_settings()
+        self._refresh_compose_email_recipients()
+        self._refresh_email_preview()
+
+    def _record_latest_import(self, rows: list[dict], source_name: str = "Imported email list") -> None:
         """Remember the email members of the most recently completed import.
         This changes only the optional Compose recipient scope; it never
         removes or replaces contacts in the database."""
-        self._latest_import_emails = {
+        emails = {
             row["email"].strip().lower()
             for row in rows
             if row.get("status") != "invalid" and row.get("email", "").strip()
         }
-        self._em_recipient_scope_var.set("Latest imported list only")
+        item = {"key": uuid4().hex, "name": source_name, "emails": sorted(emails)}
+        self._imported_email_lists.append(item)
+        self._latest_import_emails = emails
+        self._rebuild_email_recipient_scope_options(source_name)
         self._save_settings()
 
     def _sync_contact_selection(self) -> None:
@@ -5674,8 +5722,7 @@ class MainWindow(ctk.CTk):
         substituted (obvious sample values if there are no contacts) — the
         exact bytes a recipient would receive, minus the per-send compliance
         footer. Shared by the in-app preview and the browser preview."""
-        contacts = [c for c in self.contacts
-                    if c.email and not c.opted_out and not c.bounced]
+        contacts = self._email_recipient_breakdown()["eligible"]
         if contacts:
             c = contacts[0]
             vars_map = {"name": c.name, "email": c.email, "phone": c.phone,
@@ -5881,7 +5928,7 @@ class MainWindow(ctk.CTk):
         if hasattr(self, "_em_preview_text"):
             self._em_preview_text.grid_remove()
         self._em_card_preview_host.grid()
-        contacts = [c for c in self.contacts if c.email and not c.opted_out and not c.bounced]
+        contacts = self._email_recipient_breakdown()["eligible"]
         vars_map = {"name": "", "email": "", "phone": "", "sender": self._em_from_name.get()}
         if contacts:
             contact = contacts[0]
@@ -5928,7 +5975,7 @@ class MainWindow(ctk.CTk):
         """Item 10 of the Live Testing Findings pass: makes the "Recipients"
         count clickable/expandable, listing exactly which contacts are
         included instead of leaving the user to guess from a bare number."""
-        contacts = [c for c in self.contacts if c.email and not c.opted_out and not c.bounced]
+        contacts = self._email_recipient_breakdown()["eligible"]
         dlg = ctk.CTkToplevel(self)
         dlg.title("Email Recipients")
         center_on_parent(dlg, 420, 480, self)

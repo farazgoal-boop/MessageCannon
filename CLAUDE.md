@@ -6093,6 +6093,15 @@ button is the guaranteed-working path regardless).
 **Git**: uncommitted, working tree only, per this file's standing "commit/push is the user's call"
 discipline.
 
+## Release v1.8.1 correction (2026-09-03)
+
+**CHECKPOINT: complete.** Imported email files are persisted as separate selectable records,
+rather than only one latest-email set. The selected file drives the campaign, recipient dialog,
+live preview, test email, and confirmation exclusions. The existing **All email contacts** option
+remains available and is still the default for existing installations. Full imported HTML remains
+a real `text/html` MIME part. Focused UI tests pass 23/23 across Compose, HTML import, and visual
+card mode; top-level plain tests pass 229/229. Version bumped to 1.8.1.
+
 ## Release v1.8.0 — recent email-list scope and real HTML delivery (2026-09-03)
 
 **CHECKPOINT: complete.** Compose now has a persisted recipient-scope selector: the existing
