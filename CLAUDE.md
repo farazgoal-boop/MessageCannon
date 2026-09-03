@@ -6092,3 +6092,17 @@ button is the guaranteed-working path regardless).
 
 **Git**: uncommitted, working tree only, per this file's standing "commit/push is the user's call"
 discipline.
+
+## Release v1.8.0 — recent email-list scope and real HTML delivery (2026-09-03)
+
+**CHECKPOINT: complete.** Compose now has a persisted recipient-scope selector: the existing
+default remains **All email contacts**, and a completed contact import records its approved email
+members and automatically selects **Latest imported list only**. Older contacts remain stored and
+can be included again by switching the selector back; no existing contact or WhatsApp workflow is
+deleted or changed. The recipient count, exclusion explanation, live preview, test email, and real
+campaign send all use the same selected scope.
+
+The HTML send path was verified and kept intact: imported/full card HTML remains the real
+`text/html` MIME part, with a separate plain-text alternative and compliance footer. No flattening
+or alternate sender was introduced. Focused Compose tests pass 12/12 and top-level plain tests
+pass 229/229. Version bumped to 1.8.0; release commit/tag/push follows this checkpoint.

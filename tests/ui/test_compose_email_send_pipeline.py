@@ -231,6 +231,23 @@ def test_card_html_reaches_the_wire_unmodified_except_tokens_and_footer(window, 
     assert "STOP" in html_part
 
 
+def test_full_imported_html_document_is_sent_as_html_part(window):
+    html_document = (
+        "<!doctype html><html><head><style>.offer{color:red}</style></head>"
+        "<body><div class='offer'><h1>Special offer</h1>"
+        "<a href='https://example.com/buy'>Buy</a></div></body></html>"
+    )
+    msg = window._build_email_message("Offer", "to@test.dev", html_document,
+                                      "Special offer - https://example.com/buy")
+    html_parts = [part for part in msg.walk()
+                  if part.get_content_type() == "text/html"]
+    assert len(html_parts) == 1
+    wire_html = html_parts[0].get_payload(decode=True).decode("utf-8")
+    assert wire_html.startswith("<!doctype html>")
+    assert "<style>.offer{color:red}</style>" in wire_html
+    assert "<a href='https://example.com/buy'>Buy</a>" in wire_html
+
+
 def test_current_email_templates_returns_card_html_in_card_mode(window):
     window._enter_email_card_mode(CARD_HTML, "S")
     window.update()
@@ -238,6 +255,38 @@ def test_current_email_templates_returns_card_html_in_card_mode(window):
     assert html_t == CARD_HTML
     assert "<" not in plain_t  # plain template is a text rendering
     assert "Buy Now" in plain_t
+
+
+def test_latest_import_scope_excludes_previous_email_contacts(window):
+    window.contacts = [
+        Contact(id=1, name="Recent", phone="+1000000001", email="recent@test.dev"),
+        Contact(id=2, name="Previous", phone="+1000000002", email="previous@test.dev"),
+    ]
+    window._latest_import_emails = {"recent@test.dev"}
+    window._em_recipient_scope_var.set("Latest imported list only")
+    window._refresh_compose_email_recipients()
+
+    breakdown = window._email_recipient_breakdown()
+
+    assert [contact.email for contact in breakdown["eligible"]] == ["recent@test.dev"]
+    assert breakdown["not_in_latest"] == 1
+    assert "not in latest imported list" in window._em_recip_detail_var.get()
+
+
+def test_all_email_scope_preserves_existing_default_behavior(window):
+    window.contacts = [
+        Contact(id=1, name="Recent", phone="+1000000001", email="recent@test.dev"),
+        Contact(id=2, name="Previous", phone="+1000000002", email="previous@test.dev"),
+    ]
+    window._latest_import_emails = {"recent@test.dev"}
+    window._em_recipient_scope_var.set("All email contacts")
+
+    breakdown = window._email_recipient_breakdown()
+
+    assert {contact.email for contact in breakdown["eligible"]} == {
+        "recent@test.dev", "previous@test.dev"
+    }
+    assert breakdown["not_in_latest"] == 0
 
 
 # ── P3: suppression ─────────────────────────────────────────────────────

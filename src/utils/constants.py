@@ -1,7 +1,7 @@
 # Application Constants
 
 APP_NAME = "MessageCannon Pro"
-APP_VERSION = "1.7.7"
+APP_VERSION = "1.8.0"
 DEVELOPER = "Muhammad Faraz"
 SUPPORT_EMAIL = "farazgoal@gmail.com"
 

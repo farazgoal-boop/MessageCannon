@@ -322,6 +322,7 @@ class ContactImportReviewDialog(ctk.CTkToplevel):
     def _render_summary(self, result: dict) -> None:
         for w in self.content.winfo_children():
             w.destroy()
+        self.main_window._record_latest_import(self.rows)
         self.main_window._reload_contacts()
 
         ctk.CTkLabel(self.content, text="✅ Import complete",
